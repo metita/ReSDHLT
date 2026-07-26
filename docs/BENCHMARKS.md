@@ -1,6 +1,6 @@
 # Mediciones
 
-Todo lo de acá se midió con `scripts/compilebench.py` sobre mapas reales de CS 1.6.
+Todo lo de aquí se midió con `scripts/compilebench.py` sobre mapas reales de CS 1.6.
 Registro también los **resultados negativos**, porque saber que algo *no* sirve evita perder tiempo
 después.
 
@@ -65,7 +65,7 @@ Medición más limpia (`-threads 1`, 4 corridas, `koth_sandy`), mostrando todas 
 | LTO | 2.73 / 3.52 / 3.10 / 2.65 | 2.65s |
 
 **La varianza dentro de cada variante (hasta 0.87s) es mayor que la diferencia entre variantes
-(0.10s).** No hay evidencia de que `-O3` o LTO mejoren nada acá.
+(0.10s).** No hay evidencia de que `-O3` o LTO mejoren nada aquí.
 
 **Decisión:** LTO queda **opt-in** (`-DSDHLT_LTO=ON`), no por defecto. Encender LTO por defecto
 alargaría los builds sin beneficio demostrado. `-O3` queda simplemente porque es el default de
@@ -73,7 +73,7 @@ alargaría los builds sin beneficio demostrado. `-O3` queda simplemente porque e
 
 Tamaño del binario `sdHLRAD`: `-O2` 442KB, `-O3` 482KB, LTO 438KB.
 
-> Si querés decidir para *tu* máquina, corré esto y mirá si la diferencia supera tu propia varianza:
+> Si quieres decidir para *tu* máquina, ejecuta esto y mira si la diferencia supera tu propia varianza:
 > ```
 > python3 scripts/compilebench.py --tools <dir> --map <mapa> --threads 1 --runs 5
 > ```
@@ -124,7 +124,7 @@ entorno compartido.
 
 ### 4.3 El intento de optimización, y por qué se revirtió ❌
 
-Tres de los cuatro caminos recursivos de `TestLine_r` son **tail calls**, así que lo reescribí como loop.
+Tres de los cuatro caminos recursitú de `TestLine_r` son **tail calls**, así que lo reescribe como loop.
 La iluminación salió **byte-idéntica** en los tres mapas, o sea la transformación era correcta. Pero fue
 más lenta, dos veces:
 
@@ -152,7 +152,7 @@ Contando los rayos por origen apareció el dato que importaba. `koth_sandy`, de 
 
 O sea el **96% del ray casting es el loop de luz de cielo**, que lanza un rayo por cada normal de un
 hemisferio subdividido. `g_numskynormals` es `{0, 6, 18, 66, 258, 1026, 4098, 16386, 65538}` y `-softsky`
-elegía nivel 7 encendido o nivel 4 apagado: **16.386 rayos o 258**, un salto de 63× sin nada en medio.
+eligea nivel 7 encendido o nivel 4 apagado: **16.386 rayos o 258**, un salto de 63× sin nada en medio.
 
 **Curva medida** (`koth_sandy`, 2 hilos, comparado contra nivel 7):
 
@@ -184,7 +184,7 @@ La idea siguiente parecía la mejor: el 67% de los rayos de cielo terminan oclui
 muestra en interior se lanzan miles de rayos para descubrir que no se ve el cielo. Un test de visibilidad
 por leaf saltaría el loop entero **sin cambiar la iluminación**.
 
-**Medí el techo antes de escribir una línea de código.** Conté cuántas entradas al loop terminan con
+**Mide el techo antes de escribir una línea de código.** Conté cuántas entradas al loop terminan con
 **cero** impactos, o sea el loop completo desperdiciado:
 
 | mapa | entradas al loop | con cero impactos | techo del culling |
@@ -239,8 +239,8 @@ mayoría de esos pares no comparte arista.
 el chequeo `texturenum` y se perderían fusiones. Parseé el lump: 34 entradas, 34 únicas, 0 caras usando
 un texinfo duplicado. Hipótesis descartada.
 
-**Fusiones residuales en el BSP final** (`scripts/bspcheck.py`). Acá estuvo el hallazgo importante.
-Un primer conteo naive dio **697** pares "fusionables" en ba_coliseum, lo cual habría sido enorme.
+**Fusiones residuales en el BSP final** (`scripts/bspcheck.py`). Aquí estuvo el hallazgo importante.
+Un primer conteo naive dio **697** pares "fusionables" en ba_coliseum, lo cual habrea sido enorme.
 Pero `sdHLBSP` hace `MergePlaneFaces()` y **después** `SubdivideFace()`: las caras coplanares adyacentes
 del BSP final son, en su mayoría, subdivisiones **deliberadas** para mantener el extent de lightmap
 dentro de `MAX_SURFACE_EXTENT`. Fusionarlas rompería el software renderer y el HLDS.
@@ -284,7 +284,7 @@ byte-idéntico. O sea **VIS y RAD ya son independientes del orden**; toda la var
 - `FindIntPlane()` agrega al arreglo global de planos bajo lock: el hilo que gana define el índice del
   plano. El código original incluso trae el comentario *"BUG: there might be some multithread issue
   --vluzacn"* en ese lugar.
-- `WriteFace()` hace `fprintf` directo a los archivos `.p0`–`.p3` bajo lock: el orden de finalización
+- `WriteFace()` hace `fprintf` directo a los architú `.p0`–`.p3` bajo lock: el orden de finalización
   define el orden de las caras.
 
 Ambos índices llegan a BSP (que es monohilo), y de ahí salían los conteos distintos de clipnodes.

@@ -102,7 +102,7 @@ impl Default for App {
             done: HashMap::new(),
             total_secs: None,
             last_ok: None,
-            status: String::from("Elegí un .map y la carpeta de herramientas."),
+            status: String::from("Elige un .map y la carpeta de herramientas."),
         }
     }
 }
@@ -272,7 +272,7 @@ impl App {
         section(
             ui,
             "Preset",
-            "Un punto de partida. Después podés ajustar cualquier pestaña.",
+            "Un punto de partida. Después puedes ajustar cualquier pestaña.",
         );
         ui.horizontal(|ui| {
             for p in [Preset::Draft, Preset::Recommended, Preset::Release] {
@@ -293,7 +293,7 @@ impl App {
         );
 
         ui.add_space(8.0);
-        section(ui, "Etapas", "Podés saltear etapas si ya las corriste");
+        section(ui, "Etapas", "Puedes saltar etapas si ya las ejecutaste");
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut self.opts.run_csg, "CSG")
                 .on_hover_text(Stage::Csg.purpose());
@@ -308,9 +308,9 @@ impl App {
         row(
             ui,
             "Hilos",
-            "0 = usar todos los núcleos, que es lo que querés. Este fork arregló \
-             dos bugs por los que las tools corrían en un solo hilo. Poné un número \
-             solo si querés dejar CPU libre para otra cosa.",
+            "0 = usar todos los núcleos, que es lo que quieres. Este fork arregló \
+             dos bugs por los que las tools corrían en un solo hilo. Pon un número \
+             solo si quieres dejar CPU libre para otra cosa.",
             Some("0 = automático"),
             |ui| {
                 ui.add(egui::Slider::new(&mut self.opts.threads, 0..=64));
@@ -330,8 +330,8 @@ impl App {
             ui,
             "Chart de límites",
             "Al final, cada herramienta imprime cuánto de cada límite del motor \
-             estás usando. Es como te enterás de que vas camino a un límite antes \
-             de chocarlo. Dejalo activado.",
+             estás usando. Es como te enteras de que vas camino a un límite antes \
+             de chocarlo. Déjalo activado.",
             Some("recomendado"),
             |ui| ui.checkbox(&mut self.opts.chart, ""),
         );
@@ -340,7 +340,7 @@ impl App {
             ui,
             "Salida detallada",
             "Las herramientas imprimen mucho más sobre lo que hacen. Útil cuando \
-             algo falla y no sabés por qué; para uso normal solo ensucia el log.",
+             algo falla y no sabes por qué; para uso normal solo ensucia el log.",
             None,
             |ui| ui.checkbox(&mut self.opts.verbose, ""),
         );
@@ -368,7 +368,7 @@ impl App {
             "Embeder texturas",
             "Copia dentro del .bsp todas las texturas que usa el mapa. El mapa \
              funciona sin que el jugador tenga el WAD, a cambio de un .bsp mucho más \
-             grande. Para mapas de servidor suele ser lo que querés; para un mapa \
+             grande. Para mapas de servidor suele ser lo que quieres; para un mapa \
              con WAD propio distribuido aparte, no.",
             None,
             |ui| ui.checkbox(&mut self.opts.nowadtextures, ""),
@@ -381,14 +381,14 @@ impl App {
              siempre el mismo .bsp. Activar esto recupera el comportamiento viejo y \
              ahorra ~0.1% de tiempo, a cambio de que dos compilados difieran. \
              Sirve de poco.",
-            Some("dejalo apagado"),
+            Some("déjalo apagado"),
             |ui| ui.checkbox(&mut self.opts.nodeterministic, ""),
         );
 
         row(
             ui,
             "Extender el mundo",
-            "Sube el límite de geometría más allá de +/-32768 unidades. Solo si tu \
+            "Sube el límite de geometría más allí de +/-32768 unidades. Solo si tu \
              mapa realmente excede el tamaño estándar; 0 deja el valor por defecto.",
             Some("0 = normal"),
             |ui| {
@@ -435,9 +435,9 @@ impl App {
             ui,
             "Subdivide",
             "Tamaño máximo de una cara antes de partirla. 240 NO es un número \
-             conservador: es el techo que impone MAX_SURFACE_EXTENT. Si lo subís, el \
+             conservador: es el techo que impone MAX_SURFACE_EXTENT. Si lo subes, el \
              mapa deja de cargar en el software renderer y en el HLDS. Bajarlo genera \
-             más caras y baja los FPS. Dejalo en 240.",
+             más caras y baja los FPS. Déjalo en 240.",
             Some("240, no lo toques"),
             |ui| {
                 ui.add(egui::Slider::new(&mut self.opts.subdivide, 64..=512));
@@ -448,7 +448,7 @@ impl App {
             ui,
             "Max node size",
             "Tamaño máximo de un nodo del árbol. Valores más chicos dan más nodos y \
-             cortes más finos; más grandes, lo contrario. El default anda bien casi \
+             cortes más finos; más grandes, lo contrario. El default funciona bien casi \
              siempre.",
             Some("1024"),
             |ui| {
@@ -522,7 +522,7 @@ impl App {
         row(
             ui,
             "Distancia máxima",
-            "Recorta la visibilidad más allá de N unidades. Puede ayudar en mapas \
+            "Recorta la visibilidad más allí de N unidades. Puede ayudar en mapas \
              enormes y abiertos, pero mal usado produce geometría que aparece de \
              golpe. 0 lo desactiva.",
             Some("0 = sin límite"),
@@ -539,7 +539,7 @@ impl App {
             ui,
             "RAD",
             "Calcula la iluminación. Es ~95% del tiempo de compilación, así que casi \
-             todo lo que ajustes acá se nota en el reloj.",
+             todo lo que ajustes aquí se nota en el reloj.",
         );
 
         ui.label(
@@ -600,7 +600,7 @@ impl App {
         row(
             ui,
             "RAD rápido",
-            "Modo borrador: sacrifica calidad por velocidad. Útil mientras construís, \
+            "Modo borrador: sacrifica calidad por velocidad. Útil mientras construyes, \
              nunca para publicar.",
             None,
             |ui| ui.checkbox(&mut self.opts.rad_fast, ""),
@@ -767,7 +767,7 @@ impl App {
             .show(ui, |ui| {
                 if self.log.is_empty() {
                     ui.label(
-                        RichText::new("La salida de las herramientas aparece acá.")
+                        RichText::new("La salida de las herramientas aparece aquí.")
                             .color(MUTED)
                             .small(),
                     );

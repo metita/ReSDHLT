@@ -4,13 +4,13 @@ RAD es **más del 95%** del tiempo de compilación, así que es el único lugar 
 ganar. Esta guía es para que midas en tu CPU, que tiene más núcleos y menos ruido que el entorno donde
 hice el análisis (2 núcleos, ±8% de varianza).
 
-No necesitás instalar nada: el profiler está dentro de RAD.
+No necesitas instalar nada: el profiler está dentro de RAD.
 
 ---
 
 ## 1. Perfil rápido (sin recompilar)
 
-Con los binarios normales ya tenés el nivel de fases:
+Con los binarios normales ya tienes el nivel de fases:
 
 ```powershell
 sdHLRAD -profile -threads 1 mimapa
@@ -58,7 +58,7 @@ TestSegmentAgainstOpaqueList   38965499 (count only)
 CheckVisBit                    43864129 (count only)
 ```
 
-**Ojo:** este build es más lento por la instrumentación misma. Sirve para *entender* dónde va el trabajo,
+**Atención:** este build es más lento por la instrumentación misma. Sirve para *entender* dónde va el trabajo,
 no para medir tiempos. Para medir tiempos usá el build normal.
 
 ## 3. Lo que ya está descartado
@@ -89,7 +89,7 @@ skylight. `-softsky` solo ofrecía nivel 7 (16.386 rayos por muestra) o nivel 4 
 | **6 (default)** | **4.098** | **1.84×** | **1/255** |
 | 7 | 16.386 | 1.00× | 0 |
 
-`-skylevel 7` reproduce la iluminación de upstream byte a byte si la necesitás.
+`-skylevel 7` reproduce la iluminación de upstream byte a byte si la necesitas.
 
 ## 5. Dónde sí buscar todavía
 
@@ -116,7 +116,7 @@ aceptable. Y ahí la validación cambia: ya no sirve exigir el lump `lighting` b
 ### Culling de cielo por leaf: ya medido, no paga
 
 Parecía la mejor idea: 67% de los rayos de cielo se ocluyen, así que saltear el loop para muestras que no
-ven cielo sería gratis en calidad. Medí el techo antes de implementarlo, contando entradas al loop con
+ven cielo sería gratis en calidad. Mide el techo antes de implementarlo, contando entradas al loop con
 cero impactos:
 
 | mapa | entradas | cero impactos | techo |
@@ -136,10 +136,10 @@ ocluidas. Es real pero complejo y aproxima, así que ya no se valida con hash by
 
 ## 6. Cómo medir un cambio, sin engañarse
 
-Tres cosas que aprendí midiendo acá y te ahorran errores:
+Tres cosas que aprendí midiendo aquí y te ahorran errores:
 
-**Intercalá A/B.** Una medición no intercalada me dio una "regresión del 20%" que era otra compilación
-corriendo en la misma máquina. Alterná binario viejo / binario nuevo en la misma tanda:
+**Intercala A/B.** Una medición no intercalada me dio una "regresión del 20%" que era otra compilación
+corriendo en la misma máquina. Alterna binario viejo / binario nuevo en la misma tanda:
 
 ```powershell
 python scripts\compilebench.py --tools tools_viejo --map m.map --threads 1 --runs 4 --json a.json
@@ -147,11 +147,11 @@ python scripts\compilebench.py --tools tools_nuevo --map m.map --threads 1 --run
 python scripts\compilebench.py --compare a.json b.json
 ```
 
-**Mirá todas las corridas, no el promedio.** `compilebench.py` imprime `all_totals`. Si la dispersión
+**Mira todas las corridas, no el promedio.** `compilebench.py` imprime `all_totals`. Si la dispersión
 dentro de una variante supera la diferencia entre variantes, no mediste nada. Eso es exactamente lo que
 pasó con `-O3` y LTO.
 
-**Verificá correctitud aparte del tiempo.** Una optimización de ray casting que no pretende cambiar el
+**Verifica correctitud aparte del tiempo.** Una optimización de ray casting que no pretende cambiar el
 resultado debe dar el lump `lighting` idéntico:
 
 ```powershell

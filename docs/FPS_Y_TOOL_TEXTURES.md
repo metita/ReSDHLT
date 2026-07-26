@@ -33,7 +33,7 @@ Referencias prácticas para CS 1.6:
 | 800 – 1000 | Empieza a doler en máquinas modestas |
 | > 1000 | Zona de problemas |
 
-Recorré el mapa anotando `wpoly` en los mismos puntos antes y después de cada cambio. Sin eso estás
+Reejecuta el mapa anotando `wpoly` en los mismos puntos antes y después de cada cambio. Sin eso estás
 adivinando. El script `scripts/compilebench.py` de este repo te da el conteo total de caras del BSP,
 que es útil como número global, pero `r_speeds` es el que te dice qué pasa **en cada lugar**.
 
@@ -45,12 +45,12 @@ las tapas de cajas a las que no se sube.
 
 Es la mejora de FPS más directa y de riesgo cero: si el jugador no la ve, no debería costar nada.
 
-> Ojo: NULL elimina la cara pero **no** el bloqueo de visibilidad ni la colisión. El brush sigue siendo
-> sólido y sigue bloqueando VIS. Es exactamente lo que querés.
+> Atención: NULL elimina la cara pero **no** el bloqueo de visibilidad ni la colisión. El brush sigue siendo
+> sólido y sigue bloqueando VIS. Es exactamente lo que quieres.
 
 ## 3. HINT y SKIP — controlar los cortes del BSP
 
-- **HINT**: fuerza al BSP a cortar en ese plano, creando un límite de leaf donde vos quieras.
+- **HINT**: fuerza al BSP a cortar en ese plano, creando un límite de leaf donde ti quieras.
 - **SKIP**: la cara no se dibuja ni se tiene en cuenta; se usa en las otras caras del brush de hint.
 
 Un brush de hint típico: la cara que define el corte con `HINT`, las otras cinco con `SKIP`.
@@ -64,7 +64,7 @@ conteo de caras y hacen VIS más lento, empeorando las dos cosas que querías ar
 
 ## 4. SOLIDHINT y BEVELHINT — evitar subdivisión inútil
 
-Acá está el techo que conviene entender. El BSP subdivide las caras porque el motor no puede tener
+Aquí está el techo que conviene entender. El BSP subdivide las caras porque el motor no puede tener
 lightmaps más grandes que cierto extent:
 
 ```c
@@ -82,7 +82,7 @@ Lo que sí se puede es evitar cortes innecesarios:
   Clásico en terreno, rampas, escaleras y formas complejas, donde el BSP genera un picadillo de
   caras chiquitas sin necesidad.
 - **BEVELHINT** (propio de SDHLT): actúa como `SOLIDHINT` **y** `BEVEL` a la vez — evita la
-  subdivisión y bisela los clipnodes en la misma pasada. Es lo que querés en terreno y en clipping de
+  subdivisión y bisela los clipnodes en la misma pasada. Es lo que quieres en terreno y en clipping de
   escaleras en espiral.
 
 Estas dos suelen dar reducciones grandes de conteo de caras en geometría irregular, que es justo donde
@@ -119,7 +119,7 @@ el margen está en no generar las caras de entrada.
 
 ## 7. VIS: `-full` y bloqueo de visibilidad
 
-- Compilá el release final con **`-full`** en VIS. Tarda más, da el PVS más ajustado, y eso es menos
+- Compila el release final con **`-full`** en VIS. Tarda más, da el PVS más ajustado, y eso es menos
   `wpoly` en juego.
 - Lo que de verdad baja el PVS es **bloquear la línea de visión**: pasillos con codos, desniveles,
   paredes que cortan sightlines largas. Un mapa abierto donde se ve todo desde todas partes va a tener
@@ -131,7 +131,7 @@ el margen está en no generar las caras de entrada.
 
 RAD **no afecta `wpoly`**. Los lightmaps no cambian la geometría que se dibuja. Subir la calidad de luz
 te cuesta tiempo de compilación y algo de tamaño del BSP, pero **no FPS en juego**. Es el área donde
-podés ser generoso sin miedo:
+puedes ser generoso sin miedo:
 
 - `-extra` (que en SDHLT sube `-bounce` a mínimo 12)
 - `-chop` / `-texchop` más bajos para más detalle, a costa de tiempo y tamaño

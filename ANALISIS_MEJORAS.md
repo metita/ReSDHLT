@@ -5,7 +5,7 @@ Herramientas de compilación de mapas GoldSrc (**CSG, BSP, VIS, RAD** + RIPENT) 
 
 Documentos relacionados:
 
-- **`docs/FPS_Y_TOOL_TEXTURES.md`** — cómo bajar `wpoly` de verdad. Si hacés mapas, ese es el que importa.
+- **`docs/FPS_Y_TOOL_TEXTURES.md`** — cómo bajar `wpoly` de verdad. Si haces mapas, ese es el que importa.
 - **`docs/BENCHMARKS.md`** — todas las mediciones, incluidos los resultados negativos.
 
 ---
@@ -48,7 +48,7 @@ superior, y los handles vivían en arrays fijos en stack. **Reproducido: SIGSEGV
 `-threads 5000`. Arreglado con `ClampNumThreads()` central.
 
 **1.4 Dispatch con atomic en vez del lock global.** `GetThreadWork()` tomaba el lock global en cada
-unidad de trabajo. Ganancia modesta acá (10–22% del dispatcher, con 2 núcleos no hay mucha contención);
+unidad de trabajo. Ganancia modesta aquí (10–22% del dispatcher, con 2 núcleos no hay mucha contención);
 lo importante fue verificar que **200.000 unidades se despachan exactamente una vez** con 1/2/4/16/64
 hilos.
 
@@ -67,7 +67,7 @@ después del `-O3` de `CMAKE_CXX_FLAGS_RELEASE`, y GCC respeta el último `-O`. 
 optimización. Ahora default a `Release`.
 
 **1.8 `install` y CPack.** No había forma de obtener una carpeta usable: los binarios quedaban mezclados
-con los archivos fuente en `tools/`. Ahora `cmake --install` deja los 5 binarios más
+con los architú fuente en `tools/`. Ahora `cmake --install` deja los 5 binarios más
 `sdhlt.wad`/`fgd`/`lights.rad` y CPack genera ZIP/TGZ.
 
 **1.9 CI corría `ctest` sin tests** y fallaba siempre. Reemplazado por un smoke test de las 5 tools.
@@ -101,7 +101,7 @@ permitió verificar todo lo de arriba contra mapas reales de CS.
 
 O sea: todos los cambios son **demostrablemente preservadores de salida**. Las tools son más rápidas,
 más robustas y no crashean, y el `.bsp` que producen es exactamente el mismo. Eso también significa,
-para ser claro: **los FPS en juego no cambian por este fork**. Cambia el tiempo que esperás compilando.
+para ser claro: **los FPS en juego no cambian por este fork**. Cambia el tiempo que esperas compilando.
 
 ---
 
@@ -111,7 +111,7 @@ Esta sección importa tanto como la anterior. Tres ítems del roadmap original s
 descartaron **con evidencia**, en lugar de implementarse a ciegas.
 
 ### 3.1 Optimizar RAD ✅ — 1.65× conseguido
-RAD es >95% del tiempo. `perf` está bloqueado acá y gprof dio datos falsos (reportó `MakeTnode()` con
+RAD es >95% del tiempo. `perf` está bloqueado aquí y gprof dio datos falsos (reportó `MakeTnode()` con
 93.301.204 llamadas; un contador mostró **78**). Así que el profiler ahora está **dentro de RAD**
 (`-profile`), funciona en Windows sin instalar nada, y sus conteos coinciden con las entradas creíbles de
 gprof.
@@ -119,15 +119,15 @@ gprof.
 Hot spot real: **`TestLine_r`, 1.849.616.672 entradas** por mapa. `GatherSampleLight` es ~94% del tiempo
 de `BuildFacelights`.
 
-**Intenté la optimización y falló.** Tres de los cuatro caminos recursivos son tail calls, así que
-reescribí la función como loop. La iluminación salió **byte-idéntica** (correcta), pero más lenta: 2.69s
+**Intenté la optimización y falló.** Tres de los cuatro caminos recursitú son tail calls, así que
+reescribe la función como loop. La iluminación salió **byte-idéntica** (correcta), pero más lenta: 2.69s
 copiando endpoints y 2.76s con punteros, contra **2.59s** de la recursiva original. GCC ya emite menos
 llamadas recursivas de lo que sugiere el código y las llamadas son baratas por el return stack buffer.
 **Revertido**; quedó solo la instrumentación.
 
 **Pero contar los rayos por origen dio el premio.** El **95.8% de todos los rayos** salen del loop de
 skylight, que lanzaba 16.386 por muestra (nivel 7) cuando `-softsky` solo ofrecía eso o 258 (nivel 4).
-Agregué `-skylevel N` para exponer el medio, y medí la curva: el **nivel 6 usa 4× menos rayos con una
+Agregué `-skylevel N` para exponer el medio, y mide la curva: el **nivel 6 usa 4× menos rayos con una
 diferencia máxima de 1/255**, invisible. Default cambiado a 6:
 
 | mapa | antes | ahora | ganancia |
@@ -196,7 +196,7 @@ Para ser transparente:
   **subestimadas**; los resultados de `-O3`/LTO son inconclusos por ruido.
 - El branch de Windows se verificó por **lógica con stubs**, no compilando con MSVC.
 - Se compilaron **3 mapas reales** (`ba_dust_island`, `ba_coliseum`, `koth_sandy`). Otros dos
-  (`db_snow`, `ar_azteca`) no compilan acá porque les faltan WADs externos.
+  (`db_snow`, `ar_azteca`) no compilan aquí porque les faltan WADs externos.
 - **Nunca se abrió un mapa en CS 1.6.** No hay verificación visual ni medición de `wpoly` en juego. Eso
   es precisamente por lo que no toqué BSP ni RAD.
 

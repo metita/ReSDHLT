@@ -18,7 +18,7 @@ tuvo **un** error en 1.760 líneas: `run_native` en eframe 0.28 espera que el
 closure devuelva `Result`, no `Box<dyn App>` — ese cambio de firma se creía
 posterior a 0.28. Corregido.
 
-Si tocás algo y no compila, los errores de Rust son precisos: casi siempre es un
+Si tocas algo y no compila, los errores de Rust son precisos: casi siempre es un
 tipo o un nombre de método.
 
 ---
@@ -47,7 +47,7 @@ sudo apt install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
    lado de ese archivo.
 2. **Herramientas**: la carpeta con `sdHLCSG`, `sdHLBSP`, `sdHLVIS`, `sdHLRAD`.
    Si compilaste este repo, es `tools/`.
-3. Elegí un preset y dale a **Compilar**.
+3. Elige un preset y dale a **Compilar**.
 
 "Guardar preferencias" deja un `resdhlt-gui.json` al lado del ejecutable.
 
@@ -57,7 +57,7 @@ sudo apt install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
 |---|---|
 | **Borrador** | Ver si el mapa carga y no tiene leaks. VIS rápido, RAD rápido, 1 bounce. La luz y los FPS no son representativos. |
 | **Recomendado** | El de todos los días, y el default al abrir. Calidad completa con las mejoras medidas de este fork. |
-| **Publicar** | Igual que Recomendado pero con `-skylevel 7`. Cuesta ~1.65× más en RAD por una diferencia invisible; solo tiene sentido si necesitás reproducir exactamente la salida del SDHLT original. |
+| **Publicar** | Igual que Recomendado pero con `-skylevel 7`. Cuesta ~1.65× más en RAD por una diferencia invisible; solo tiene sentido si necesitas reproducir exactamente la salida del SDHLT original. |
 
 ## Qué trae de este fork
 
@@ -97,7 +97,7 @@ gui/
     └── runner.rs    ejecuta las 4 etapas y streamea la salida
 ```
 
-Si querés agregar un flag: va en `options.rs` (campo + a `*_args()`) y una fila
+Si quieres agregar un flag: va en `options.rs` (campo + a `*_args()`) y una fila
 en la pestaña que corresponda en `main.rs`.
 
 ### Detalles que quizás no se ven

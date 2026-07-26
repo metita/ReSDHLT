@@ -39,7 +39,7 @@ impl VisMatrix {
             }
             VisMatrix::Sparse => {
                 "Guarda la matriz comprimida. Es el default y el equilibrio correcto \
-                 para casi todos los mapas. Si no sabés qué elegir, dejá este."
+                 para casi todos los mapas. Si no sabes qué elegir, deja este."
             }
             VisMatrix::Off => {
                 "No construye matriz: calcula la visibilidad cuando la necesita. \
@@ -80,7 +80,7 @@ impl VisQuality {
             VisQuality::Full => {
                 "El PVS más ajustado que las herramientas saben calcular. Tarda más \
                  en compilar y da MENOS wpoly en juego, o sea más FPS. \
-                 Usalo siempre en la versión que publicás."
+                 Usalo siempre en la versión que publicas."
             }
         }
     }
@@ -218,9 +218,9 @@ impl Preset {
                  medidas de este fork ya aplicadas. Es también el default al abrir."
             }
             Preset::Release => {
-                "Para la versión que publicás. Igual que Recomendado pero con el \
+                "Para la versión que publicas. Igual que Recomendado pero con el \
                  muestreo de cielo al máximo (-skylevel 7). Cuesta ~1.65x más tiempo \
-                 en RAD por una diferencia que no se ve: solo tiene sentido si querés \
+                 en RAD por una diferencia que no se ve: solo tiene sentido si quieres \
                  reproducir exactamente la salida de SDHLT original."
             }
         }
@@ -265,7 +265,7 @@ pub struct Rule {
 pub fn always_rules() -> Vec<Rule> {
     vec![
         Rule {
-            title: "Dejá los hilos en automático",
+            title: "Deja los hilos en automático",
             body: "Este fork arregló dos bugs por los que las herramientas usaban un \
                    solo hilo: en Linux siempre, y en Windows con CPUs de más de 32 \
                    hilos lógicos. Medido, usar todos los núcleos dio 1.68x en una \
@@ -273,35 +273,35 @@ pub fn always_rules() -> Vec<Rule> {
                    número a mano salvo que quieras dejar CPU libre para otra cosa.",
         },
         Rule {
-            title: "VIS en 'full' para lo que publicás",
+            title: "VIS en 'full' para lo que publicas",
             body: "VIS es lo único que decide cuánto le pide el mapa al motor en cada \
                    frame. 'full' tarda más en compilar y da menos wpoly en juego. \
-                   Compilá con 'fast' mientras construís si querés, pero nunca \
+                   Compila con 'fast' mientras construyes si quieres, pero nunca \
                    publiques un mapa con VIS rápido.",
         },
         Rule {
             title: "No toques -subdivide",
             body: "El límite de 240 no es un número conservador: es el techo que impone \
-                   MAX_SURFACE_EXTENT. Si lo subís, el mapa deja de cargar en el \
+                   MAX_SURFACE_EXTENT. Si lo subes, el mapa deja de cargar en el \
                    software renderer y en el HLDS. Bajarlo genera más caras y baja los \
-                   FPS. Dejalo en 240.",
+                   FPS. Déjalo en 240.",
         },
         Rule {
-            title: "Los FPS los bajás vos, no el compilador",
+            title: "Los FPS los baja el mapper, no el compilador",
             body: "La fusión de caras del BSP ya elimina entre 19% y 46% de las caras \
                    (medido en tres mapas) y el PVS de VIS ya es casi exacto. Lo que \
                    mueve la aguja es NULL en todo lo que no se ve, y \
-                   SOLIDHINT/BEVELHINT en terreno y escaleras. Mirá \
+                   SOLIDHINT/BEVELHINT en terreno y escaleras. Mira \
                    docs/FPS_Y_TOOL_TEXTURES.md.",
         },
         Rule {
             title: "Más calidad de luz no cuesta FPS",
             body: "RAD no cambia la geometría que dibuja el motor, así que -extra y más \
                    bounces te cuestan tiempo de compilación y algo de tamaño de BSP, \
-                   pero cero FPS en juego. Es el lugar donde podés ser generoso.",
+                   pero cero FPS en juego. Es el lugar donde puedes ser generoso.",
         },
         Rule {
-            title: "Mirá el chart cuando compiles en serio",
+            title: "Mira el chart cuando compiles en serio",
             body: "Con 'chart' activado las herramientas imprimen cuánto de cada límite \
                    del motor estás usando. Es la forma de enterarte de que vas camino a \
                    un límite antes de chocarlo.",

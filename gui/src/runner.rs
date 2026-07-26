@@ -189,7 +189,7 @@ pub fn start(opts: Options) -> Job {
                     let _ = tx.send(Msg::Line(
                         LineKind::Error,
                         format!(
-                            "No encontré {} en {}. Revisá la carpeta de herramientas.",
+                            "No encontré {} en {}. Revisa la carpeta de herramientas.",
                             stage.exe(),
                             opts.tools_dir
                         ),
@@ -282,7 +282,7 @@ pub fn start(opts: Options) -> Job {
                 all_ok = false;
                 let _ = tx.send(Msg::Line(
                     LineKind::Error,
-                    format!("{} terminó con error. Se detiene acá.", stage.name()),
+                    format!("{} terminó con error. Se detiene aquí.", stage.name()),
                 ));
                 break;
             }
