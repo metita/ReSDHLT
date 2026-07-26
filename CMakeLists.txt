@@ -286,6 +286,55 @@ target_compile_definitions(VIS PRIVATE SDHLVIS)
 target_compile_definitions(RIPENT PRIVATE SDRIPENT)
 
 #================
+# Install
+#================
+
+# "cmake --install build --prefix <dir>" produces a directory that can be
+# pointed at directly from a map editor's build configuration: the five tools
+# plus the support files a compile needs (sdhlt.wad is required by every map,
+# sdhlt.fgd by the editor, lights.rad by RAD).
+
+install(TARGETS BSP CSG RAD VIS RIPENT
+    RUNTIME DESTINATION .
+)
+
+install(FILES
+        ${CMAKE_SOURCE_DIR}/tools/sdhlt.wad
+        ${CMAKE_SOURCE_DIR}/tools/sdhlt.fgd
+        ${CMAKE_SOURCE_DIR}/tools/lights.rad
+        ${CMAKE_SOURCE_DIR}/tools/settings.txt
+        ${CMAKE_SOURCE_DIR}/tools/wad.cfg
+    DESTINATION .
+)
+
+install(FILES
+        ${CMAKE_SOURCE_DIR}/README.md
+        ${CMAKE_SOURCE_DIR}/CHANGELOG.md
+        ${CMAKE_SOURCE_DIR}/LICENSE.md
+    DESTINATION .
+)
+
+#================
+# Package
+#================
+
+set(CPACK_PACKAGE_NAME "ReSDHLT")
+set(CPACK_PACKAGE_VENDOR "ReSDHLT")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${CMAKE_PROJECT_DESCRIPTION}")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "ReSDHLT")
+set(CPACK_PACKAGE_FILE_NAME "ReSDHLT-${CMAKE_SYSTEM_NAME}")
+set(CPACK_RESOURCE_FILE_LICENSE ${CMAKE_SOURCE_DIR}/LICENSE.md)
+set(CPACK_VERBATIM_VARIABLES ON)
+
+if (${CMAKE_SYSTEM_NAME} MATCHES "Windows")
+    set(CPACK_GENERATOR "ZIP")
+else()
+    set(CPACK_GENERATOR "TGZ")
+endif()
+
+include(CPack)
+
+#================
 # Optimisation
 #================
 
