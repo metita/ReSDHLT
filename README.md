@@ -20,6 +20,7 @@ upstream defaults left significant performance on the table:
 | CMake `-O` level | Release builds were silently downgraded from `-O3` to `-O2` |
 | CMake build type | Unset `CMAKE_BUILD_TYPE` produced unoptimised binaries |
 | Reproducible output | Two compiles of one map produced different BSPs; CSG numbered planes and ordered faces by thread timing |
+| Skylight sampling | ~96% of RAD's rays came from the skylight loop at a needlessly fine level; `-skylevel` now exposes it and defaults to 6, **~1.65x faster RAD** |
 
 ### Documentation
 
@@ -50,6 +51,10 @@ be merged:
 ```sh
 python3 scripts/bspcheck.py yourmap.bsp
 ```
+
+**One deliberate difference from upstream:** RAD defaults to `-skylevel 6`
+instead of 7. That is ~1.65x faster for a maximum per-luxel difference of
+1/255. `-skylevel 7` reproduces upstream's lighting exactly.
 
 RAD carries its own profiler, so no external tooling is needed:
 

@@ -23,6 +23,8 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
 - CI ran `ctest` with no registered tests and always failed that step
 
 ### Added
+- RAD `-skylevel N` (4-8): controls how finely the sky hemisphere is sampled.
+  Measured, the skylight loop is ~96% of all rays RAD casts
 - RAD `-profile`: reports where RAD spends its time, with no external profiler.
   Inner ray-casting counters behind `-DSDHLT_PROFILE=ON` (off by default because
   `TestLine_r` is entered ~1.8 billion times per map)
@@ -39,6 +41,10 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
 - `docs/FPS_Y_TOOL_TEXTURES.md` and `docs/BENCHMARKS.md`
 
 ### Changed
+- **RAD defaults to `-skylevel 6` instead of 7: ~1.65x faster RAD** (ba_dust_island
+  10.09s to 6.21s) for a maximum per-luxel difference of 1/255. This is the one
+  deliberate change to lighting output in this fork; `-skylevel 7` reproduces
+  upstream's lighting byte for byte
 - Threading unified on `std::thread`, replacing the separate Win32 and pthread
   backends (723 lines to 448). Worker handles are now a `std::vector` sized by
   the real thread count instead of stack arrays sized by `MAX_THREADS`
@@ -56,7 +62,10 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
 - The tools are nondeterministic when multi-threaded: two runs of the same
   binary can differ by a few clipnodes/marksurfaces. Use `-threads 1` for
   reproducible output
-- RAD is unoptimised. `TestLine_r` is the hot spot (~1.8 billion entries per
+- 67% of skylight rays still end up occluded. A per-leaf sky visibility test
+  could skip the loop entirely for indoor samples, and unlike lowering the
+  level it would not change the lighting
+- `TestLine_r` is the hot spot (~1.8 billion entries per
   map), but rewriting its tail-call recursion as a loop produced identical
   lighting and was *slower*, so it was reverted. The cost is the number of rays
   cast, not the price of each; the next step is algorithmic

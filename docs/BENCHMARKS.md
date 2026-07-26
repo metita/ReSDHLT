@@ -140,18 +140,50 @@ en copias o indirección de punteros de lo que ahorraban.
 
 **Revertido.** Se quedó solo la instrumentación.
 
-### 4.4 Dónde estaría la ganancia real
+### 4.4 De dónde salen los rayos, y la ganancia real ✅
 
-El perfil apunta a otra cosa:
+Contando los rayos por origen apareció el dato que importaba. `koth_sandy`, de 17.068.356 `TestLine`:
 
-| | ba_dust_island | koth_sandy |
+| origen | rayos | % |
 |---|---|---|
-| rayos `TestLine` por `GatherSampleLight` | **426** | 374 |
-| descensos de árbol por rayo | 30 | 20 |
+| **normales de skylight** | **16.358.753** | **95.8%** (67% de ellos ocluidos) |
+| normales de spread del sol | 26.628 | 0.2% |
+| todo lo demás | 682.975 | 4.0% |
 
-El costo está en **cuántos rayos se lanzan**, no en el precio de cada uno. O sea el próximo paso es
-**algorítmico** (lanzar menos rayos: culling, early-out, caching de visibilidad), no micro-optimización.
-Y eso hay que hacerlo con menos ruido de medición del que tengo acá.
+O sea el **96% del ray casting es el loop de luz de cielo**, que lanza un rayo por cada normal de un
+hemisferio subdividido. `g_numskynormals` es `{0, 6, 18, 66, 258, 1026, 4098, 16386, 65538}` y `-softsky`
+elegía nivel 7 encendido o nivel 4 apagado: **16.386 rayos o 258**, un salto de 63× sin nada en medio.
+
+**Curva medida** (`koth_sandy`, 2 hilos, comparado contra nivel 7):
+
+| nivel | rayos | RAD | vs nivel 7 | dif media | dif max |
+|---|---|---|---|---|---|
+| 4 | 258 | 0.67s | **2.29×** | 0.43/255 | 5/255 |
+| 5 | 1.026 | 0.70s | **2.19×** | 0.14/255 | 2/255 |
+| **6** | **4.098** | **0.83s** | **1.84×** | **0.05/255** | **1/255** |
+| 7 | 16.386 | 1.43s | 1.00× | 0 | 0 |
+
+El nivel 6 es donde la curva quiebra: 4× menos rayos por una diferencia máxima de **1/255 por luxel**,
+que no se puede ver. Confirmado en el mapa pesado `ba_dust_island`: 10.07s → 6.05s, máximo 1/255, y solo
+3.4% de los luxels cambian.
+
+**Implementado:** `-skylevel N` (4 a 8) y **default cambiado a 6**.
+
+| mapa | default nuevo (6) | `-skylevel 7` | ganancia |
+|---|---|---|---|
+| koth_sandy | 0.99s | 1.64s | **1.65×** |
+| ba_dust_island | 6.21s | 10.09s | **1.63×** |
+
+Esta es **la única desviación deliberada** de la equivalencia con upstream en todo el fork. Verificado que
+`-skylevel 7` reproduce el lump `lighting` de upstream **byte a byte** (sha1 `40c7dc1ac1a3da50` en ambos),
+así que el comportamiento viejo está a un flag de distancia.
+
+### 4.5 Lo que queda
+
+Todavía **67% de los rayos de cielo terminan ocluidos**. Para una muestra en interior se lanzan miles de
+rayos para descubrir que no se ve el cielo. Un test previo de visibilidad de cielo por leaf podría saltar
+el loop entero en esos casos, y a diferencia de bajar el nivel, **no cambiaría la iluminación**. Es la
+siguiente pista, y es medible con contadores exactos.
 
 ## 5. Fusión de caras: sin margen real (investigado a fondo)
 

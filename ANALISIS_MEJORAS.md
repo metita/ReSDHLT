@@ -110,7 +110,7 @@ para ser claro: **los FPS en juego no cambian por este fork**. Cambia el tiempo 
 Esta sección importa tanto como la anterior. Tres ítems del roadmap original se investigaron y se
 descartaron **con evidencia**, en lugar de implementarse a ciegas.
 
-### 3.1 Optimizar RAD ⚠️ — perfilado sí, optimizado no
+### 3.1 Optimizar RAD ✅ — 1.65× conseguido
 RAD es >95% del tiempo. `perf` está bloqueado acá y gprof dio datos falsos (reportó `MakeTnode()` con
 93.301.204 llamadas; un contador mostró **78**). Así que el profiler ahora está **dentro de RAD**
 (`-profile`), funciona en Windows sin instalar nada, y sus conteos coinciden con las entradas creíbles de
@@ -125,9 +125,19 @@ copiando endpoints y 2.76s con punteros, contra **2.59s** de la recursiva origin
 llamadas recursivas de lo que sugiere el código y las llamadas son baratas por el return stack buffer.
 **Revertido**; quedó solo la instrumentación.
 
-Lo que el perfil sí indica: **426 rayos `TestLine` por `GatherSampleLight`** y ~30 descensos de árbol por
-rayo. El costo es *cuántos* rayos se lanzan, no cuánto cuesta cada uno, así que el próximo paso es
-algorítmico. Guía completa en `docs/PERFILAR_RAD.md`.
+**Pero contar los rayos por origen dio el premio.** El **95.8% de todos los rayos** salen del loop de
+skylight, que lanzaba 16.386 por muestra (nivel 7) cuando `-softsky` solo ofrecía eso o 258 (nivel 4).
+Agregué `-skylevel N` para exponer el medio, y medí la curva: el **nivel 6 usa 4× menos rayos con una
+diferencia máxima de 1/255**, invisible. Default cambiado a 6:
+
+| mapa | antes | ahora | ganancia |
+|---|---|---|---|
+| koth_sandy | 1.64s | 0.99s | **1.65×** |
+| ba_dust_island | 10.09s | 6.21s | **1.63×** |
+
+Es la única desviación deliberada de la equivalencia con upstream; `-skylevel 7` la reproduce byte a byte.
+Queda pendiente: el **67% de los rayos de cielo terminan ocluidos**, y un test de visibilidad de cielo por
+leaf los saltaría **sin cambiar la iluminación**. Detalle en `docs/PERFILAR_RAD.md`.
 
 ### 3.2 Mejorar `TryMerge` ❌ — medido: 0.7% de margen
 Investigado a fondo esta vez, no descartado por precaución. Cuatro líneas de evidencia:

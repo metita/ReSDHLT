@@ -65,6 +65,8 @@ no para medir tiempos. Para medir tiempos usá el build normal.
 
 Para que no gastes tiempo dos veces:
 
+- **Bajar más el nivel de skylight.** Nivel 5 y 4 dan poco más de velocidad que el 6 (2.19× y 2.29× vs
+  1.84×) pero la diferencia visible crece rápido (2/255 y 5/255). El 6 es el punto de quiebre.
 - **Convertir la recursión de `TestLine_r` en loop.** Tres de sus cuatro caminos son tail calls, así que
   parece la optimización obvia. La hice: la iluminación salió byte-idéntica (correcta) pero **más lenta**,
   tanto copiando endpoints (2.69s vs 2.59s) como con punteros (2.76s). GCC ya emite menos llamadas
@@ -74,7 +76,22 @@ Para que no gastes tiempo dos veces:
   `BENCHMARKS.md` §3.
 - **Fusión de caras / `TryMerge`.** 0.7% de margen. Detalle en `BENCHMARKS.md` §5.
 
-## 4. Dónde sí buscar
+## 4. Lo que YA se consiguió: `-skylevel`
+
+Contar rayos por origen dio el hallazgo grande: el **95.8% de todos los rayos** salen del loop de
+skylight. `-softsky` solo ofrecía nivel 7 (16.386 rayos por muestra) o nivel 4 (258). Ahora hay
+`-skylevel N`:
+
+| nivel | rayos | vs nivel 7 | dif max |
+|---|---|---|---|
+| 4 | 258 | 2.29× | 5/255 |
+| 5 | 1.026 | 2.19× | 2/255 |
+| **6 (default)** | **4.098** | **1.84×** | **1/255** |
+| 7 | 16.386 | 1.00× | 0 |
+
+`-skylevel 7` reproduce la iluminación de upstream byte a byte si la necesitás.
+
+## 5. Dónde sí buscar todavía
 
 El dato importante del perfil:
 
@@ -96,7 +113,14 @@ sentido son algorítmicas:
 Cualquiera de esas **cambia la iluminación**, así que hay que decidir explícitamente cuánta desviación es
 aceptable. Y ahí la validación cambia: ya no sirve exigir el lump `lighting` byte-idéntico.
 
-## 5. Cómo medir un cambio, sin engañarse
+### La pista más fuerte que queda
+
+El **67% de los rayos de cielo terminan ocluidos**. Para una muestra en interior se lanzan miles de rayos
+para descubrir que no se ve el cielo. Un test de visibilidad de cielo **por leaf** saltaría el loop entero
+en esos casos, y a diferencia de bajar el nivel **no cambiaría la iluminación** — así que se puede validar
+exigiendo el lump `lighting` byte-idéntico. Es la mejor relación ganancia/riesgo que queda.
+
+## 6. Cómo medir un cambio, sin engañarse
 
 Tres cosas que aprendí midiendo acá y te ahorran errores:
 
