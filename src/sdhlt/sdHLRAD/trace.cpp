@@ -4,6 +4,7 @@
 #include "log.h" //--vluzacn
 #include "winding.h"
 #include "qrad.h"
+#include "profiling.h"
 
 // #define      ON_EPSILON      0.001
 
@@ -313,6 +314,7 @@ int             TestLine_r(const int node, const vec3_t start, const vec3_t stop
 						   , vec_t *skyhit
 						   )
 {
+    PROF_CALL(PROF_TESTLINE_R);
     tnode_t*        tnode;
     float           front, back;
     vec3_t          mid;
@@ -420,6 +422,7 @@ int             TestLine(const vec3_t start, const vec3_t stop
 						 , vec_t *skyhit
 						 )
 {
+    PROF_CALL(PROF_TESTLINE);
 	int linecontent = 0;
     return TestLine_r(0, start, stop
 		, linecontent

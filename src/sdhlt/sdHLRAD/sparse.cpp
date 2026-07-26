@@ -1,4 +1,5 @@
 #include "qrad.h"
+#include "profiling.h"
 
 
 
@@ -139,6 +140,7 @@ static bool     CheckVisBitSparse(unsigned x, unsigned y
 								  , unsigned int &next_index
 								  )
 {
+    PROF_CALL(PROF_CHECKVISBIT);
     int                offset;
 
     	VectorFill(transparency_out, 1.0);

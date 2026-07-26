@@ -20,6 +20,7 @@
 #include <string>
 
 #include "qrad.h"
+#include "profiling.h"
 
 
 /*
@@ -2748,6 +2749,7 @@ static void     Usage()
     Log("    -texdata #      : Alter maximum texture memory limit (in kb)\n");
     Log("    -lightdata #    : Alter maximum lighting memory limit (in kb)\n"); //lightdata
     Log("    -chart          : display bsp statitics\n");
+    Log("    -profile         : report where RAD spends its time\n");
     Log("    -low | -high    : run program an altered priority level\n");
     Log("    -nolog          : Do not generate the compile logfiles\n");
     Log("    -threads #      : manually specify the number of threads to run\n");
@@ -3486,6 +3488,10 @@ int             main(const int argc, char** argv)
         {
             g_incremental = true;
         }
+        else if (!strcasecmp(argv[i], "-profile"))
+        {
+            g_profile = true;
+        }
         else if (!strcasecmp(argv[i], "-chart"))
         {
             g_chart = true;
@@ -4068,6 +4074,7 @@ int             main(const int argc, char** argv)
     WriteBSPFile(g_source);
 
     end = I_FloatTime();
+    ProfReport(end - start);
     LogTimeElapsed(end - start);
     // END RAD
 

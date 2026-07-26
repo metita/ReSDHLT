@@ -29,6 +29,15 @@ endif()
 
 option(SDHLT_LTO "Enable link time optimisation for Release builds." OFF)
 
+# Counters in the innermost ray-casting functions. Off by default: TestLine_r is
+# entered ~1.8 billion times per map, so even a disabled check is not free.
+# Phase-level timing via RAD's -profile works without this.
+option(SDHLT_PROFILE "Instrument the inner ray-casting functions." OFF)
+if (SDHLT_PROFILE)
+    add_compile_definitions(SDHLT_PROFILE)
+    message("${CMAKE_PROJECT_NAME} > Inner-loop profiling counters enabled")
+endif()
+
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/tools)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/tools)
 
@@ -58,6 +67,7 @@ set(COMMON_SOURCES
     ${COMMON_DIR}/filelib.cpp
     ${COMMON_DIR}/log.cpp
     ${COMMON_DIR}/mathlib.cpp
+    ${COMMON_DIR}/profiling.cpp
     ${COMMON_DIR}/messages.cpp
     ${COMMON_DIR}/scriplib.cpp
     ${COMMON_DIR}/threads.cpp
@@ -75,6 +85,7 @@ set(COMMON_HEADERS
     ${COMMON_DIR}/hlassert.h
     ${COMMON_DIR}/log.h
     ${COMMON_DIR}/mathlib.h
+    ${COMMON_DIR}/profiling.h
     ${COMMON_DIR}/mathtypes.h
     ${COMMON_DIR}/messages.h
     ${COMMON_DIR}/scriplib.h

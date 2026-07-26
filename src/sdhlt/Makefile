@@ -48,6 +48,7 @@ COMMON_CPPFILES = \
 			common/filelib.cpp \
 			common/log.cpp \
 			common/mathlib.cpp \
+			common/profiling.cpp \
 			common/messages.cpp \
 			common/scriplib.cpp \
 			common/threads.cpp \

@@ -1,4 +1,5 @@
 #include "qrad.h"
+#include "profiling.h"
 
 // =====================================================================================
 //  point_in_winding
@@ -296,6 +297,7 @@ bool            TestSegmentAgainstOpaqueList(const vec_t* p1, const vec_t* p2
 					, int &opaquestyleout // light must convert to this style. -1 = no convert
 					)
 	{
+    PROF_CALL(PROF_TESTSEGMENTOPAQUE);
 		int x;
 		VectorFill (scaleout, 1.0);
 		opaquestyleout = -1;

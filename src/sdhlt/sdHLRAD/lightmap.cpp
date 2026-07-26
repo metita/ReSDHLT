@@ -1,4 +1,5 @@
 #include "qrad.h"
+#include "profiling.h"
 
 edgeshare_t     g_edgeshare[MAX_MAP_EDGES];
 vec3_t          g_face_centroids[MAX_MAP_EDGES]; // BUG: should this be [MAX_MAP_FACES]?
@@ -2448,6 +2449,7 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 								  , int texlightgap_surfacenum
 								  )
 {
+    PROF_SCOPE(PROF_GATHERSAMPLELIGHT);
     int             i;
     directlight_t*  l;
     vec3_t          delta;
@@ -3470,6 +3472,7 @@ void CalcLightmap (lightinfo_t *l, byte *styles)
 }
 void            BuildFacelights(const int facenum)
 {
+    PROF_SCOPE(PROF_BUILDFACELIGHTS);
     dface_t*        f;
 	unsigned char	f_styles[ALLSTYLES];
 	sample_t		*fl_samples[ALLSTYLES];
@@ -4814,6 +4817,7 @@ void AddPatchLights (int facenum)
 // =====================================================================================
 void            FinalLightFace(const int facenum)
 {
+    PROF_SCOPE(PROF_FINALLIGHTFACE);
 	if (facenum == 0 && g_drawsample)
 	{
 		char name[_MAX_PATH+20];
