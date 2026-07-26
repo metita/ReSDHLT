@@ -274,15 +274,25 @@ static void     AdjustPriority(HANDLE hThread)
 
 void            ThreadSetDefault()
 {
-    SYSTEM_INFO     info;
-
     if (g_numthreads == -1)                                // not set manually
     {
-        GetSystemInfo(&info);
-        g_numthreads = info.dwNumberOfProcessors;
-        if (g_numthreads < 1 || g_numthreads > 32)
+        g_numthreads = GetLogicalProcessorCount();
+
+        if (g_numthreads < 1)                              // detection failed
         {
-            g_numthreads = 1;
+            SYSTEM_INFO     info;
+
+            GetSystemInfo(&info);
+            g_numthreads = (int)info.dwNumberOfProcessors;
+
+            if (g_numthreads < 1)
+            {
+                g_numthreads = 1;
+            }
+            else if (g_numthreads > MAX_THREADS)
+            {
+                g_numthreads = MAX_THREADS;
+            }
         }
     }
 }
