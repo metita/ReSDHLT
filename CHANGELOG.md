@@ -22,11 +22,33 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
   with single-config generators
 - CI ran `ctest` with no registered tests and always failed that step
 
+### Added
+- `scripts/compilebench.py`: times a full compile and fingerprints every BSP lump
+  for regression checking
+- `install` target and CPack packaging (ZIP on Windows, TGZ elsewhere)
+- Opt-in `SDHLT_LTO` CMake option
+- `docs/FPS_Y_TOOL_TEXTURES.md` and `docs/BENCHMARKS.md`
+
 ### Changed
+- Threading unified on `std::thread`, replacing the separate Win32 and pthread
+  backends (723 lines to 448). Worker handles are now a `std::vector` sized by
+  the real thread count instead of stack arrays sized by `MAX_THREADS`
 - `MAX_THREADS` raised from 64 to 256
 - Work units are claimed with an atomic instead of the global thread lock
 - Added opt-in `SDHLT_LTO` CMake option
 - CI now smoke tests all five tools instead of running an empty test suite
+
+### Verified
+- Upstream and ReSDHLT produce a byte-identical BSP on koth_sandy and
+  ba_coliseum with `-threads 1`, lump for lump: all changes preserve output
+- Compiling koth_sandy went from 2.88s to 1.71s by actually using both cores
+
+### Known limitations
+- The tools are nondeterministic when multi-threaded: two runs of the same
+  binary can differ by a few clipnodes/marksurfaces. Use `-threads 1` for
+  reproducible output
+- No RAD optimisation was attempted: profiling was inconclusive in the test
+  environment (see `docs/BENCHMARKS.md`)
 
 ## [1.2.0] - Jul 11 2024
 ### Changed
