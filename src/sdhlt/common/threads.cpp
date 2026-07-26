@@ -20,10 +20,6 @@
 #endif
 #ifdef HAVE_SYS_RESOURCE_H
 #include <sys/resource.h>
-#include <pthread.h>
-#endif
-#ifdef HAVE_PTHREAD_H
-#include <pthread.h>
 #endif
 #include <unistd.h>
 #endif
@@ -31,10 +27,36 @@
 #include "hlassert.h"
 
 #include <atomic>
+#include <mutex>
 #include <thread>
+#include <vector>
+
+//
+// One portable worker pool built on <thread>, replacing the two near-identical
+// Win32 (CreateThread/CRITICAL_SECTION) and POSIX (pthread) implementations
+// this file used to carry. Only thread priority is still platform specific,
+// because there is no standard equivalent.
+//
+
+q_threadpriority g_threadpriority = DEFAULT_THREAD_PRIORITY;
+int             g_numthreads = DEFAULT_NUMTHREADS;
+
+#define THREADTIMES_SIZE 100
+#define THREADTIMES_SIZEf (float)(THREADTIMES_SIZE)
+
+static std::atomic<int> dispatch(0);
+static int      workcount = 0;
+static int      oldf = 0;
+static bool     pacifier = false;
+static bool     threaded = false;
+static double   threadstart = 0;
+static double   threadtimes[THREADTIMES_SIZE];
+
+static std::mutex       g_threadmutex;
+static int              g_lockdepth = 0;
 
 // Returns the number of logical processors available to this process, or 0 if
-// it cannot be determined. Used by both the Win32 and POSIX ThreadSetDefault().
+// it cannot be determined.
 static int      GetLogicalProcessorCount()
 {
     unsigned int    hc = std::thread::hardware_concurrency();
@@ -50,10 +72,8 @@ static int      GetLogicalProcessorCount()
     return (int)hc;
 }
 
-// Clamps g_numthreads into [1, MAX_THREADS]. RunThreadsOn() stores one thread
-// handle per thread in a fixed size stack array, so an out of range value
-// (e.g. "-threads 5000", which no tool bounds-checks) overflows that array and
-// crashes the compiler. Called at the top of every RunThreadsOn().
+// Keeps g_numthreads sane. No tool bounds-checks its "-threads" argument, and
+// an absurd value would otherwise mean an absurd number of OS threads.
 static void     ClampNumThreads()
 {
     if (g_numthreads < 1)
@@ -69,21 +89,128 @@ static void     ClampNumThreads()
     }
 }
 
-q_threadpriority g_threadpriority = DEFAULT_THREAD_PRIORITY;
+void            ThreadSetDefault()
+{
+    if (g_numthreads == -1)                                // not set manually
+    {
+        g_numthreads = GetLogicalProcessorCount();
 
-#define THREADTIMES_SIZE 100
-#define THREADTIMES_SIZEf (float)(THREADTIMES_SIZE)
+        if (g_numthreads < 1)                              // detection failed
+        {
+#ifdef SYSTEM_WIN32
+            SYSTEM_INFO     info;
 
-// Work units are claimed with an atomic fetch_add so that workers no longer
-// serialize through the global lock just to advance the counter. See
-// GetThreadWork().
-static std::atomic<int> dispatch(0);
-static int      workcount = 0;
-static int      oldf = 0;
-static bool     pacifier = false;
-static bool     threaded = false;
-static double   threadstart = 0;
-static double   threadtimes[THREADTIMES_SIZE];
+            GetSystemInfo(&info);
+            g_numthreads = (int)info.dwNumberOfProcessors;
+#elif defined(_SC_NPROCESSORS_ONLN)
+            long            n = sysconf(_SC_NPROCESSORS_ONLN);
+
+            g_numthreads = (n > 0) ? (int)n : 1;
+#else
+            g_numthreads = 1;
+#endif
+            if (g_numthreads < 1)
+            {
+                g_numthreads = 1;
+            }
+            else if (g_numthreads > MAX_THREADS)
+            {
+                g_numthreads = MAX_THREADS;
+            }
+        }
+    }
+}
+
+void            ThreadSetPriority(q_threadpriority type)
+{
+    g_threadpriority = type;
+
+    // std::thread exposes no portable priority control, so this stays
+    // platform specific.
+#ifdef SYSTEM_WIN32
+    int             val;
+
+    switch (g_threadpriority)
+    {
+    case eThreadPriorityLow:
+        val = IDLE_PRIORITY_CLASS;
+        break;
+
+    case eThreadPriorityHigh:
+        val = HIGH_PRIORITY_CLASS;
+        break;
+
+    case eThreadPriorityNormal:
+    default:
+        val = NORMAL_PRIORITY_CLASS;
+        break;
+    }
+
+    SetPriorityClass(GetCurrentProcess(), val);
+#endif
+
+#ifdef SYSTEM_POSIX
+    int             val;
+
+    // Unprivileged processes cannot raise their priority, so -high is
+    // effectively a no-op unless running as root.
+    switch (g_threadpriority)
+    {
+    case eThreadPriorityLow:
+        val = PRIO_MAX;
+        break;
+
+    case eThreadPriorityHigh:
+        val = PRIO_MIN;
+        break;
+
+    case eThreadPriorityNormal:
+    default:
+        val = 0;
+        break;
+    }
+
+    setpriority(PRIO_PROCESS, 0, val);
+#endif
+}
+
+void            threads_InitCrit()
+{
+    threaded = true;
+}
+
+void            threads_UninitCrit()
+{
+    threaded = false;
+}
+
+void            ThreadLock()
+{
+    if (!threaded)
+    {
+        return;
+    }
+    g_threadmutex.lock();
+    if (g_lockdepth)
+    {
+        Warning("Recursive ThreadLock\n");
+    }
+    g_lockdepth++;
+}
+
+void            ThreadUnlock()
+{
+    if (!threaded)
+    {
+        return;
+    }
+    if (!g_lockdepth)
+    {
+        Error("ThreadUnlock without lock\n");
+    }
+    g_lockdepth--;
+    g_threadmutex.unlock();
+}
 
 int             GetThreadWork()
 {
@@ -186,11 +313,7 @@ int             GetThreadWork()
 
 q_threadfunction workfunction;
 
-#ifdef SYSTEM_WIN32
-#pragma warning(push)
-#pragma warning(disable: 4100)                             // unreferenced formal parameter
-#endif
-static void     ThreadWorkerFunction(int unused)
+static void     ThreadWorkerFunction(int)
 {
     int             work;
 
@@ -200,10 +323,6 @@ static void     ThreadWorkerFunction(int unused)
     }
 }
 
-#ifdef SYSTEM_WIN32
-#pragma warning(pop)
-#endif
-
 void            RunThreadsOnIndividual(int workcnt, bool showpacifier, q_threadfunction func)
 {
     workfunction = func;
@@ -212,145 +331,10 @@ void            RunThreadsOnIndividual(int workcnt, bool showpacifier, q_threadf
 
 #ifndef SINGLE_THREADED
 
-/*====================
-| Begin SYSTEM_WIN32
-=*/
-#ifdef SYSTEM_WIN32
-
-#define	USED
-#include <windows.h>
-
-int             g_numthreads = DEFAULT_NUMTHREADS;
-static CRITICAL_SECTION crit;
-static int      enter;
-
-void            ThreadSetPriority(q_threadpriority type)
-{
-    int             val;
-
-    g_threadpriority = type;
-
-    switch (g_threadpriority)
-    {
-    case eThreadPriorityLow:
-        val = IDLE_PRIORITY_CLASS;
-        break;
-
-    case eThreadPriorityHigh:
-        val = HIGH_PRIORITY_CLASS;
-        break;
-
-    case eThreadPriorityNormal:
-    default:
-        val = NORMAL_PRIORITY_CLASS;
-        break;
-    }
-
-    SetPriorityClass(GetCurrentProcess(), val);
-}
-
-#if 0
-static void     AdjustPriority(HANDLE hThread)
-{
-    int             val;
-
-    switch (g_threadpriority)
-    {
-    case eThreadPriorityLow:
-        val = THREAD_PRIORITY_HIGHEST;
-        break;
-
-    case eThreadPriorityHigh:
-        val = THREAD_PRIORITY_LOWEST;
-        break;
-
-    case eThreadPriorityNormal:
-    default:
-        val = THREAD_PRIORITY_NORMAL;
-        break;
-    }
-    SetThreadPriority(hThread, val);
-}
-#endif
-
-void            ThreadSetDefault()
-{
-    if (g_numthreads == -1)                                // not set manually
-    {
-        g_numthreads = GetLogicalProcessorCount();
-
-        if (g_numthreads < 1)                              // detection failed
-        {
-            SYSTEM_INFO     info;
-
-            GetSystemInfo(&info);
-            g_numthreads = (int)info.dwNumberOfProcessors;
-
-            if (g_numthreads < 1)
-            {
-                g_numthreads = 1;
-            }
-            else if (g_numthreads > MAX_THREADS)
-            {
-                g_numthreads = MAX_THREADS;
-            }
-        }
-    }
-}
-
-void            ThreadLock()
-{
-    if (!threaded)
-    {
-        return;
-    }
-    EnterCriticalSection(&crit);
-    if (enter)
-    {
-        Warning("Recursive ThreadLock\n");
-    }
-    enter++;
-}
-
-void            ThreadUnlock()
-{
-    if (!threaded)
-    {
-        return;
-    }
-    if (!enter)
-    {
-        Error("ThreadUnlock without lock\n");
-    }
-    enter--;
-    LeaveCriticalSection(&crit);
-}
-
-q_threadfunction q_entry;
-
-static DWORD WINAPI ThreadEntryStub(LPVOID pParam)
-{
-    q_entry((int)pParam);
-    return 0;
-}
-
-void            threads_InitCrit()
-{
-    InitializeCriticalSection(&crit);
-    threaded = true;
-}
-
-void            threads_UninitCrit()
-{
-    DeleteCriticalSection(&crit);
-}
-
 void            RunThreadsOn(int workcnt, bool showpacifier, q_threadfunction func)
 {
-    DWORD           threadid[MAX_THREADS];
-    HANDLE          threadhandle[MAX_THREADS];
-    int             i;
     double          start, end;
+    int             i;
 
     ClampNumThreads();
 
@@ -360,225 +344,83 @@ void            RunThreadsOn(int workcnt, bool showpacifier, q_threadfunction fu
     {
         threadtimes[i] = 0;
     }
+
     dispatch = 0;
     workcount = workcnt;
     oldf = -1;
     pacifier = showpacifier;
-    threaded = true;
-    q_entry = func;
 
     if (workcount < dispatch.load())
     {
-        Developer(DEVELOPER_LEVEL_ERROR, "RunThreadsOn: Workcount(%i) < dispatch(%i)\n", workcount, dispatch.load());
+        Developer(DEVELOPER_LEVEL_ERROR, "RunThreadsOn: Workcount(%i) < dispatch(%i)\n",
+                  workcount, dispatch.load());
     }
     hlassume(workcount >= dispatch.load(), assume_BadWorkcount);
 
-    //
-    // Create all the threads (suspended)
-    //
+    if (pacifier)
+    {
+        setbuf(stdout, NULL);
+    }
+
     threads_InitCrit();
+
+    //
+    // A vector rather than a fixed MAX_THREADS array: the old code sized two
+    // stack arrays by MAX_THREADS and indexed them with an unvalidated thread
+    // count.
+    //
+    std::vector<std::thread> workers;
+    workers.reserve((size_t)g_numthreads);
+
     for (i = 0; i < g_numthreads; i++)
     {
-        HANDLE          hThread = CreateThread(NULL,
-                                               0,
-                                               (LPTHREAD_START_ROUTINE) ThreadEntryStub,
-                                               (LPVOID) i,
-                                               CREATE_SUSPENDED,
-                                               &threadid[i]);
-
-        if (hThread != NULL)
+        try
         {
-            threadhandle[i] = hThread;
+            workers.emplace_back(func, i);
         }
-        else
+        catch (const std::system_error& e)
         {
-            LPVOID          lpMsgBuf;
-
-            FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER |
-                          FORMAT_MESSAGE_FROM_SYSTEM |
-                          FORMAT_MESSAGE_IGNORE_INSERTS, NULL, GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),       // Default language
-                          (LPTSTR) & lpMsgBuf, 0, NULL);
-            // Process any inserts in lpMsgBuf.
-            // ...
-            // Display the string.
-            Developer(DEVELOPER_LEVEL_ERROR, "CreateThread #%d [%08X] failed : %s\n", i, threadhandle[i], lpMsgBuf);
-            Fatal(assume_THREAD_ERROR, "Unable to create thread #%d", i);
-            // Free the buffer.
-            LocalFree(lpMsgBuf);
+            // Run with however many threads did start rather than aborting a
+            // long compile outright.
+            Warning("Could not create thread #%d (%s), continuing with %d\n",
+                    i, e.what(), (int)workers.size());
+            break;
         }
     }
-    CheckFatal();
 
-    // Start all the threads
-    for (i = 0; i < g_numthreads; i++)
+    if (workers.empty())
     {
-        if (ResumeThread(threadhandle[i]) == 0xFFFFFFFF)
-        {
-            LPVOID          lpMsgBuf;
-
-            FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER |
-                          FORMAT_MESSAGE_FROM_SYSTEM |
-                          FORMAT_MESSAGE_IGNORE_INSERTS, NULL, GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),       // Default language
-                          (LPTSTR) & lpMsgBuf, 0, NULL);
-            // Process any inserts in lpMsgBuf.
-            // ...
-            // Display the string.
-            Developer(DEVELOPER_LEVEL_ERROR, "ResumeThread #%d [%08X] failed : %s\n", i, threadhandle[i], lpMsgBuf);
-            Fatal(assume_THREAD_ERROR, "Unable to start thread #%d", i);
-            // Free the buffer.
-            LocalFree(lpMsgBuf);
-        }
+        // Nothing could be spawned; do the work on this thread so the compile
+        // still completes.
+        Warning("No worker threads could be created, running single-threaded\n");
+        threads_UninitCrit();
+        func(0);
     }
-    CheckFatal();
-
-    // Wait for threads to complete
-    for (i = 0; i < g_numthreads; i++)
+    else
     {
-        Developer(DEVELOPER_LEVEL_MESSAGE, "WaitForSingleObject on thread #%d [%08X]\n", i, threadhandle[i]);
-        WaitForSingleObject(threadhandle[i], INFINITE);
+        for (std::thread& t : workers)
+        {
+            t.join();
+        }
+        threads_UninitCrit();
     }
-    threads_UninitCrit();
 
-    q_entry = NULL;
-    threaded = false;
     end = I_FloatTime();
     if (pacifier)
     {
-		PrintConsole
-			("\r%60s\r", "");
+        PrintConsole("\r%60s\r", "");
     }
     Log(" (%.2f seconds)\n", end - start);
 }
 
-#endif
+#else /*SINGLE_THREADED*/
 
-/*=
-| End SYSTEM_WIN32
-=====================*/
-
-/*====================
-| Begin SYSTEM_POSIX
-=*/
-#ifdef SYSTEM_POSIX
-
-#define	USED
-
-int             g_numthreads = DEFAULT_NUMTHREADS;
-
-void            ThreadSetPriority(q_threadpriority type)
-{
-    int             val;
-
-    g_threadpriority = type;
-
-    // Currently in Linux land users are incapable of raising the priority level of their processes
-    // Unless you are root -high is useless . . . 
-    switch (g_threadpriority)
-    {
-    case eThreadPriorityLow:
-        val = PRIO_MAX;
-        break;
-
-    case eThreadPriorityHigh:
-        val = PRIO_MIN;
-        break;
-
-    case eThreadPriorityNormal:
-    default:
-        val = 0;
-        break;
-    }
-    setpriority(PRIO_PROCESS, 0, val);
-}
-
-void            ThreadSetDefault()
-{
-    if (g_numthreads == -1)                                // not set manually
-    {
-        g_numthreads = GetLogicalProcessorCount();
-
-        if (g_numthreads < 1)                              // detection failed
-        {
-#ifdef _SC_NPROCESSORS_ONLN
-            long            n = sysconf(_SC_NPROCESSORS_ONLN);
-
-            if (n > (long)MAX_THREADS)
-            {
-                n = (long)MAX_THREADS;
-            }
-            g_numthreads = (n > 0) ? (int)n : 1;
-#else
-            g_numthreads = 1;
-#endif
-        }
-    }
-}
-
-typedef void*    pthread_addr_t;
-pthread_mutex_t* my_mutex;
-
-void            ThreadLock()
-{
-    if (my_mutex)
-    {
-        pthread_mutex_lock(my_mutex);
-    }
-}
-
-void            ThreadUnlock()
-{
-    if (my_mutex)
-    {
-        pthread_mutex_unlock(my_mutex);
-    }
-}
-
-q_threadfunction q_entry;
-
-static void*    CDECL ThreadEntryStub(void* pParam)
-{
-    q_entry((int)(intptr_t)pParam);
-    return NULL;
-}
-
-void            threads_InitCrit()
-{
-    pthread_mutexattr_t mattrib;
-
-    if (!my_mutex)
-    {
-        my_mutex = (pthread_mutex_t*)Alloc(sizeof(*my_mutex));
-        if (pthread_mutexattr_init(&mattrib) == -1)
-        {
-            Error("pthread_mutex_attr_init failed");
-        }
-        if (pthread_mutex_init(my_mutex, &mattrib) == -1)
-        {
-            Error("pthread_mutex_init failed");
-        }
-    }
-}
-
-void            threads_UninitCrit()
-{
-    Free(my_mutex);
-    my_mutex = NULL;
-}
-
-/*
- * =============
- * RunThreadsOn
- * =============
- */
 void            RunThreadsOn(int workcnt, bool showpacifier, q_threadfunction func)
 {
-    int             i;
-    pthread_t       work_threads[MAX_THREADS];
-    pthread_addr_t  status;
-    pthread_attr_t  attrib;
     double          start, end;
+    int             i;
 
-    ClampNumThreads();
+    g_numthreads = 1;
 
     threadstart = I_FloatTime();
     start = threadstart;
@@ -591,133 +433,16 @@ void            RunThreadsOn(int workcnt, bool showpacifier, q_threadfunction fu
     workcount = workcnt;
     oldf = -1;
     pacifier = showpacifier;
-    threaded = true;
-    q_entry = func;
-
-    if (pacifier)
-    {
-        setbuf(stdout, NULL);
-    }
-
-    threads_InitCrit();
-
-    if (pthread_attr_init(&attrib) == -1)
-    {
-        Error("pthread_attr_init failed");
-    }
-#ifdef _POSIX_THREAD_ATTR_STACKSIZE
-    if (pthread_attr_setstacksize(&attrib, 0x400000) == -1)
-    {
-        Error("pthread_attr_setstacksize failed");
-    }
-#endif
-
-    for (i = 0; i < g_numthreads; i++)
-    {
-        if (pthread_create(&work_threads[i], &attrib, ThreadEntryStub, (void*)(intptr_t)i) == -1)
-        {
-            Error("pthread_create failed");
-        }
-    }
-
-    for (i = 0; i < g_numthreads; i++)
-    {
-        if (pthread_join(work_threads[i], &status) == -1)
-        {
-            Error("pthread_join failed");
-        }
-    }
-
-    threads_UninitCrit();
-
-    q_entry = NULL;
     threaded = false;
 
-    end = I_FloatTime();
-    if (pacifier)
-    {
-		PrintConsole
-			("\r%60s\r", "");
-    }
-
-    Log(" (%.2f seconds)\n", end - start);
-}
-
-#endif /*SYSTEM_POSIX */
-
-/*=
-| End SYSTEM_POSIX
-=====================*/
-
-#endif /*SINGLE_THREADED */
-
-/*====================
-| Begin SINGLE_THREADED
-=*/
-#ifdef SINGLE_THREADED
-
-int             g_numthreads = 1;
-
-void            ThreadSetPriority(q_threadpriority type)
-{
-}
-
-void            threads_InitCrit()
-{
-}
-
-void            threads_UninitCrit()
-{
-}
-
-void            ThreadSetDefault()
-{
-    g_numthreads = 1;
-}
-
-void            ThreadLock()
-{
-}
-
-void            ThreadUnlock()
-{
-}
-
-void            RunThreadsOn(int workcnt, bool showpacifier, q_threadfunction func)
-{
-    int             i;
-    double          start, end;
-
-    dispatch = 0;
-    workcount = workcnt;
-    oldf = -1;
-    pacifier = showpacifier;
-    threadstart = I_FloatTime();
-    start = threadstart;
-    for (i = 0; i < THREADTIMES_SIZE; i++)
-    {
-        threadtimes[i] = 0.0;
-    }
-
-    if (pacifier)
-    {
-        setbuf(stdout, NULL);
-    }
     func(0);
 
     end = I_FloatTime();
-
     if (pacifier)
     {
-		PrintConsole
-			("\r%60s\r", "");
+        PrintConsole("\r%60s\r", "");
     }
-
     Log(" (%.2f seconds)\n", end - start);
 }
 
-#endif
-
-/*=
-| End SINGLE_THREADED
-=====================*/
+#endif /*SINGLE_THREADED*/

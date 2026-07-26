@@ -11,6 +11,19 @@ Two jobs:
      must not alter these unless that is the explicit intent of the change, so
      comparing two runs catches accidental geometry or lighting damage.
 
+IMPORTANT - always pass --threads 1 when comparing for regressions.
+
+The tools are not deterministic when run multi-threaded: work units are
+handed out in whatever order threads reach them, and some stages append to
+shared output in that order. Measured on koth_sandy, two consecutive runs of
+the *same unmodified binary* with autodetected threads differed by +2
+clipnodes, +1 marksurface and -4 bytes of visibility data. That noise makes
+multi-threaded output useless as a regression baseline.
+
+With --threads 1 the same binary reproduces byte-identical output, so any
+difference is genuinely attributable to a code change. Use multi-threaded
+runs for timing, single-threaded runs for correctness.
+
 Usage:
     compilebench.py --tools DIR --map FILE.map [--runs N] [--json OUT.json]
     compilebench.py --compare before.json after.json
@@ -153,6 +166,7 @@ def cmd_run(args):
     best = min(runs, key=lambda r: r["total"])
     best.pop("_log", None)
     best["runs"] = args.runs
+    best["threads"] = args.threads
     best["all_totals"] = [r["total"] for r in runs]
 
     print("\nbest of %d: %s" % (args.runs, fmt_stages(best)))
@@ -203,8 +217,14 @@ def cmd_compare(args):
             changed = True
         print("%-14s %12d %12d %+10d%s" % (name, va, vb, vb - va, mark))
 
-    print("\n" + ("BSP OUTPUT DIFFERS - review intentionality"
-                  if changed else "BSP output byte-identical - no regression"))
+    if changed:
+        print("\nBSP OUTPUT DIFFERS - review intentionality")
+        if not (a.get("threads") == 1 and b.get("threads") == 1):
+            print("NOTE: at least one run was not --threads 1. Multi-threaded "
+                  "output is nondeterministic;\n      re-compare with "
+                  "--threads 1 before treating this as a real regression.")
+    else:
+        print("\nBSP output byte-identical - no regression")
     return 0
 
 
