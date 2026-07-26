@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - ReSDHLT
+Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Strike 1.6.
+
+### Fixed
+- Linux builds no longer compile single-threaded by default. `DEFAULT_NUMTHREADS`
+  was `1` on POSIX, which made the autodetection branch in `ThreadSetDefault()`
+  dead code
+- Windows machines with more than 32 logical processors no longer fall back to a
+  single thread
+- Stack buffer overflow when `-threads` is given a value above `MAX_THREADS`
+  (e.g. `-threads 5000` crashed with SIGSEGV); the count is now clamped with a
+  warning
+- CMake Release builds are no longer silently downgraded from `-O3` to `-O2` by a
+  hardcoded `add_compile_options(-O2)`
+- CMake no longer produces unoptimised binaries when `CMAKE_BUILD_TYPE` is unset
+  with single-config generators
+- CI ran `ctest` with no registered tests and always failed that step
+
+### Changed
+- `MAX_THREADS` raised from 64 to 256
+- Work units are claimed with an atomic instead of the global thread lock
+- Added opt-in `SDHLT_LTO` CMake option
+- CI now smoke tests all five tools instead of running an empty test suite
+
 ## [1.2.0] - Jul 11 2024
 ### Changed
 - Add studiomodel shadows with 3 shadow modes and `-nostudioshadow`

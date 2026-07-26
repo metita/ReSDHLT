@@ -2,6 +2,41 @@
 
 <sub>Half-Life engine map compile tools, based on Vluzacn's ZHLT v34 with code contributions from various contributors. Based on Valve's version, modified with permission.</sub>
 
+---
+
+## About this fork (ReSDHLT)
+
+**ReSDHLT** is a fork of [seedee/SDHLT](https://github.com/seedee/SDHLT) aimed at
+compile performance, correctness and map FPS for **Counter-Strike 1.6**.
+
+Fixes so far target the threading layer and the build configuration, where the
+upstream defaults left significant performance on the table:
+
+| Fix | Effect |
+|---|---|
+| Linux thread autodetection | Linux builds used 1 thread unless `-threads` was passed; the autodetect branch was dead code |
+| Win32 >32 processor fallback | CPUs with more than 32 logical processors ran single-threaded |
+| `-threads` bounds check | `-threads 5000` crashed with a stack buffer overflow |
+| CMake `-O` level | Release builds were silently downgraded from `-O3` to `-O2` |
+| CMake build type | Unset `CMAKE_BUILD_TYPE` produced unoptimised binaries |
+
+See `ANALISIS_MEJORAS.md` for the full analysis, the remaining roadmap, and an
+honest account of what compile tools can and cannot do for in-game FPS.
+
+### Building
+
+```sh
+cmake -B build -S .          # defaults to Release
+cmake --build build -j
+# optional: link time optimisation
+cmake -B build -S . -DSDHLT_LTO=ON
+```
+
+Binaries land in `tools/`.
+
+---
+
+
 New features include shadows from studiomodels, new entities, additional tool textures, ability to extend world size limits, portal file optimisation for J.A.C.K. map editor and minor algorithm optimization.
 
 ## How to install
