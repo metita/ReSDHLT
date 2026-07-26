@@ -110,18 +110,24 @@ para ser claro: **los FPS en juego no cambian por este fork**. Cambia el tiempo 
 Esta sección importa tanto como la anterior. Tres ítems del roadmap original se investigaron y se
 descartaron **con evidencia**, en lugar de implementarse a ciegas.
 
-### 3.1 Optimizar RAD ❌ — datos no confiables
-RAD es **>95% del tiempo de compilación**, así que era el objetivo obvio. Pero:
+### 3.1 Optimizar RAD ⚠️ — perfilado sí, optimizado no
+RAD es >95% del tiempo. `perf` está bloqueado acá y gprof dio datos falsos (reportó `MakeTnode()` con
+93.301.204 llamadas; un contador mostró **78**). Así que el profiler ahora está **dentro de RAD**
+(`-profile`), funciona en Windows sin instalar nada, y sus conteos coinciden con las entradas creíbles de
+gprof.
 
-- `perf` está bloqueado en el entorno (`perf_event_paranoid`).
-- `gprof` dio resultados contradictorios: reportó `MakeTnode()` como **49.83% del tiempo con 93.301.204
-  llamadas**. Instrumenté la función con un contador: se llama **78 veces**. Con símbolos de otro build,
-  llegó a atribuir 85 millones de llamadas a `_fini`.
+Hot spot real: **`TestLine_r`, 1.849.616.672 entradas** por mapa. `GatherSampleLight` es ~94% del tiempo
+de `BuildFacelights`.
 
-Optimizar un ray tracer con un profile que no resiste una verificación básica es la forma más directa de
-romper la iluminación. El profile *sí* sugiere que el tiempo está en ray casting (`TestLine` 62M
-llamadas, `CheckVisBitSparse` 43M). En `docs/BENCHMARKS.md` está el procedimiento para hacerlo bien con
-`perf` en hardware real.
+**Intenté la optimización y falló.** Tres de los cuatro caminos recursivos son tail calls, así que
+reescribí la función como loop. La iluminación salió **byte-idéntica** (correcta), pero más lenta: 2.69s
+copiando endpoints y 2.76s con punteros, contra **2.59s** de la recursiva original. GCC ya emite menos
+llamadas recursivas de lo que sugiere el código y las llamadas son baratas por el return stack buffer.
+**Revertido**; quedó solo la instrumentación.
+
+Lo que el perfil sí indica: **426 rayos `TestLine` por `GatherSampleLight`** y ~30 descensos de árbol por
+rayo. El costo es *cuántos* rayos se lanzan, no cuánto cuesta cada uno, así que el próximo paso es
+algorítmico. Guía completa en `docs/PERFILAR_RAD.md`.
 
 ### 3.2 Mejorar `TryMerge` ❌ — medido: 0.7% de margen
 Investigado a fondo esta vez, no descartado por precaución. Cuatro líneas de evidencia:

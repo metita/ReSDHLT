@@ -26,6 +26,8 @@ upstream defaults left significant performance on the table:
 - `docs/FPS_Y_TOOL_TEXTURES.md` - how to actually lower `wpoly` and raise FPS. Start
   here if you make maps: the compiler cannot do this for you, and this is the
   largest lever that exists.
+- `docs/PERFILAR_RAD.md` - how to profile RAD on your own machine (it is >95% of
+  compile time), what is already ruled out, and where a real win would come from.
 - `docs/BENCHMARKS.md` - every measurement taken, including the negative results
   (`-O3` and LTO show no measurable gain; RAD profiling was inconclusive; face
   merging has 0.7% headroom and was left alone).
@@ -47,6 +49,13 @@ be merged:
 
 ```sh
 python3 scripts/bspcheck.py yourmap.bsp
+```
+
+RAD carries its own profiler, so no external tooling is needed:
+
+```sh
+sdHLRAD -profile -threads 1 yourmap          # phase-level timing
+cmake -B build -S . -DSDHLT_PROFILE=ON       # adds inner ray-casting counters
 ```
 
 Compiles are reproducible by default, so two runs on the same map yield an

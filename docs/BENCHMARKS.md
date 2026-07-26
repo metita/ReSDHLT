@@ -78,32 +78,80 @@ Tamaño del binario `sdHLRAD`: `-O2` 442KB, `-O3` 482KB, LTO 438KB.
 > python3 scripts/compilebench.py --tools <dir> --map <mapa> --threads 1 --runs 5
 > ```
 
-## 4. Profiling de RAD: no concluyente ❌
+## 4. Profiling de RAD: resuelto, con un intento fallido de optimización
 
-RAD es el 95% del tiempo, así que era el objetivo obvio. No pude obtener un profile confiable:
+RAD es >95% del tiempo, así que era el objetivo obvio. El primer intento con herramientas externas
+falló y el segundo, instrumentando las tools, funcionó.
 
-- **`perf` no está disponible** en el sandbox (`perf_event_paranoid` lo bloquea).
-- **`gprof` da resultados contradictorios.** Reportó `MakeTnode()` como el 49.83% del tiempo con
-  **93.301.204 llamadas**. Instrumenté la función con un contador real: se llama **78 veces**
-  (el mapa tiene 128 nodos, y `MakeTnode` recorre el árbol una única vez desde `MakeTnodes`).
-  Resolviendo símbolos contra otro build, gprof llegó a atribuir 85 millones de llamadas a `_fini`.
+### 4.1 Por qué gprof no servía
 
-`MakeTnode` es la única función `static` de `trace.cpp`, así que probablemente recibe las muestras del
-código vecino inlineado. Lo que el profile *sí* sugiere, por las entradas con conteos de llamadas
-coherentes, es que el tiempo está en **ray casting**: `TestLine` (62M llamadas),
-`CheckVisBitSparse` (43M), `TestSegmentAgainstOpaqueList` (39M), `GatherSampleLight`.
+- **`perf` no está disponible** en el entorno (`perf_event_paranoid` lo bloquea), y además es solo Linux.
+- **`gprof` dio datos que no resisten verificación:** reportó `MakeTnode()` como el 49.83% del tiempo con
+  **93.301.204 llamadas**. Le puse un contador: se llama **78 veces**. Con símbolos de otro build, llegó
+  a atribuir 85 millones de llamadas a `_fini`.
 
-**Decisión:** no optimizar RAD con estos datos. Optimizar un ray tracer a ciegas es la forma más
-directa de romper la iluminación. Cómo hacerlo bien:
+`MakeTnode` es la única función `static` de `trace.cpp`, así que estaba absorbiendo las muestras del
+código vecino.
 
-```sh
-# en hardware real, con perf disponible:
-cmake -B build -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo
-perf record -g --call-graph=dwarf ./tools/sdHLRAD -threads 1 <mapa>
-perf report --no-children
-```
+### 4.2 El profiler propio (`-profile`)
 
-Y validar cada cambio con `--threads 1` comparando el BSP lump por lump.
+Está dentro de las tools, funciona en Windows sin instalar nada. Dos niveles, porque el código caliente
+tiene frecuencias muy distintas:
+
+- `PROF_SCOPE` **cronometra** las funciones de fase; se activa en runtime con `-profile`.
+- `PROF_CALL` **cuenta** las funciones internas del ray casting; se activa **en compilación** con
+  `-DSDHLT_PROFILE=ON`. `TestLine_r` se entra ~1.800 millones de veces por mapa, así que incluso un
+  chequeo apagado costaría casi un segundo por compilación a quien nunca perfila.
+
+**Perfil de `ba_dust_island`, 1 hilo:**
+
+| sitio | llamadas | share |
+|---|---|---|
+| `BuildFacelights` | 653 | 51.6% |
+| `GatherSampleLight` | 146.152 | 47.9% (anidada en la anterior, ~94% de su tiempo) |
+| `TestLine` | 62.245.301 | (solo conteo) |
+| **`TestLine_r`** | **1.849.616.672** | (solo conteo) |
+| `TestSegmentAgainstOpaqueList` | 38.965.499 | (solo conteo) |
+
+Esto confirma la sospecha sobre gprof: el hot spot real es **`TestLine_r`**. Y los conteos coinciden con
+las entradas creíbles de gprof (`TestSegmentAgainstOpaqueList` = 38.965.499 en ambos), lo que valida las
+dos mediciones entre sí.
+
+Verificado que la instrumentación apagada es gratis, midiendo A/B **intercalado** para cancelar la carga
+de la máquina: **−1.1%**, o sea ruido. Una medición previa sin intercalar sugería 20% de regresión, que
+era deriva por otros builds corriendo en la misma máquina — vale como advertencia sobre medir en un
+entorno compartido.
+
+### 4.3 El intento de optimización, y por qué se revirtió ❌
+
+Tres de los cuatro caminos recursivos de `TestLine_r` son **tail calls**, así que lo reescribí como loop.
+La iluminación salió **byte-idéntica** en los tres mapas, o sea la transformación era correcta. Pero fue
+más lenta, dos veces:
+
+| versión | RAD (min de 4, `koth_sandy`, 1 hilo) |
+|---|---|
+| original recursiva | **2.59s** |
+| iterativa, copiando endpoints | 2.69s |
+| iterativa, punteros a endpoints | 2.76s |
+
+Razones: GCC ya emite menos sitios de llamada recursiva de los que sugiere el código (10 en el cuerpo),
+las llamadas son baratas en CPUs modernas por el *return stack buffer*, y mis dos versiones gastaban más
+en copias o indirección de punteros de lo que ahorraban.
+
+**Revertido.** Se quedó solo la instrumentación.
+
+### 4.4 Dónde estaría la ganancia real
+
+El perfil apunta a otra cosa:
+
+| | ba_dust_island | koth_sandy |
+|---|---|---|
+| rayos `TestLine` por `GatherSampleLight` | **426** | 374 |
+| descensos de árbol por rayo | 30 | 20 |
+
+El costo está en **cuántos rayos se lanzan**, no en el precio de cada uno. O sea el próximo paso es
+**algorítmico** (lanzar menos rayos: culling, early-out, caching de visibilidad), no micro-optimización.
+Y eso hay que hacerlo con menos ruido de medición del que tengo acá.
 
 ## 5. Fusión de caras: sin margen real (investigado a fondo)
 

@@ -23,6 +23,10 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
 - CI ran `ctest` with no registered tests and always failed that step
 
 ### Added
+- RAD `-profile`: reports where RAD spends its time, with no external profiler.
+  Inner ray-casting counters behind `-DSDHLT_PROFILE=ON` (off by default because
+  `TestLine_r` is entered ~1.8 billion times per map)
+- `docs/PERFILAR_RAD.md`: how to profile RAD on real hardware
 - Reproducible compiles: CSG's parallel phases now run single-threaded by
   default, because `FindIntPlane` numbered planes and `WriteFace` ordered faces
   by thread timing. Costs ~0.1% of total compile time. `-nodeterministic` opts out
@@ -52,8 +56,10 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
 - The tools are nondeterministic when multi-threaded: two runs of the same
   binary can differ by a few clipnodes/marksurfaces. Use `-threads 1` for
   reproducible output
-- No RAD optimisation was attempted: profiling was inconclusive in the test
-  environment (see `docs/BENCHMARKS.md`)
+- RAD is unoptimised. `TestLine_r` is the hot spot (~1.8 billion entries per
+  map), but rewriting its tail-call recursion as a loop produced identical
+  lighting and was *slower*, so it was reverted. The cost is the number of rays
+  cast, not the price of each; the next step is algorithmic
 - Face merging was investigated and left unchanged: residual merge candidates
   are 0.7% of faces, and `MAXEDGES` is never the binding constraint
 
