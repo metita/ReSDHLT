@@ -30,6 +30,7 @@
 
 #include "hlassert.h"
 
+#include <atomic>
 #include <thread>
 
 // Returns the number of logical processors available to this process, or 0 if
@@ -73,7 +74,10 @@ q_threadpriority g_threadpriority = DEFAULT_THREAD_PRIORITY;
 #define THREADTIMES_SIZE 100
 #define THREADTIMES_SIZEf (float)(THREADTIMES_SIZE)
 
-static int      dispatch = 0;
+// Work units are claimed with an atomic fetch_add so that workers no longer
+// serialize through the global lock just to advance the counter. See
+// GetThreadWork().
+static std::atomic<int> dispatch(0);
 static int      workcount = 0;
 static int      oldf = 0;
 static bool     pacifier = false;
@@ -88,117 +92,95 @@ int             GetThreadWork()
 	static const char *s1 = NULL; // avoid frequent call of Localize() in PrintConsole
 	static const char *s2 = NULL;
 
+    //
+    // Claim a work unit without holding the global lock. Previously every
+    // single work unit funnelled all workers through ThreadLock() merely to
+    // execute "dispatch++", so with many threads and millions of units (RAD
+    // and VIS in particular) the dispatcher itself became the bottleneck and
+    // the tools stopped scaling with core count.
+    //
+    r = dispatch.fetch_add(1, std::memory_order_relaxed);
+
+    if (r >= workcount)
+    {
+        // No work left. Give the slot back so dispatch does not drift far past
+        // workcount while the remaining workers drain.
+        dispatch.fetch_sub(1, std::memory_order_relaxed);
+
+        if (r == workcount)
+        {
+            Developer(DEVELOPER_LEVEL_MESSAGE, "dispatch == workcount, work is complete\n");
+        }
+        return -1;
+    }
+
+    if (r < 0)
+    {
+        Developer(DEVELOPER_LEVEL_ERROR, "negative dispatch!!!\n");
+        return -1;
+    }
+
+    if (!pacifier)
+    {
+        return r;
+    }
+
+    //
+    // Progress reporting still needs the lock: it touches the shared
+    // threadtimes/oldf state and writes to the console.
+    //
     ThreadLock();
+
 	if (s1 == NULL)
 		s1 = Localize ("  (%d%%: est. time to completion %ld/%ld/%ld secs)   ");
 	if (s2 == NULL)
 		s2 = Localize ("  (%d%%: est. time to completion <1 sec)   ");
 
-    if (dispatch == 0)
+    if (r == 0)
     {
         oldf = 0;
     }
 
-    if (dispatch > workcount)
-    {
-        Developer(DEVELOPER_LEVEL_ERROR, "dispatch > workcount!!!\n");
-        ThreadUnlock();
-        return -1;
-    }
-    if (dispatch == workcount)
-    {
-        Developer(DEVELOPER_LEVEL_MESSAGE, "dispatch == workcount, work is complete\n");
-        ThreadUnlock();
-        return -1;
-    }
-    if (dispatch < 0)
-    {
-        Developer(DEVELOPER_LEVEL_ERROR, "negative dispatch!!!\n");
-        ThreadUnlock();
-        return -1;
-    }
+	PrintConsole
+		("\r%6d /%6d", r + 1, workcount);
 
-    f = THREADTIMES_SIZE * dispatch / workcount;
-    if (pacifier)
-    {
-		PrintConsole
-			("\r%6d /%6d", dispatch, workcount);
+    f = THREADTIMES_SIZE * r / workcount;
 
-        if (f != oldf)
+    if (f != oldf)
+    {
+        ct = I_FloatTime();
+        /* Fill in current time for threadtimes record */
+        for (i = oldf; i <= f; i++)
         {
-            ct = I_FloatTime();
-            /* Fill in current time for threadtimes record */
-            for (i = oldf; i <= f; i++)
+            if (threadtimes[i] < 1)
             {
-                if (threadtimes[i] < 1)
-                {
-                    threadtimes[i] = ct;
-                }
-            }
-            oldf = f;
-
-            if (f > 10)
-            {
-                finish = (ct - threadtimes[0]) * (THREADTIMES_SIZEf - f) / f;
-                finish2 = 10.0 * (ct - threadtimes[f - 10]) * (THREADTIMES_SIZEf - f) / THREADTIMES_SIZEf;
-                finish3 = THREADTIMES_SIZEf * (ct - threadtimes[f - 1]) * (THREADTIMES_SIZEf - f) / THREADTIMES_SIZEf;
-
-                if (finish > 1.0)
-                {
-					PrintConsole
-						(s1, f, (long)(finish), (long)(finish2),
-                           (long)(finish3));
-                }
-                else
-                {
-					PrintConsole
-						(s2, f);
-
-                }
+                threadtimes[i] = ct;
             }
         }
-    }
-    else
-    {
-        if (f != oldf)
+        oldf = f;
+
+        if (f > 10)
         {
-            oldf = f;
-            switch (f)
+            finish = (ct - threadtimes[0]) * (THREADTIMES_SIZEf - f) / f;
+            finish2 = 10.0 * (ct - threadtimes[f - 10]) * (THREADTIMES_SIZEf - f) / THREADTIMES_SIZEf;
+            finish3 = THREADTIMES_SIZEf * (ct - threadtimes[f - 1]) * (THREADTIMES_SIZEf - f) / THREADTIMES_SIZEf;
+
+            if (finish > 1.0)
             {
-            case 10:
-            case 20:
-            case 30:
-            case 40:
-            case 50:
-            case 60:
-            case 70:
-            case 80:
-            case 90:
-            case 100:
-/*
-            case 5:
-            case 15:
-            case 25:
-            case 35:
-            case 45:
-            case 55:
-            case 65:
-            case 75:
-            case 85:
-            case 95:
-*/
 				PrintConsole
-					("%d%%...", f);
-            default:
-                break;
+					(s1, f, (long)(finish), (long)(finish2),
+                       (long)(finish3));
+            }
+            else
+            {
+				PrintConsole
+					(s2, f);
             }
         }
     }
-
-    r = dispatch;
-    dispatch++;
 
     ThreadUnlock();
+
     return r;
 }
 
@@ -385,11 +367,11 @@ void            RunThreadsOn(int workcnt, bool showpacifier, q_threadfunction fu
     threaded = true;
     q_entry = func;
 
-    if (workcount < dispatch)
+    if (workcount < dispatch.load())
     {
-        Developer(DEVELOPER_LEVEL_ERROR, "RunThreadsOn: Workcount(%i) < dispatch(%i)\n", workcount, dispatch);
+        Developer(DEVELOPER_LEVEL_ERROR, "RunThreadsOn: Workcount(%i) < dispatch(%i)\n", workcount, dispatch.load());
     }
-    hlassume(workcount >= dispatch, assume_BadWorkcount);
+    hlassume(workcount >= dispatch.load(), assume_BadWorkcount);
 
     //
     // Create all the threads (suspended)
