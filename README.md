@@ -20,8 +20,27 @@ upstream defaults left significant performance on the table:
 | CMake `-O` level | Release builds were silently downgraded from `-O3` to `-O2` |
 | CMake build type | Unset `CMAKE_BUILD_TYPE` produced unoptimised binaries |
 
-See `ANALISIS_MEJORAS.md` for the full analysis, the remaining roadmap, and an
-honest account of what compile tools can and cannot do for in-game FPS.
+### Documentation
+
+- `docs/FPS_Y_TOOL_TEXTURES.md` - how to actually lower `wpoly` and raise FPS. Start
+  here if you make maps: the compiler cannot do this for you, and this is the
+  largest lever that exists.
+- `docs/BENCHMARKS.md` - every measurement taken, including the negative results
+  (`-O3` and LTO show no measurable gain; RAD profiling was inconclusive).
+- `ANALISIS_MEJORAS.md` - full technical analysis and remaining roadmap.
+
+### Measuring your own changes
+
+`scripts/compilebench.py` times a full CSG/BSP/VIS/RAD compile and fingerprints
+every BSP lump, so a change can be shown not to alter the output:
+
+```sh
+python3 scripts/compilebench.py --tools tools --map yourmap.map --runs 3
+python3 scripts/compilebench.py --compare before.json after.json
+```
+
+Always use `--threads 1` for regression comparisons: the tools are
+nondeterministic when multi-threaded (see `docs/BENCHMARKS.md`).
 
 ### Building
 
