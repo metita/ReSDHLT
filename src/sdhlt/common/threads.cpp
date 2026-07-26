@@ -49,6 +49,25 @@ static int      GetLogicalProcessorCount()
     return (int)hc;
 }
 
+// Clamps g_numthreads into [1, MAX_THREADS]. RunThreadsOn() stores one thread
+// handle per thread in a fixed size stack array, so an out of range value
+// (e.g. "-threads 5000", which no tool bounds-checks) overflows that array and
+// crashes the compiler. Called at the top of every RunThreadsOn().
+static void     ClampNumThreads()
+{
+    if (g_numthreads < 1)
+    {
+        Warning("Invalid thread count %d, using 1 thread\n", g_numthreads);
+        g_numthreads = 1;
+    }
+    else if (g_numthreads > MAX_THREADS)
+    {
+        Warning("Thread count %d exceeds the maximum of %d, using %d threads\n",
+                g_numthreads, MAX_THREADS, MAX_THREADS);
+        g_numthreads = MAX_THREADS;
+    }
+}
+
 q_threadpriority g_threadpriority = DEFAULT_THREAD_PRIORITY;
 
 #define THREADTIMES_SIZE 100
@@ -351,6 +370,8 @@ void            RunThreadsOn(int workcnt, bool showpacifier, q_threadfunction fu
     int             i;
     double          start, end;
 
+    ClampNumThreads();
+
     threadstart = I_FloatTime();
     start = threadstart;
     for (i = 0; i < THREADTIMES_SIZE; i++)
@@ -574,6 +595,8 @@ void            RunThreadsOn(int workcnt, bool showpacifier, q_threadfunction fu
     pthread_addr_t  status;
     pthread_attr_t  attrib;
     double          start, end;
+
+    ClampNumThreads();
 
     threadstart = I_FloatTime();
     start = threadstart;
