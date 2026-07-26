@@ -23,6 +23,11 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
 - CI ran `ctest` with no registered tests and always failed that step
 
 ### Added
+- Reproducible compiles: CSG's parallel phases now run single-threaded by
+  default, because `FindIntPlane` numbered planes and `WriteFace` ordered faces
+  by thread timing. Costs ~0.1% of total compile time. `-nodeterministic` opts out
+- `scripts/bspcheck.py`: geometric BSP validation (planarity, convexity,
+  degenerate faces, surface area, residual merge opportunities)
 - `scripts/compilebench.py`: times a full compile and fingerprints every BSP lump
   for regression checking
 - `install` target and CPack packaging (ZIP on Windows, TGZ elsewhere)
@@ -49,6 +54,8 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
   reproducible output
 - No RAD optimisation was attempted: profiling was inconclusive in the test
   environment (see `docs/BENCHMARKS.md`)
+- Face merging was investigated and left unchanged: residual merge candidates
+  are 0.7% of faces, and `MAXEDGES` is never the binding constraint
 
 ## [1.2.0] - Jul 11 2024
 ### Changed

@@ -19,6 +19,7 @@ upstream defaults left significant performance on the table:
 | `-threads` bounds check | `-threads 5000` crashed with a stack buffer overflow |
 | CMake `-O` level | Release builds were silently downgraded from `-O3` to `-O2` |
 | CMake build type | Unset `CMAKE_BUILD_TYPE` produced unoptimised binaries |
+| Reproducible output | Two compiles of one map produced different BSPs; CSG numbered planes and ordered faces by thread timing |
 
 ### Documentation
 
@@ -26,7 +27,8 @@ upstream defaults left significant performance on the table:
   here if you make maps: the compiler cannot do this for you, and this is the
   largest lever that exists.
 - `docs/BENCHMARKS.md` - every measurement taken, including the negative results
-  (`-O3` and LTO show no measurable gain; RAD profiling was inconclusive).
+  (`-O3` and LTO show no measurable gain; RAD profiling was inconclusive; face
+  merging has 0.7% headroom and was left alone).
 - `ANALISIS_MEJORAS.md` - full technical analysis and remaining roadmap.
 
 ### Measuring your own changes
@@ -39,8 +41,16 @@ python3 scripts/compilebench.py --tools tools --map yourmap.map --runs 3
 python3 scripts/compilebench.py --compare before.json after.json
 ```
 
-Always use `--threads 1` for regression comparisons: the tools are
-nondeterministic when multi-threaded (see `docs/BENCHMARKS.md`).
+`scripts/bspcheck.py` validates the geometry of a compiled BSP - planarity,
+convexity, degenerate faces, surface area, and how many face pairs could still
+be merged:
+
+```sh
+python3 scripts/bspcheck.py yourmap.bsp
+```
+
+Compiles are reproducible by default, so two runs on the same map yield an
+identical BSP. Pass `-nodeterministic` to CSG for the old behaviour.
 
 ### Building
 

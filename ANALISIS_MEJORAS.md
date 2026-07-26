@@ -74,6 +74,16 @@ con los archivos fuente en `tools/`. Ahora `cmake --install` deja los 5 binarios
 
 ### Infraestructura de medición
 
+**1.11 Builds reproducibles.** Dos compilaciones del mismo mapa daban BSPs distintos. Aislado a CSG:
+`FindIntPlane()` numera planos según qué hilo gana el lock, y `WriteFace()` escribe las caras en orden
+de finalización. VIS y RAD ya eran independientes del orden. Las tres fases paralelas de CSG ahora
+corren en un hilo por defecto; cuesta **0.1%** del tiempo total y el output resultante es byte-idéntico
+al baseline monohilo. `-nodeterministic` restaura lo anterior.
+
+**1.12 `scripts/bspcheck.py`.** Validador geométrico del BSP: planaridad, convexidad, caras
+degeneradas, área total (que la fusión debe preservar exactamente) y fusiones residuales. Probé que
+tiene sensibilidad real: al mover un vértice compartido reporta las 3 caras afectadas.
+
 **1.10 `scripts/compilebench.py`.** Cronometra las 4 etapas sobre un `.map` real y hace un fingerprint
 de cada lump del BSP (conteos + hash), para poder demostrar que un cambio no alteró la salida. Es lo que
 permitió verificar todo lo de arriba contra mapas reales de CS.
@@ -113,17 +123,21 @@ romper la iluminación. El profile *sí* sugiere que el tiempo está en ray cast
 llamadas, `CheckVisBitSparse` 43M). En `docs/BENCHMARKS.md` está el procedimiento para hacerlo bien con
 `perf` en hardware real.
 
-### 3.2 Mejorar la fusión de caras ❌ — ya es efectiva
-| Mapa | Caras finales | Liberadas por fusión | Reducción |
-|---|---|---|---|
-| ba_coliseum | 1144 | 975 | **46%** |
-| koth_sandy | 1259 | 303 | **19%** |
-| ba_dust_island | 583 | 149 | **20%** |
+### 3.2 Mejorar `TryMerge` ❌ — medido: 0.7% de margen
+Investigado a fondo esta vez, no descartado por precaución. Cuatro líneas de evidencia:
 
-Y `MergeFaceToList()` **ya llega a un punto fijo**: recursa tras cada fusión y reintenta contra toda la
-lista. El margen restante exige rediseñar `TryMerge` (que exige arista compartida exacta para mantener
-convexidad) y validarlo **requiere ver el mapa en el juego** — grietas y corrupción visual no se
-detectan con un diff del BSP, y no tengo forma de correr CS acá.
+1. **`maxedges = 0` rechazos** en los tres mapas → subir `MAXEDGES` no ganaría nada.
+2. **0 texinfo duplicados** (34 entradas, 34 únicas) → no se pierden fusiones por texinfo redundante.
+3. **`MergeFaceToList()` ya recursa** tras cada fusión, así que la lista final por plano es *pairwise*
+   no-fusionable: un punto fijo real.
+4. **Fusiones residuales en el BSP final: 32** en ba_coliseum. De esas, **26 están en nodos distintos**
+   del BSP, donde fusionar es estructuralmente imposible porque la cara pertenece a su nodo. Quedan
+   **6 sobre 815 caras = 0.7%**, y probablemente bloqueadas por `contents`/`detaillevel`/`facestyle`.
+
+Clave para entender por qué parece haber más margen del que hay: `sdHLBSP` hace `MergePlaneFaces()` y
+**después** `SubdivideFace()`. Las caras coplanares adyacentes del BSP final son subdivisiones
+*deliberadas* para respetar `MAX_SURFACE_EXTENT`. Un conteo naive da 697 "fusiones perdidas"; casi todas
+romperían el software renderer si se fusionaran.
 
 ### 3.3 `-O3` / LTO por defecto ❌ — sin mejora medible
 La varianza *dentro* de cada variante (hasta 0.87s) supera la diferencia *entre* variantes (0.10s).
@@ -132,27 +146,29 @@ Detalle completo en `docs/BENCHMARKS.md` §3.
 
 ---
 
-## 4. Hallazgo lateral: las tools no son deterministas
+## 4. Hallazgo lateral, ya arreglado: no-determinismo
 
-Descubierto al armar el baseline de regresión. Dos corridas del **mismo binario sin modificar** sobre
-`koth_sandy` con hilos autodetectados dieron: clipnodes +2, marksurfaces +1, visdata −4 bytes.
-Con `-threads 1` el output es byte-idéntico.
+Descubierto al armar el baseline de regresión: dos corridas del mismo binario sin modificar daban
+clipnodes +2, marksurfaces +1, visdata −4 bytes.
 
-Consecuencias: toda comparación de regresión debe ser con `-threads 1` (el script avisa si no), y los
-builds de mapas no son reproducibles bit a bit. No es un bug de corrección — los BSPs son válidos —
-pero es una limitación que conviene conocer.
+Aislado a **CSG y solo CSG** (fijando CSG en 1 hilo con VIS multihilo el output es byte-idéntico):
+`FindIntPlane()` asigna índices de plano según qué hilo gana el lock — el código original trae un
+comentario *"BUG: there might be some multithread issue --vluzacn"* justo ahí — y `WriteFace()` escribe
+las caras a `.p0`–`.p3` en orden de finalización. Ambos índices llegan a BSP, que es monohilo.
 
----
+**Arreglado:** las fases paralelas de CSG corren en un hilo por defecto. Costo 0.1% del total. Los tres
+mapas ahora compilan idénticos dos veces seguidas, y el resultado coincide byte a byte con el baseline
+monohilo previo.
 
 ## 5. Qué queda por hacer
 
 | # | Mejora | Área | Por qué no se hizo |
 |---|--------|------|--------------------|
-| 1 | Optimizar el ray casting de RAD | Compilación | Necesita `perf` en hardware real (§3.1) |
-| 2 | Rediseñar `TryMerge` | FPS | Necesita validación visual en el juego (§3.2) |
-| 3 | Builds de mapas reproducibles | Calidad | Requiere ordenar la escritura de salida por índice (§4) |
-| 4 | Medir `-O3`/LTO en hardware real | Build | El entorno tiene ±8% de ruido (§3.3) |
-| 5 | Probar el branch de Windows con MSVC | Portabilidad | Lo cubre el CI de GitHub Actions al subir |
+| 1 | Optimizar el ray casting de RAD | Compilación | Necesita `perf` en hardware real (§3.1). Es el único lugar con tiempo real que ganar |
+| 2 | Rediseñar `TryMerge` | FPS | Medido: 0.7% de margen (§3.2). No vale el riesgo |
+| 3 | Medir `-O3`/LTO en hardware real | Build | El entorno tiene ±8% de ruido (§3.3) |
+| 4 | Probar el branch de Windows con MSVC | Portabilidad | Lo cubre el CI de GitHub Actions |
+| 5 | Verificación visual en CS 1.6 | FPS/calidad | No puedo correr el juego. Es lo único que valida costuras de luz y grietas |
 
 ---
 

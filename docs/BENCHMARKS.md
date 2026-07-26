@@ -105,9 +105,11 @@ perf report --no-children
 
 Y validar cada cambio con `--threads 1` comparando el BSP lump por lump.
 
-## 5. Fusión de caras: ya es efectiva
+## 5. Fusión de caras: sin margen real (investigado a fondo)
 
-`MergeAll` / `TryMerge` en el BSP, medido con `-verbose`:
+Esta era la vía candidata a bajar `wpoly`. La respuesta, con evidencia, es que no hay margen.
+
+**Lo que la fusión ya logra** (`MergeAll` / `TryMerge`, medido con `-verbose`):
 
 | Mapa | Caras finales | Liberadas por fusión | Reducción |
 |---|---|---|---|
@@ -115,15 +117,51 @@ Y validar cada cambio con `--threads 1` comparando el BSP lump por lump.
 | koth_sandy | 1259 | 303 | **19%** |
 | ba_dust_island | 583 | 149 | **20%** |
 
-Además el algoritmo **ya llega a un punto fijo**: `MergeFaceToList()` recursa después de cada fusión
-exitosa y reintenta contra toda la lista, así que no quedan fusiones "obvias" sin hacer.
+**Rechazos de `TryMerge` instrumentados** (contador por cada uno de los 9 motivos):
 
-**Decisión:** no tocarlo. El margen que queda exige un rediseño de `TryMerge` (que exige arista
-compartida exacta para mantener convexidad), y validarlo requiere ver el mapa en el juego —
-corrupción visual y grietas no se detectan con un diff del BSP. El camino con retorno real está en
-`docs/FPS_Y_TOOL_TEXTURES.md`: que el mapper no genere esas caras.
+| Mapa | fusiones | maxedges | tex | convex | plane |
+|---|---|---|---|---|---|
+| ba_coliseum | 2131 | **0** | 7522 | 934+934 | 96 |
+| koth_sandy | 474 | **0** | 1884 | 10+10 | 177 |
+| ba_dust_island | 1040 | **0** | 286 | 47+47 | 0 |
 
-## 6. Las tools no son deterministas con múltiples hilos ⚠️
+`maxedges = 0` en los tres mapas: **subir `MAXEDGES` no ganaría nada**. Los conteos de `tex` y
+`contents` son altos pero engañosos, porque se chequean *antes* del test de arista compartida — la
+mayoría de esos pares no comparte arista.
+
+**Texinfo duplicados: 0.** Si CSG emitiera texinfos redundantes, caras visualmente idénticas fallarían
+el chequeo `texturenum` y se perderían fusiones. Parseé el lump: 34 entradas, 34 únicas, 0 caras usando
+un texinfo duplicado. Hipótesis descartada.
+
+**Fusiones residuales en el BSP final** (`scripts/bspcheck.py`). Acá estuvo el hallazgo importante.
+Un primer conteo naive dio **697** pares "fusionables" en ba_coliseum, lo cual habría sido enorme.
+Pero `sdHLBSP` hace `MergePlaneFaces()` y **después** `SubdivideFace()`: las caras coplanares adyacentes
+del BSP final son, en su mayoría, subdivisiones **deliberadas** para mantener el extent de lightmap
+dentro de `MAX_SURFACE_EXTENT`. Fusionarlas rompería el software renderer y el HLDS.
+
+Excluyendo los pares cuya unión excedería el límite de 240 unidades: **32**.
+Y mapeando cada cara a su nodo del BSP:
+
+| | ba_coliseum |
+|---|---|
+| pares residuales | 32 |
+| en **nodos distintos** (imposible: la cara pertenece a su nodo) | 26 |
+| en el **mismo nodo** (únicos candidatos reales) | 6 |
+
+**6 de 815 caras = 0.7%.** Y esos 6 están probablemente bloqueados por `contents` / `detaillevel` /
+`facestyle`, que son atributos de compilación que no quedan registrados en el BSP.
+
+**Decisión: no tocar `TryMerge`.** No por precaución, sino porque está medido que no hay nada que ganar.
+Sumado a que `MergeFaceToList()` ya recursa tras cada fusión exitosa, la lista final por plano es
+*pairwise* no-fusionable: un punto fijo real.
+
+> Nota metodológica: mi primer chequeo de convexidad reportó 84 caras no-convexas en ba_coliseum.
+> Era un bug **mío**: comparaba un producto cruz crudo contra un epsilon fijo, y esa magnitud escala
+> con el largo de las aristas, así que aristas largas con ángulos despreciables daban falsos positivos.
+> Normalizando por los largos queda un test angular independiente de escala, y los tres mapas dan
+> geometría limpia. Vale como recordatorio de sospechar de la herramienta antes que del compilador.
+
+## 6. No-determinismo: encontrado y arreglado ✅
 
 Descubierto al armar el baseline de regresión. Dos corridas del **mismo binario sin modificar** sobre
 `koth_sandy`, con hilos autodetectados:
@@ -134,15 +172,36 @@ Descubierto al armar el baseline de regresión. Dos corridas del **mismo binario
 | marksurfaces | 613 | 614 | +1 |
 | visibility | 1509 bytes | 1505 bytes | −4 |
 
-Con **`-threads 1` el output es byte-idéntico**.
+**Aislamiento por etapa.** Fijando CSG en 1 hilo pero dejando VIS multihilo, el output es
+byte-idéntico. O sea **VIS y RAD ya son independientes del orden**; toda la variación venía de CSG:
 
-Las unidades de trabajo se completan en orden no determinista y algunas etapas escriben a estructuras
-compartidas en ese orden. Consecuencias prácticas:
+- `FindIntPlane()` agrega al arreglo global de planos bajo lock: el hilo que gana define el índice del
+  plano. El código original incluso trae el comentario *"BUG: there might be some multithread issue
+  --vluzacn"* en ese lugar.
+- `WriteFace()` hace `fprintf` directo a los archivos `.p0`–`.p3` bajo lock: el orden de finalización
+  define el orden de las caras.
 
-1. **Toda comparación de regresión tiene que ser con `-threads 1`.** `compilebench.py` avisa si
-   detecta que no fue así.
-2. Dos compilaciones del mismo mapa no dan BSPs idénticos, lo cual complica los builds reproducibles.
-   No es un bug de corrección (los BSPs son válidos), pero sí una limitación conocida.
+Ambos índices llegan a BSP (que es monohilo), y de ahí salían los conteos distintos de clipnodes.
+
+**Arreglo:** las tres fases paralelas de CSG (`CreateBrush`, `CSGBrush`, `CalculateBrushUnions`) corren
+en un hilo cuando `g_deterministic` está activo, que ahora es **el default**.
+
+**Costo, medido:** CSG solo 0.046s → 0.059s. CSG+BSP+VIS end-to-end 0.170s → 0.180s. Contra ~8.5s de
+RAD en el mismo mapa, es **0.1%**. `-nodeterministic` restaura el comportamiento viejo.
+
+**Verificado:**
+
+| Mapa | dos compilaciones multihilo |
+|---|---|
+| ba_coliseum | idénticas |
+| koth_sandy | idénticas |
+| ba_dust_island | idénticas |
+
+Y el output determinista es **byte-idéntico al baseline monohilo previo** — o sea se arregló el orden,
+no se adoptó un resultado nuevo. Con `-nodeterministic` sigue variando, lo que confirma la atribución.
+
+Consecuencia práctica: **ya no hace falta `-threads 1` para comparar regresiones.** Se mantiene la
+recomendación igual, porque es la garantía más fuerte y no cuesta nada en mapas chicos.
 
 ## 7. Regresión del refactor de threading
 
