@@ -224,6 +224,8 @@ impl App {
     }
 
     fn start(&mut self) {
+        // Persist before every run, so a crash mid-compile cannot lose settings.
+        let _ = save_profile(&self.opts);
         self.log.clear();
         self.done.clear();
         self.total_secs = None;
@@ -266,6 +268,62 @@ impl App {
                     }
                 }
             },
+        );
+
+        row(
+            ui,
+            "Carpeta de salida",
+            "Dónde queda el .bsp. Si la dejas vacía, todo se genera junto al .map, \
+             mezclado con tus archivos fuente.\n\n\
+             Si la indicas, se copia el .map ahí y se compila esa copia: el .bsp, el \
+             .prt, los logs y los intermedios (.p0 a .p3) quedan todos en esa carpeta \
+             y tu carpeta de trabajo no se ensucia. El .map original nunca se toca.",
+            Some("recomendado"),
+            |ui| {
+                ui.text_edit_singleline(&mut self.opts.output_dir);
+                if ui.button("Buscar").clicked() {
+                    if let Some(p) = pick_dir() {
+                        self.opts.output_dir = p;
+                    }
+                }
+                if ui.button("Limpiar").clicked() {
+                    self.opts.output_dir.clear();
+                }
+            },
+        );
+
+        row(
+            ui,
+            "Carpeta de WADs",
+            "Dónde tienes tus .wad. Sirve para dos cosas:\n\n\
+             1) Se le pasa a RAD como -waddir para que encuentre las texturas al \
+             calcular la luz.\n\
+             2) Si activas la casilla de abajo, la lista de WADs del mapa se reescribe \
+             para apuntar a esta carpeta.",
+            None,
+            |ui| {
+                ui.text_edit_singleline(&mut self.opts.wad_dir);
+                if ui.button("Buscar").clicked() {
+                    if let Some(p) = pick_dir() {
+                        self.opts.wad_dir = p;
+                    }
+                }
+            },
+        );
+
+        row(
+            ui,
+            "Reescribir lista de WADs",
+            "Un .map guarda las rutas absolutas de los WADs de la máquina donde se \
+             hizo. Si el mapa es de otra persona, esas rutas no existen aquí y CSG no \
+             encuentra las texturas.\n\n\
+             Con esto activado se reescribe esa lista en la COPIA, apuntando a todos \
+             los .wad de tu carpeta de WADs más sdhlt.wad. Tu .map original queda \
+             intacto.\n\n\
+             Necesita una carpeta de salida, porque no se modifica el archivo fuente. \
+             CSG no tiene un equivalente a -waddir: solo lee esta clave del mapa.",
+            Some("si el mapa no es tuyo"),
+            |ui| ui.checkbox(&mut self.opts.rewrite_wad_key, ""),
         );
 
         ui.add_space(8.0);
@@ -366,11 +424,16 @@ impl App {
         row(
             ui,
             "Embeder texturas",
-            "Copia dentro del .bsp todas las texturas que usa el mapa. El mapa \
-             funciona sin que el jugador tenga el WAD, a cambio de un .bsp mucho más \
-             grande. Para mapas de servidor suele ser lo que quieres; para un mapa \
-             con WAD propio distribuido aparte, no.",
-            None,
+            "Copia dentro del .bsp las texturas que el mapa usa realmente (no el WAD \
+             entero, solo las que aparecen).\n\n\
+             QUÉ CAMBIA: el jugador ya no necesita tener el WAD. Se acabó el 'missing \
+             texture' al entrar al servidor y no hay que distribuir archivos aparte. \
+             A cambio el .bsp crece, típicamente entre unos cientos de KB y unos MB \
+             según cuántas texturas propias uses.\n\n\
+             Activado por defecto porque es lo que evita problemas a los jugadores. \
+             Desactívalo solo si distribuyes el WAD por tu cuenta y te importa el \
+             tamaño del .bsp.",
+            Some("activado"),
             |ui| ui.checkbox(&mut self.opts.nowadtextures, ""),
         );
 
@@ -378,9 +441,14 @@ impl App {
             ui,
             "Sin determinismo",
             "Por defecto este fork compila de forma reproducible: el mismo .map da \
-             siempre el mismo .bsp. Activar esto recupera el comportamiento viejo y \
-             ahorra ~0.1% de tiempo, a cambio de que dos compilados difieran. \
-             Sirve de poco.",
+             siempre el mismo .bsp, byte por byte.\n\n\
+             QUÉ CAMBIA: activarlo devuelve el comportamiento original, donde dos \
+             compilaciones del mismo mapa pueden diferir en unos pocos clipnodes y \
+             marksurfaces, porque CSG numera los planos según qué hilo gana la \
+             carrera. Ahorra ~0.1% del tiempo total.\n\n\
+             El determinismo importa cuando persigues un bug: si el mapa sale con una \
+             grieta rara, conviene que vuelva a salir igual en la siguiente \
+             compilación en vez de desaparecer sola.",
             Some("déjalo apagado"),
             |ui| ui.checkbox(&mut self.opts.nodeterministic, ""),
         );
@@ -395,31 +463,6 @@ impl App {
                 ui.add(egui::Slider::new(&mut self.opts.worldextent, 0..=65536).step_by(1024.0));
             },
         );
-
-        ui.add_space(6.0);
-        section(ui, "WADs a embeder", "-wadinclude, uno por línea de texto");
-        ui.horizontal(|ui| {
-            if ui.button("Agregar WAD").clicked() {
-                if let Some(p) = pick_file("WAD", "wad") {
-                    self.opts.wad_dirs.push(p);
-                }
-            }
-            if ui.button("Limpiar").clicked() {
-                self.opts.wad_dirs.clear();
-            }
-        });
-        let mut remove = None;
-        for (i, w) in self.opts.wad_dirs.iter().enumerate() {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(w).color(MUTED).small());
-                if ui.small_button("quitar").clicked() {
-                    remove = Some(i);
-                }
-            });
-        }
-        if let Some(i) = remove {
-            self.opts.wad_dirs.remove(i);
-        }
 
         self.ui_extra(ui, "CSG");
     }
@@ -447,9 +490,14 @@ impl App {
         row(
             ui,
             "Max node size",
-            "Tamaño máximo de un nodo del árbol. Valores más chicos dan más nodos y \
-             cortes más finos; más grandes, lo contrario. El default funciona bien casi \
-             siempre.",
+            "Tamaño máximo, en unidades, de un nodo del árbol BSP antes de partirlo.\n\n\
+             QUÉ CAMBIA: más chico produce más nodos y hojas, lo que da un PVS más \
+             fino (VIS puede descartar mejor) pero también más caras, un BSP más \
+             grande y VIS más lento. Más grande hace lo contrario: compila antes y el \
+             PVS queda más grueso.\n\n\
+             1024 es el equilibrio probado. Bajarlo a 512 a veces ayuda en mapas muy \
+             abiertos, pero mídelo con r_speeds antes de darlo por bueno: es igual de \
+             fácil empeorar los FPS.",
             Some("1024"),
             |ui| {
                 ui.add(egui::Slider::new(&mut self.opts.maxnodesize, 64..=4096));
@@ -569,9 +617,14 @@ impl App {
         row(
             ui,
             "Cielo suave",
-            "Ilumina con todo el domo del cielo en vez de una sola dirección. Da \
-             sombras exteriores mucho más creíbles. Apagarlo baja el nivel efectivo a \
-             4 y acelera, pero se nota.",
+            "Ilumina cada punto con todo el domo del cielo en lugar de una sola \
+             dirección.\n\n\
+             QUÉ CAMBIA: con esto los bordes de sombra en exteriores son graduales, \
+             como en la realidad, y las zonas en sombra reciben algo de luz azulada \
+             del cielo. Sin esto el sol es una sola dirección y las sombras quedan \
+             duras y de borde nítido, con aspecto de mapa antiguo.\n\n\
+             Apagarlo fuerza el nivel de cielo a 4 (258 rayos) y acelera bastante, \
+             pero la diferencia visual en exteriores es evidente.",
             Some("activado"),
             |ui| ui.checkbox(&mut self.opts.softsky, ""),
         );
@@ -579,9 +632,13 @@ impl App {
         row(
             ui,
             "Oversampling (-extra)",
-            "Toma 9 muestras por luxel en vez de 1. Es la mejora de calidad más \
-             visible que tiene RAD: bordes de sombra suaves en lugar de escalonados. \
-             Cuesta tiempo, no FPS.",
+            "Toma 9 muestras de luz por cada luxel en vez de 1, y promedia.\n\n\
+             QUÉ CAMBIA: es la mejora de calidad más visible de RAD. Sin esto los \
+             bordes de sombra salen escalonados, con el típico dentado de lightmap de \
+             16 unidades; con esto quedan suaves. También desaparecen los puntos de \
+             luz mal calculados en esquinas y superficies inclinadas.\n\n\
+             Cuesta tiempo de compilación y CERO FPS en juego: el lightmap resultante \
+             tiene exactamente el mismo tamaño.",
             Some("activado"),
             |ui| ui.checkbox(&mut self.opts.extra_sampling, ""),
         );
@@ -589,8 +646,14 @@ impl App {
         row(
             ui,
             "Bounces",
-            "Cuántas veces rebota la luz. Más rebotes = interiores menos planos y \
-             menos negros. 12 es lo que usa -extra en este fork.",
+            "Cuántas veces se le permite rebotar a la luz antes de darla por agotada.\n\n\
+             QUÉ CAMBIA: con 0 solo hay luz directa, así que todo lo que no ve una \
+             lámpara queda negro. Cada rebote reparte luz desde las superficies \
+             iluminadas hacia las que no lo están, y además les tiñe el color: un piso \
+             rojo iluminado va a teñir de rojo la pared de al lado. Los primeros \
+             rebotes cambian mucho; a partir de ~12 el aporte es tan pequeño que \
+             prácticamente no se distingue.\n\n\
+             Cuesta tiempo, no FPS. 12 es lo que aplica -extra en este fork.",
             Some("12"),
             |ui| {
                 ui.add(egui::Slider::new(&mut self.opts.bounce, 0..=32));
@@ -600,8 +663,12 @@ impl App {
         row(
             ui,
             "RAD rápido",
-            "Modo borrador: sacrifica calidad por velocidad. Útil mientras construyes, \
-             nunca para publicar.",
+            "Modo borrador de la iluminación.\n\n\
+             QUÉ CAMBIA: baja la calidad del muestreo y simplifica el cálculo de \
+             rebotes. El resultado sirve para ver que las luces están donde \
+             corresponde y que no quedó nada a oscuras, pero los degradados salen \
+             sucios y las sombras imprecisas.\n\n\
+             Útil mientras construyes; nunca para la versión que publicas.",
             None,
             |ui| ui.checkbox(&mut self.opts.rad_fast, ""),
         );
@@ -612,8 +679,15 @@ impl App {
         row(
             ui,
             "Chop",
-            "Tamaño de los parches de radiosidad en texturas normales. Más chico = \
-             más detalle en la luz indirecta y bastante más tiempo.",
+            "Tamaño, en unidades, de los parches en que RAD divide las superficies \
+             para repartir la luz rebotada.\n\n\
+             QUÉ CAMBIA: cada parche emite y recibe luz como una unidad. Más chico da \
+             luz indirecta con más detalle (los degradados en paredes grandes dejan de \
+             verse por bloques), pero el coste crece rápido: el trabajo va con el \
+             cuadrado de la cantidad de parches, así que bajarlo a la mitad puede \
+             cuadruplicar el tiempo y la RAM.\n\n\
+             64 es el default. Si un muro grande se ve 'por manchones', prueba 48 o 32 \
+             antes de tocar nada más.",
             Some("64"),
             |ui| {
                 ui.add(egui::Slider::new(&mut self.opts.chop, 16.0..=128.0));
@@ -623,8 +697,14 @@ impl App {
         row(
             ui,
             "Texchop",
-            "Igual que chop pero para superficies que emiten luz (texlights). Más \
-             chico da texlights más definidas.",
+            "Lo mismo que chop, pero para las superficies que EMITEN luz: las \
+             texlights definidas en lights.rad.\n\n\
+             QUÉ CAMBIA: controla con cuánto detalle se reparte la luz que sale de un \
+             cartel luminoso o un tubo fluorescente. Más chico hace que la forma de la \
+             fuente se note en la luz que proyecta, en vez de comportarse como una \
+             mancha difusa.\n\n\
+             Es más bajo que chop (32 contra 64) porque las texlights suelen ser \
+             pequeñas y su forma sí importa.",
             Some("32"),
             |ui| {
                 ui.add(egui::Slider::new(&mut self.opts.texchop, 8.0..=128.0));
@@ -634,9 +714,15 @@ impl App {
         row(
             ui,
             "Smooth",
-            "Ángulo en grados por debajo del cual dos caras se iluminan como una \
-             superficie curva. Alto suaviza terreno; demasiado alto suaviza esquinas \
-             que deberían ser filosas.",
+            "Ángulo máximo, en grados, para que dos caras vecinas se iluminen como si \
+             fueran una superficie curva continua.\n\n\
+             QUÉ CAMBIA: si el ángulo entre dos caras es menor que este valor, RAD \
+             mezcla sus normales y la luz cruza de una a otra sin corte. Por encima, \
+             deja un borde marcado.\n\n\
+             Subirlo suaviza terreno y arcos hechos con muchas caras. Pasarse hace que \
+             esquinas que deberían tener una arista clara se vean redondeadas y \
+             blandas. 50 grados funciona para casi todo; 70 para terreno muy \
+             facetado.",
             Some("50"),
             |ui| {
                 ui.add(egui::Slider::new(&mut self.opts.smooth, 0.0..=180.0));
@@ -667,18 +753,32 @@ impl App {
         row(
             ui,
             "Motor pre-25 aniversario",
-            "Ajusta el umbral de recorte de luz para el motor viejo de Half-Life. \
-             Actívalo solo si tu mapa apunta a clientes anteriores a la actualización \
-             del 25 aniversario.",
-            None,
+            "Baja el umbral de recorte de luz de 255 a 188.\n\n\
+             QUÉ CAMBIA: el motor anterior a la actualización del 25 aniversario no \
+             maneja valores de luz por encima de ~188. Si compilas sin esto y alguien \
+             juega en un cliente antiguo, las zonas más brillantes se ven rotas: \
+             quemadas o con el color dado vuelta.\n\n\
+             Al revés el error es mucho menor: un mapa compilado con -pre25 visto en \
+             el cliente nuevo solo se ve un poco menos brillante en los puntos más \
+             claros.\n\n\
+             Como en la práctica casi nadie usa el cliente del 25 aniversario, y el \
+             error es asimétrico, viene ACTIVADO por defecto. Desactívalo solo si \
+             sabes que todos tus jugadores están actualizados.",
+            Some("activado, casi siempre"),
             |ui| ui.checkbox(&mut self.opts.pre25, ""),
         );
 
         row(
             ui,
             "Ignorar sombras de modelos",
-            "Ignora zhlt_studioshadow. Los modelos dejan de proyectar sombra y RAD \
-             va más rápido.",
+            "Hace que RAD ignore la clave zhlt_studioshadow de las entidades.\n\n\
+             QUÉ CAMBIA: esa clave permite que un modelo (un árbol, una reja, una \
+             estatua) proyecte sombra real sobre el mapa, trazando su malla \
+             triángulo a triángulo. Con esta opción los modelos dejan de proyectar \
+             sombra: la luz los atraviesa como si no existieran.\n\n\
+             Solo importa si tu mapa usa esa clave. Cuando la usa, trazar la malla es \
+             caro, así que activarlo acelera bastante los compilados de prueba. Para \
+             la versión final déjalo apagado.",
             None,
             |ui| ui.checkbox(&mut self.opts.nostudioshadow, ""),
         );
@@ -815,6 +915,12 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// eframe calls this when the window closes. Preferences are saved here as
+    /// well as on every compile, so the button is only a manual extra.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let _ = save_profile(&self.opts);
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_messages();
         if self.job.is_some() {
@@ -898,12 +1004,18 @@ impl eframe::App for App {
                 };
                 ui.label(RichText::new(&self.status).color(color).small());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("Guardar preferencias").clicked() {
+                    let btn = ui.small_button("Guardar ahora");
+                    if btn.clicked() {
                         self.status = match save_profile(&self.opts) {
                             Ok(()) => "Preferencias guardadas.".to_string(),
                             Err(e) => format!("No pude guardar: {e}"),
                         };
                     }
+                    let _ = btn.on_hover_text(
+                        "Las preferencias se guardan solas al cerrar la ventana y al \
+                         empezar una compilación. Este botón solo fuerza el guardado \
+                         ahora.",
+                    );
                 });
             });
             ui.add_space(4.0);

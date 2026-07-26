@@ -155,6 +155,174 @@ fn hide_console(cmd: &mut Command) {
 #[cfg(not(windows))]
 fn hide_console(_cmd: &mut Command) {}
 
+/// Every .wad in a folder, plus sdhlt.wad from the tools folder.
+///
+/// sdhlt.wad holds the tool textures (NULL, HINT, SKIP, BEVELHINT...) and a
+/// compile fails without it, so it is always included even if the mapper keeps
+/// it somewhere else.
+fn collect_wads(wad_dir: &str, tools_dir: &str) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+
+    let tool_wad = Path::new(tools_dir).join("sdhlt.wad");
+    if tool_wad.is_file() {
+        out.push(tool_wad);
+    }
+
+    if let Ok(entries) = std::fs::read_dir(wad_dir) {
+        let mut found: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| x.eq_ignore_ascii_case("wad"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        found.sort();
+        for f in found {
+            // Skip a second copy of the tool wad.
+            let dup = f
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.eq_ignore_ascii_case("sdhlt.wad"))
+                .unwrap_or(false);
+            if !dup {
+                out.push(f);
+            }
+        }
+    }
+
+    out
+}
+
+/// Replaces the worldspawn "wad" key with the given list.
+///
+/// Maps carry absolute WAD paths from whoever built them, so a .map from
+/// someone else's machine will not compile here. Rewriting the key is the only
+/// way to fix that: CSG reads its WAD list from this key and has no equivalent
+/// of RAD's -waddir.
+fn rewrite_wad_key(map_text: &str, wads: &[PathBuf]) -> Option<String> {
+    if wads.is_empty() {
+        return None;
+    }
+    let joined = wads
+        .iter()
+        .map(|p| p.display().to_string().replace('\\', "/"))
+        .collect::<Vec<_>>()
+        .join(";");
+
+    let needle = "\"wad\"";
+    let start = map_text.find(needle)?;
+
+    // The value is the quoted string that follows the key.
+    let after_key = start + needle.len();
+    let rest = &map_text[after_key..];
+    let vstart = after_key + rest.find('"')?;
+    let vend = vstart + 1 + map_text[vstart + 1..].find('"')?;
+
+    let mut out = String::with_capacity(map_text.len() + joined.len());
+    out.push_str(&map_text[..vstart + 1]);
+    out.push_str(&joined);
+    out.push_str(&map_text[vend..]);
+    Some(out)
+}
+
+/// Decides where the compile happens and puts the .map there.
+///
+/// Returns the map path the tools should be pointed at. When an output folder
+/// is configured the source map is copied into it and everything the tools
+/// write (.bsp, .prt, logs, the .p0-.p3 intermediates) lands there, leaving the
+/// source folder untouched.
+fn prepare_workspace(opts: &Options, tx: &Sender<Msg>) -> Option<PathBuf> {
+    let src = PathBuf::from(&opts.map_path);
+    if !src.is_file() {
+        let _ = tx.send(Msg::Line(
+            LineKind::Error,
+            format!("No encuentro el mapa: {}", src.display()),
+        ));
+        return None;
+    }
+
+    if !opts.uses_output_dir() {
+        return Some(src);
+    }
+
+    let out_dir = PathBuf::from(opts.output_dir.trim());
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        let _ = tx.send(Msg::Line(
+            LineKind::Error,
+            format!("No pude crear {}: {e}", out_dir.display()),
+        ));
+        return None;
+    }
+
+    let name = src.file_name()?;
+    let dst = out_dir.join(name);
+
+    // Guard against copying a file onto itself.
+    let same = std::fs::canonicalize(&src).ok() == std::fs::canonicalize(&dst).ok()
+        && dst.exists();
+    if same {
+        return Some(dst);
+    }
+
+    let text = match std::fs::read_to_string(&src) {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = tx.send(Msg::Line(
+                LineKind::Error,
+                format!("No pude leer el mapa: {e}"),
+            ));
+            return None;
+        }
+    };
+
+    let mut final_text = text;
+    if opts.rewrite_wad_key && !opts.wad_dir.trim().is_empty() {
+        let wads = collect_wads(&opts.wad_dir, &opts.tools_dir);
+        if wads.is_empty() {
+            let _ = tx.send(Msg::Line(
+                LineKind::Warning,
+                format!(
+                    "No encontré ningún .wad en {}. Se deja la lista original del mapa.",
+                    opts.wad_dir
+                ),
+            ));
+        } else if let Some(patched) = rewrite_wad_key(&final_text, &wads) {
+            let _ = tx.send(Msg::Line(
+                LineKind::Command,
+                format!(
+                    "Lista de WADs reescrita en la copia ({} archivos desde {})",
+                    wads.len(),
+                    opts.wad_dir
+                ),
+            ));
+            final_text = patched;
+        } else {
+            let _ = tx.send(Msg::Line(
+                LineKind::Warning,
+                "El mapa no tiene clave \"wad\" en worldspawn; no se reescribió nada."
+                    .to_string(),
+            ));
+        }
+    }
+
+    if let Err(e) = std::fs::write(&dst, final_text) {
+        let _ = tx.send(Msg::Line(
+            LineKind::Error,
+            format!("No pude escribir {}: {e}", dst.display()),
+        ));
+        return None;
+    }
+
+    let _ = tx.send(Msg::Line(
+        LineKind::Command,
+        format!("Compilando en {}", out_dir.display()),
+    ));
+    Some(dst)
+}
+
 /// Spawns the compile. Returns immediately; progress arrives on the channel.
 pub fn start(opts: Options) -> Job {
     let (tx, rx) = channel();
@@ -163,7 +331,14 @@ pub fn start(opts: Options) -> Job {
 
     thread::spawn(move || {
         let overall = Instant::now();
-        let map = PathBuf::from(&opts.map_path);
+
+        let map = match prepare_workspace(&opts, &tx) {
+            Some(m) => m,
+            None => {
+                let _ = tx.send(Msg::Finished(overall.elapsed().as_secs_f64(), false));
+                return;
+            }
+        };
         let base = map.with_extension("");
         let work_dir = map.parent().map(|p| p.to_path_buf());
 
@@ -289,10 +464,19 @@ pub fn start(opts: Options) -> Job {
         }
 
         if all_ok {
-            let _ = tx.send(Msg::Line(
-                LineKind::Success,
-                "Compilación terminada.".to_string(),
-            ));
+            let bsp = base.with_extension("bsp");
+            if bsp.is_file() {
+                let size = std::fs::metadata(&bsp).map(|m| m.len()).unwrap_or(0);
+                let _ = tx.send(Msg::Line(
+                    LineKind::Success,
+                    format!("Listo: {} ({:.1} MB)", bsp.display(), size as f64 / 1e6),
+                ));
+            } else {
+                let _ = tx.send(Msg::Line(
+                    LineKind::Success,
+                    "Compilación terminada.".to_string(),
+                ));
+            }
         }
         let _ = tx.send(Msg::Finished(overall.elapsed().as_secs_f64(), all_ok));
     });

@@ -1,7 +1,7 @@
 //! Compile options, what each one does, and the presets.
 //!
-//! The advice in here is not folklore. Where a number is quoted it was measured
-//! on real CS 1.6 maps with the tools in this repository; see docs/BENCHMARKS.md
+//! The advice here is not folklore. Where a number is quoted it was measured on
+//! real CS 1.6 maps with the tools in this repository; see docs/BENCHMARKS.md
 //! for the raw figures and docs/FPS_Y_TOOL_TEXTURES.md for the FPS side.
 
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,7 @@ impl VisMatrix {
 
     pub fn label(self) -> &'static str {
         match self {
-            VisMatrix::Normal => "normal (rápido, más RAM)",
+            VisMatrix::Normal => "normal (rápido, mucha RAM)",
             VisMatrix::Sparse => "sparse (equilibrado)",
             VisMatrix::Off => "off (mapas enormes)",
         }
@@ -34,17 +34,23 @@ impl VisMatrix {
     pub fn help(self) -> &'static str {
         match self {
             VisMatrix::Normal => {
-                "Guarda la matriz de visibilidad completa en memoria. Es el más \
-                 rápido pero el que más RAM usa; en un mapa grande puede no entrar."
+                "Guarda en memoria, sin comprimir, qué parche de luz ve a qué otro. \
+                 Es el más rápido de los tres, pero el consumo de RAM crece con el \
+                 cuadrado de la cantidad de parches: en un mapa grande con -chop bajo \
+                 puede pedir varios GB y fallar por falta de memoria.\n\n\
+                 NO cambia la iluminación resultante, solo cómo se calcula."
             }
             VisMatrix::Sparse => {
-                "Guarda la matriz comprimida. Es el default y el equilibrio correcto \
-                 para casi todos los mapas. Si no sabes qué elegir, deja este."
+                "Guarda esa misma información comprimida: solo los pares que \
+                 realmente se ven. Usa mucha menos RAM a cambio de algo de CPU. Es el \
+                 default y el equilibrio correcto para prácticamente cualquier mapa.\n\n\
+                 NO cambia la iluminación resultante."
             }
             VisMatrix::Off => {
-                "No construye matriz: calcula la visibilidad cuando la necesita. \
-                 Mucho más lento, pero es la única opción si el mapa es tan grande \
-                 que los otros dos se quedan sin memoria."
+                "No construye ninguna matriz: recalcula la visibilidad cada vez que la \
+                 necesita. La RAM deja de ser un problema, pero es bastante más lento. \
+                 Solo tiene sentido cuando los otros dos se quedan sin memoria.\n\n\
+                 NO cambia la iluminación resultante."
             }
         }
     }
@@ -71,16 +77,16 @@ impl VisQuality {
         match self {
             VisQuality::Fast => {
                 "Cálculo aproximado de visibilidad. Compila en segundos, pero el PVS \
-                 queda de más: el motor dibuja cosas que no se ven y los FPS bajan. \
-                 Solo para ver si el mapa carga."
+                 queda de más: el motor dibuja cosas que en realidad no se ven y los \
+                 FPS bajan. Solo para comprobar que el mapa carga."
             }
             VisQuality::Normal => {
-                "Cálculo completo estándar. Está bien mientras estás construyendo."
+                "Cálculo completo estándar. Suficiente mientras construyes el mapa."
             }
             VisQuality::Full => {
-                "El PVS más ajustado que las herramientas saben calcular. Tarda más \
-                 en compilar y da MENOS wpoly en juego, o sea más FPS. \
-                 Usalo siempre en la versión que publicas."
+                "El PVS más ajustado que las herramientas saben calcular. Tarda más en \
+                 compilar y produce MENOS wpoly en juego, es decir más FPS. Úsalo \
+                 siempre en la versión que publicas."
             }
         }
     }
@@ -88,11 +94,17 @@ impl VisQuality {
 
 /// Everything the UI can set. Serialised as the saved profile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Options {
     // ---- paths ----
     pub map_path: String,
     pub tools_dir: String,
-    pub wad_dirs: Vec<String>,
+    /// Empty = compile next to the .map.
+    pub output_dir: String,
+    /// Folder holding the .wad files this map uses.
+    pub wad_dir: String,
+    /// Rewrite the worldspawn "wad" key of the copied map to point at wad_dir.
+    pub rewrite_wad_key: bool,
 
     // ---- shared ----
     pub threads: u32, // 0 = autodetect
@@ -145,7 +157,9 @@ impl Default for Options {
         Self {
             map_path: String::new(),
             tools_dir: String::new(),
-            wad_dirs: Vec::new(),
+            output_dir: String::new(),
+            wad_dir: String::new(),
+            rewrite_wad_key: true,
 
             threads: 0,
             chart: true,
@@ -153,7 +167,9 @@ impl Default for Options {
             low_priority: false,
 
             run_csg: true,
-            nowadtextures: false,
+            // On by default: a map whose textures are embedded works for everyone,
+            // with no "missing WAD" on join. See the tooltip for the trade-off.
+            nowadtextures: true,
             nodeterministic: false,
             worldextent: 0,
             csg_extra: String::new(),
@@ -181,7 +197,10 @@ impl Default for Options {
             texchop: 32.0,
             smooth: 50.0,
             vismatrix: VisMatrix::Sparse,
-            pre25: false,
+            // On by default: almost nobody runs the 25th anniversary build, and
+            // compiling for it breaks bright areas on older clients. The reverse
+            // is merely a little dimmer. See the tooltip.
+            pre25: true,
             nostudioshadow: false,
             profile: false,
             rad_extra: String::new(),
@@ -209,19 +228,19 @@ impl Preset {
     pub fn summary(self) -> &'static str {
         match self {
             Preset::Draft => {
-                "Lo más rápido posible, para ver si el mapa carga y no tiene leaks. \
-                 La iluminación va a estar fea y los FPS peores de lo real: no juzgues \
-                 el mapa con esto."
+                "Lo más rápido posible, para comprobar que el mapa carga y no tiene \
+                 leaks. La iluminación queda fea y los FPS peores que los reales: no \
+                 juzgues el mapa con esto."
             }
             Preset::Recommended => {
-                "El que deberías usar casi siempre. Calidad completa con las mejoras \
+                "El que conviene usar casi siempre. Calidad completa con las mejoras \
                  medidas de este fork ya aplicadas. Es también el default al abrir."
             }
             Preset::Release => {
                 "Para la versión que publicas. Igual que Recomendado pero con el \
                  muestreo de cielo al máximo (-skylevel 7). Cuesta ~1.65x más tiempo \
-                 en RAD por una diferencia que no se ve: solo tiene sentido si quieres \
-                 reproducir exactamente la salida de SDHLT original."
+                 en RAD por una diferencia que no se ve: solo tiene sentido si \
+                 necesitas reproducir exactamente la salida de SDHLT original."
             }
         }
     }
@@ -230,13 +249,17 @@ impl Preset {
     pub fn apply(self, o: &mut Options) {
         let map = o.map_path.clone();
         let tools = o.tools_dir.clone();
-        let wads = o.wad_dirs.clone();
+        let out = o.output_dir.clone();
+        let wad = o.wad_dir.clone();
+        let rewrite = o.rewrite_wad_key;
         let threads = o.threads;
 
         *o = Options::default();
         o.map_path = map;
         o.tools_dir = tools;
-        o.wad_dirs = wads;
+        o.output_dir = out;
+        o.wad_dir = wad;
+        o.rewrite_wad_key = rewrite;
         o.threads = threads;
 
         match self {
@@ -273,6 +296,14 @@ pub fn always_rules() -> Vec<Rule> {
                    número a mano salvo que quieras dejar CPU libre para otra cosa.",
         },
         Rule {
+            title: "Deja -pre25 activado",
+            body: "Salvo que sepas que todos tus jugadores usan el cliente del 25 \
+                   aniversario, que en la práctica casi nadie usa. Compilar sin -pre25 \
+                   y jugar en un cliente antiguo produce zonas brillantes rotas; al \
+                   revés solo se ve un poco menos brillante. El error es asimétrico, \
+                   así que -pre25 es la opción segura.",
+        },
+        Rule {
             title: "VIS en 'full' para lo que publicas",
             body: "VIS es lo único que decide cuánto le pide el mapa al motor en cada \
                    frame. 'full' tarda más en compilar y da menos wpoly en juego. \
@@ -297,8 +328,8 @@ pub fn always_rules() -> Vec<Rule> {
         Rule {
             title: "Más calidad de luz no cuesta FPS",
             body: "RAD no cambia la geometría que dibuja el motor, así que -extra y más \
-                   bounces te cuestan tiempo de compilación y algo de tamaño de BSP, \
-                   pero cero FPS en juego. Es el lugar donde puedes ser generoso.",
+                   bounces cuestan tiempo de compilación y algo de tamaño de BSP, pero \
+                   cero FPS en juego. Es el lugar donde puedes ser generoso.",
         },
         Rule {
             title: "Mira el chart cuando compiles en serio",
@@ -348,12 +379,6 @@ impl Options {
         if self.worldextent > 0 {
             push_num(&mut a, "-worldextent", self.worldextent);
         }
-        for dir in &self.wad_dirs {
-            if !dir.trim().is_empty() {
-                a.push("-wadinclude".to_string());
-                a.push(dir.clone());
-            }
-        }
         push_extra(&mut a, &self.csg_extra);
         a
     }
@@ -398,6 +423,12 @@ impl Options {
     pub fn rad_args(&self) -> Vec<String> {
         let mut a = Vec::new();
         self.shared(&mut a);
+        // Only RAD understands -waddir; CSG reads its WAD list from the map's
+        // worldspawn key, which is why the map gets rewritten instead.
+        if !self.wad_dir.trim().is_empty() {
+            a.push("-waddir".to_string());
+            a.push(self.wad_dir.clone());
+        }
         if self.rad_fast {
             a.push("-fast".to_string());
         }
@@ -431,21 +462,34 @@ impl Options {
         a
     }
 
-    /// Problems worth blocking or warning about before a compile starts.
+    /// True when the compile happens on a copy in the output folder rather than
+    /// beside the source map.
+    pub fn uses_output_dir(&self) -> bool {
+        !self.output_dir.trim().is_empty()
+    }
+
+    /// Whether the map's WAD list will actually be rewritten.
+    pub fn will_rewrite_wads(&self) -> bool {
+        self.rewrite_wad_key
+            && !self.wad_dir.trim().is_empty()
+            && self.uses_output_dir()
+    }
+
+    /// Problems worth warning about before a compile starts.
     pub fn warnings(&self) -> Vec<String> {
         let mut w = Vec::new();
 
         if self.subdivide > 240 {
             w.push(format!(
-                "-subdivide {} pasa el techo de 240. El mapa no va a cargar en el \
-                 software renderer ni en el HLDS.",
+                "-subdivide {} pasa el techo de 240. El mapa no cargará en el software \
+                 renderer ni en el HLDS.",
                 self.subdivide
             ));
         }
         if self.vis_quality == VisQuality::Fast {
             w.push(
-                "VIS en 'fast': el PVS queda de más y los FPS van a ser peores que en \
-                 la versión real. No publiques así."
+                "VIS en 'fast': el PVS queda de más y los FPS serán peores que en la \
+                 versión real. No publiques así."
                     .to_string(),
             );
         }
@@ -456,10 +500,17 @@ impl Options {
                     .to_string(),
             );
         }
+        if !self.pre25 {
+            w.push(
+                "-pre25 desactivado: las zonas más brillantes se verán rotas en \
+                 clientes anteriores al 25 aniversario, que son la mayoría."
+                    .to_string(),
+            );
+        }
         if self.leakonly {
             w.push(
-                "'leakonly' corta BSP en cuanto termina de buscar leaks: no vas a \
-                 obtener un mapa jugable."
+                "'leakonly' corta BSP en cuanto termina de buscar leaks: no obtendrás \
+                 un mapa jugable."
                     .to_string(),
             );
         }
@@ -473,7 +524,7 @@ impl Options {
         if self.nodeterministic {
             w.push(
                 "Sin determinismo, dos compilados del mismo mapa pueden dar BSPs \
-                 distintos. Ahorra ~0.1% de tiempo; casi nunca vale la pena."
+                 distintos. Ahorra ~0.1% de tiempo; casi nunca compensa."
                     .to_string(),
             );
         }
@@ -481,6 +532,16 @@ impl Options {
             w.push(
                 "-skylevel 8 son 65.538 rayos de cielo por muestra. Es enormemente más \
                  lento y la diferencia con 6 no se ve."
+                    .to_string(),
+            );
+        }
+        if self.rewrite_wad_key
+            && !self.wad_dir.trim().is_empty()
+            && !self.uses_output_dir()
+        {
+            w.push(
+                "Para reescribir la lista de WADs hace falta una carpeta de salida: el \
+                 .map original nunca se modifica, se compila una copia."
                     .to_string(),
             );
         }
