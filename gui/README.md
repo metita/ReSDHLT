@@ -8,19 +8,18 @@ instalador ni runtime.
 
 ---
 
-## ⚠️ Leé esto primero
+## Estado
 
-**Este código no está compilado ni probado.** Todo lo demás en este repositorio se
-verificó compilando y midiendo; esto no. El entorno donde lo escribí no tiene
-toolchain de Rust y tiene `crates.io` bloqueado, así que no pude ni siquiera
-correr `cargo check`.
+Compila con `eframe 0.28.1` en Windows.
 
-Está escrito con cuidado, con dependencias mínimas y versiones fijas, usando
-únicamente API de egui que lleva años estable. Pero es muy probable que el primer
-`cargo build` tire uno o dos errores.
+Se escribió sin poder compilarlo (el entorno donde salió no tiene toolchain de
+Rust y tiene `crates.io` bloqueado), así que se revisó a mano. El primer build
+tuvo **un** error en 1.760 líneas: `run_native` en eframe 0.28 espera que el
+closure devuelva `Result`, no `Box<dyn App>` — ese cambio de firma se creía
+posterior a 0.28. Corregido.
 
-**Si falla, pasame el error completo y lo arreglo.** Los errores de compilación de
-Rust son precisos: casi siempre es un tipo o un nombre de método.
+Si tocás algo y no compila, los errores de Rust son precisos: casi siempre es un
+tipo o un nombre de método.
 
 ---
 

@@ -944,9 +944,11 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "ReSDHLT",
         native_options,
+        // eframe 0.28's app creator returns a Result, so the boxed App has to be
+        // wrapped in Ok. Older releases returned the Box directly.
         Box::new(|cc| {
             apply_theme(&cc.egui_ctx);
-            Box::new(App::default())
+            Ok(Box::new(App::default()))
         }),
     )
 }

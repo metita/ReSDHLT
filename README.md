@@ -33,8 +33,8 @@ measured recommendations.
 cd gui && cargo run --release
 ```
 
-Note: unlike the rest of this repository, the GUI has not been compiled or
-tested - see `gui/README.md`.
+Note: the GUI is much less tested than the rest of this repository - it builds,
+but has not been exercised on a real compile. See `gui/README.md`.
 
 ### Documentation
 
