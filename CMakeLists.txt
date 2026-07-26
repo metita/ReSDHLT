@@ -11,6 +11,24 @@ project(sdhlt
 
 message("${CMAKE_PROJECT_NAME} > Starting configuration for ${CMAKE_PROJECT_DESCRIPTION}")
 
+#================
+# Build type
+#================
+
+# With single-config generators (Makefiles, Ninja) an unset CMAKE_BUILD_TYPE
+# means no optimisation flags at all, which silently produces compile tools
+# several times slower than intended. Default to Release.
+get_property(SDHLT_IS_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+
+if (NOT SDHLT_IS_MULTI_CONFIG AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type." FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
+        Debug Release RelWithDebInfo MinSizeRel)
+    message("${CMAKE_PROJECT_NAME} > CMAKE_BUILD_TYPE was not set, defaulting to Release")
+endif()
+
+option(SDHLT_LTO "Enable link time optimisation for Release builds." OFF)
+
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/tools)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/tools)
 
@@ -203,9 +221,11 @@ include_directories(
 #================
 
 if (${CMAKE_SYSTEM_NAME} MATCHES "Linux")
+    # No -O flag here on purpose: CMAKE_BUILD_TYPE supplies one (-O3 for
+    # Release) and GCC honours the last -O on the command line, so a hardcoded
+    # -O2 listed after it would silently downgrade every Release build.
     add_compile_options(
         -Wall
-        -O2
         -fno-strict-aliasing
         -pthread
         -pipe
@@ -264,3 +284,20 @@ target_compile_definitions(CSG PRIVATE SDHLCSG DOUBLEVEC_T)
 target_compile_definitions(RAD PRIVATE SDHLRAD)
 target_compile_definitions(VIS PRIVATE SDHLVIS)
 target_compile_definitions(RIPENT PRIVATE SDRIPENT)
+
+#================
+# Optimisation
+#================
+
+if (SDHLT_LTO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT SDHLT_LTO_OK OUTPUT SDHLT_LTO_MSG)
+
+    if (SDHLT_LTO_OK)
+        set_property(TARGET BSP CSG RAD VIS RIPENT
+            PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+        message("${CMAKE_PROJECT_NAME} > Link time optimisation enabled for Release")
+    else()
+        message(WARNING "${CMAKE_PROJECT_NAME} > Link time optimisation unavailable: ${SDHLT_LTO_MSG}")
+    endif()
+endif()
