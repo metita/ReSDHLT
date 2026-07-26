@@ -43,13 +43,34 @@ sudo apt install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
 
 ## Usar
 
-1. **Mapa**: el `.map` que exporta tu editor. Los `.bsp`, `.prt` y logs salen al
-   lado de ese archivo.
+1. **Mapa**: el `.map` que exporta tu editor.
 2. **Herramientas**: la carpeta con `sdHLCSG`, `sdHLBSP`, `sdHLVIS`, `sdHLRAD`.
    Si compilaste este repo, es `tools/`.
-3. Elige un preset y dale a **Compilar**.
+3. **Carpeta de salida** (opcional pero recomendada): dónde quieres el `.bsp`.
+4. Elige un preset y pulsa **Compilar**.
 
-"Guardar preferencias" deja un `resdhlt-gui.json` al lado del ejecutable.
+Las preferencias se guardan solas al cerrar la ventana y al empezar cada
+compilación, en un `resdhlt-gui.json` junto al ejecutable.
+
+### Carpeta de salida
+
+Si la dejas vacía, las herramientas escriben junto al `.map`: el `.bsp`, el
+`.prt`, los logs y los intermedios `.p0`-`.p3` se mezclan con tus fuentes.
+
+Si la indicas, el `.map` se copia ahí y se compila esa copia, así que todo lo
+generado queda en esa carpeta. **El `.map` original nunca se modifica.**
+
+### Carpeta de WADs
+
+Un `.map` guarda las rutas absolutas de los WADs de la máquina donde se hizo, así
+que un mapa de otra persona no compila sin tocar nada.
+
+- A **RAD** se le pasa como `-waddir`.
+- Para **CSG** no alcanza: lee su lista de WADs de la clave `wad` del worldspawn
+  y no tiene equivalente a `-waddir`. Por eso existe **Reescribir lista de
+  WADs**, que reescribe esa clave *en la copia* apuntando a todos los `.wad` de
+  tu carpeta más `sdhlt.wad`. Requiere carpeta de salida, justamente porque el
+  original no se toca.
 
 ## Los presets
 
@@ -75,6 +96,12 @@ detrás. Lo esencial:
 - **`-subdivide` en 240.** No es conservador: es el techo de
   `MAX_SURFACE_EXTENT`. Subirlo hace que el mapa no cargue en software renderer
   ni en HLDS.
+- **`-pre25` activado por defecto.** Baja el umbral de recorte de luz de 255 a
+  188. Casi nadie usa el cliente del 25 aniversario, y el error es asimétrico:
+  sin `-pre25` las zonas brillantes se rompen en clientes antiguos, mientras que
+  al revés solo se ven un poco menos brillantes.
+- **Texturas embebidas por defecto.** El jugador no necesita el WAD; a cambio el
+  `.bsp` crece.
 
 Los números están en `docs/BENCHMARKS.md`. Y lo que de verdad baja `wpoly` está en
 `docs/FPS_Y_TOOL_TEXTURES.md`: el compilador ya hace casi todo lo que puede.
