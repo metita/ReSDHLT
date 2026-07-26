@@ -6,7 +6,10 @@
 #pragma once
 #endif
 
-#define	MAX_THREADS	64
+// Upper bound on worker threads. Modern desktop CPUs can exceed the historic
+// 64-thread assumption, so this is deliberately generous; the actual thread
+// count is autodetected at runtime (see ThreadSetDefault).
+#define	MAX_THREADS	256
 
 typedef enum
 {
@@ -18,12 +21,11 @@ q_threadpriority;
 
 typedef void    (*q_threadfunction) (int);
 
-#ifdef SYSTEM_WIN32
+// -1 means "not set manually": ThreadSetDefault() will autodetect the number of
+// logical processors. Previously POSIX defaulted to 1, which made the
+// autodetection branch in ThreadSetDefault() dead code and forced every Linux
+// build to compile single-threaded unless -threads was passed explicitly.
 #define DEFAULT_NUMTHREADS -1
-#endif
-#ifdef SYSTEM_POSIX
-#define DEFAULT_NUMTHREADS 1
-#endif
 
 #define DEFAULT_THREAD_PRIORITY eThreadPriorityNormal
 

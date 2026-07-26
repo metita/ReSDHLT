@@ -25,9 +25,29 @@
 #ifdef HAVE_PTHREAD_H
 #include <pthread.h>
 #endif
+#include <unistd.h>
 #endif
 
 #include "hlassert.h"
+
+#include <thread>
+
+// Returns the number of logical processors available to this process, or 0 if
+// it cannot be determined. Used by both the Win32 and POSIX ThreadSetDefault().
+static int      GetLogicalProcessorCount()
+{
+    unsigned int    hc = std::thread::hardware_concurrency();
+
+    if (hc == 0)
+    {
+        return 0;
+    }
+    if (hc > (unsigned int)MAX_THREADS)
+    {
+        return MAX_THREADS;
+    }
+    return (int)hc;
+}
 
 q_threadpriority g_threadpriority = DEFAULT_THREAD_PRIORITY;
 
@@ -460,9 +480,24 @@ void            ThreadSetPriority(q_threadpriority type)
 
 void            ThreadSetDefault()
 {
-    if (g_numthreads == -1)
+    if (g_numthreads == -1)                                // not set manually
     {
-        g_numthreads = 1;
+        g_numthreads = GetLogicalProcessorCount();
+
+        if (g_numthreads < 1)                              // detection failed
+        {
+#ifdef _SC_NPROCESSORS_ONLN
+            long            n = sysconf(_SC_NPROCESSORS_ONLN);
+
+            if (n > (long)MAX_THREADS)
+            {
+                n = (long)MAX_THREADS;
+            }
+            g_numthreads = (n > 0) ? (int)n : 1;
+#else
+            g_numthreads = 1;
+#endif
+        }
     }
 }
 
