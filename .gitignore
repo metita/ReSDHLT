@@ -28,3 +28,6 @@ __pycache__/
 *.user
 .DS_Store
 Thumbs.db
+
+# Rust
+/gui/target/

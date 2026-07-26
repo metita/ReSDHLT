@@ -23,6 +23,9 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
 - CI ran `ctest` with no registered tests and always failed that step
 
 ### Added
+- `gui/`: dark-theme map compiler front-end in Rust/egui, with per-option
+  explanations and Draft/Recommended/Release presets built from the measured
+  results. Not compiled or tested - see `gui/README.md`
 - RAD `-skylevel N` (4-8): controls how finely the sky hemisphere is sampled.
   Measured, the skylight loop is ~96% of all rays RAD casts
 - RAD `-profile`: reports where RAD spends its time, with no external profiler.

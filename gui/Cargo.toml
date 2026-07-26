@@ -1,0 +1,29 @@
+[package]
+name = "resdhlt-gui"
+version = "0.1.0"
+edition = "2021"
+description = "Map compiler front-end for ReSDHLT"
+license = "GPL-2.0-or-later"
+
+[dependencies]
+# Versions are pinned exactly on purpose. eframe changed the signature of
+# run_native's app creator in 0.29 (it started returning a Result), so a loose
+# requirement like "0.28" could silently resolve to something incompatible
+# later. Pin it and the code stays buildable.
+eframe = { version = "=0.28.1", default-features = false, features = [
+    "default_fonts",
+    "glow",
+] }
+egui = "=0.28.1"
+rfd = "=0.14.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 2
+strip = true
+
+# Windows: build without a console window attached.
+[[bin]]
+name = "resdhlt-gui"
+path = "src/main.rs"

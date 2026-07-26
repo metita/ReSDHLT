@@ -22,6 +22,20 @@ upstream defaults left significant performance on the table:
 | Reproducible output | Two compiles of one map produced different BSPs; CSG numbered planes and ordered faces by thread timing |
 | Skylight sampling | ~96% of RAD's rays came from the skylight loop at a needlessly fine level; `-skylevel` now exposes it and defaults to 6, **~1.65x faster RAD** |
 
+### GUI
+
+`gui/` is a dark-theme map compiler front-end in Rust (egui): pick a map, pick a
+preset, hit compile, watch the log. Every option carries a tooltip explaining
+what it does and what to use, and a "what to always do" tab summarising the
+measured recommendations.
+
+```sh
+cd gui && cargo run --release
+```
+
+Note: unlike the rest of this repository, the GUI has not been compiled or
+tested - see `gui/README.md`.
+
 ### Documentation
 
 - `docs/FPS_Y_TOOL_TEXTURES.md` - how to actually lower `wpoly` and raise FPS. Start
