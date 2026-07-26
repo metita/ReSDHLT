@@ -178,12 +178,38 @@ Esta es **la única desviación deliberada** de la equivalencia con upstream en 
 `-skylevel 7` reproduce el lump `lighting` de upstream **byte a byte** (sha1 `40c7dc1ac1a3da50` en ambos),
 así que el comportamiento viejo está a un flag de distancia.
 
-### 4.5 Lo que queda
+### 4.5 Culling de cielo por leaf: medido y descartado ❌
 
-Todavía **67% de los rayos de cielo terminan ocluidos**. Para una muestra en interior se lanzan miles de
-rayos para descubrir que no se ve el cielo. Un test previo de visibilidad de cielo por leaf podría saltar
-el loop entero en esos casos, y a diferencia de bajar el nivel, **no cambiaría la iluminación**. Es la
-siguiente pista, y es medible con contadores exactos.
+La idea siguiente parecía la mejor: el 67% de los rayos de cielo terminan ocluidos, así que para una
+muestra en interior se lanzan miles de rayos para descubrir que no se ve el cielo. Un test de visibilidad
+por leaf saltaría el loop entero **sin cambiar la iluminación**.
+
+**Medí el techo antes de escribir una línea de código.** Conté cuántas entradas al loop terminan con
+**cero** impactos, o sea el loop completo desperdiciado:
+
+| mapa | entradas al loop | con cero impactos | techo del culling |
+|---|---|---|---|
+| koth_sandy | 2.028 | 466 | **23%** |
+| ba_dust_island | 6.623 | 137 | **2.1%** |
+
+**En el mapa pesado el 98% de las muestras consigue al menos un impacto de cielo.** No hay loop
+desperdiciado que saltar. Y tiene sentido en retrospectiva: los mapas caros son caros *porque* son
+exteriores y ven cielo. Las muestras de interior, donde el culling ayudaría, son minoría justo en los
+mapas donde importaría.
+
+El 67% de rayos ocluidos es desperdicio **dentro** de cada loop, no loops enteros desperdiciados: una
+muestra ve algo de cielo pero la mayoría de sus 4.098 direcciones están bloqueadas. Eso no lo arregla un
+culling por muestra; haría falta culling por dirección, que es el mismo problema que el test del rayo.
+
+**Decisión: no implementarlo.** El techo de 2.1% en el mapa que importa no justifica el riesgo.
+
+### 4.6 Lo que quedaría
+
+Una vía sigue abierta pero **cambia la iluminación**, así que ya no se valida con hash: los niveles de
+normales de cielo son una **jerarquía de subdivisión** (258 → 1.026 → 4.098 → 16.386). Un enfoque
+coarse-to-fine podría testear primero un nivel grueso y, en las regiones totalmente ocluidas, saltar sus
+subdivisiones finas. Es real pero complejo, y aproxima, así que hay que decidir cuánta desviación se
+acepta. Comparado con eso, `-skylevel` da 1.65× con una línea de configuración.
 
 ## 5. Fusión de caras: sin margen real (investigado a fondo)
 

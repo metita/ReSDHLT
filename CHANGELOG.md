@@ -62,9 +62,9 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
 - The tools are nondeterministic when multi-threaded: two runs of the same
   binary can differ by a few clipnodes/marksurfaces. Use `-threads 1` for
   reproducible output
-- 67% of skylight rays still end up occluded. A per-leaf sky visibility test
-  could skip the loop entirely for indoor samples, and unlike lowering the
-  level it would not change the lighting
+- Per-leaf sky visibility culling was measured and rejected: only 2.1% of
+  skylight loop entries on ba_dust_island get zero hits, so there is almost no
+  wasted loop to skip. Expensive maps are expensive because they see sky
 - `TestLine_r` is the hot spot (~1.8 billion entries per
   map), but rewriting its tail-call recursion as a loop produced identical
   lighting and was *slower*, so it was reverted. The cost is the number of rays

@@ -113,12 +113,26 @@ sentido son algorítmicas:
 Cualquiera de esas **cambia la iluminación**, así que hay que decidir explícitamente cuánta desviación es
 aceptable. Y ahí la validación cambia: ya no sirve exigir el lump `lighting` byte-idéntico.
 
-### La pista más fuerte que queda
+### Culling de cielo por leaf: ya medido, no paga
 
-El **67% de los rayos de cielo terminan ocluidos**. Para una muestra en interior se lanzan miles de rayos
-para descubrir que no se ve el cielo. Un test de visibilidad de cielo **por leaf** saltaría el loop entero
-en esos casos, y a diferencia de bajar el nivel **no cambiaría la iluminación** — así que se puede validar
-exigiendo el lump `lighting` byte-idéntico. Es la mejor relación ganancia/riesgo que queda.
+Parecía la mejor idea: 67% de los rayos de cielo se ocluyen, así que saltear el loop para muestras que no
+ven cielo sería gratis en calidad. Medí el techo antes de implementarlo, contando entradas al loop con
+cero impactos:
+
+| mapa | entradas | cero impactos | techo |
+|---|---|---|---|
+| koth_sandy | 2.028 | 466 | 23% |
+| ba_dust_island | 6.623 | 137 | **2.1%** |
+
+En el mapa pesado el 98% de las muestras ve algo de cielo. Los mapas caros son caros *porque* son
+exteriores. El desperdicio está **dentro** de cada loop, no en loops enteros, así que el culling por
+muestra no lo toca.
+
+### Lo que quedaría (cambia la iluminación)
+
+Los niveles de cielo son una jerarquía de subdivisión (258 → 1.026 → 4.098 → 16.386). Un esquema
+coarse-to-fine podría testear grueso primero y saltar las subdivisiones de las regiones totalmente
+ocluidas. Es real pero complejo y aproxima, así que ya no se valida con hash byte-idéntico.
 
 ## 6. Cómo medir un cambio, sin engañarse
 
