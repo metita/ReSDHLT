@@ -104,6 +104,7 @@ unsigned char g_minlight = DEFAULT_MINLIGHT;
 float_type g_transfer_compress_type = DEFAULT_TRANSFER_COMPRESS_TYPE;
 vector_type g_rgbtransfer_compress_type = DEFAULT_RGBTRANSFER_COMPRESS_TYPE;
 bool g_softsky = DEFAULT_SOFTSKY;
+int  g_skylevel = DEFAULT_SKYLEVEL;
 int g_blockopaque = DEFAULT_BLOCKOPAQUE;
 bool g_notextures = DEFAULT_NOTEXTURES;
 vec_t g_texreflectgamma = DEFAULT_TEXREFLECTGAMMA;
@@ -2792,6 +2793,7 @@ static void     Usage()
 		Log(" )\n");
 	}
 	Log("   -softsky #     : Smooth skylight.(0=off 1=on)\n");
+    Log("   -skylevel #    : Skylight sampling level, 4-8. Higher is smoother and much slower\n");
 	Log("   -depth #       : Thickness of translucent objects.\n");
 	Log("   -blockopaque # : Remove the black areas around opaque entities.(0=off 1=on)\n");
 	Log("   -notextures    : Don't load textures.\n");
@@ -2981,6 +2983,8 @@ static void     Settings()
 	sprintf (buf2, "%d (%s)", DEFAULT_RGBTRANSFER_COMPRESS_TYPE, vector_type_string[DEFAULT_RGBTRANSFER_COMPRESS_TYPE]);
 	Log("size of rgbtransfer  [ %17s ] [ %17s ]\n", buf1, buf2);
 	Log("soft sky             [ %17s ] [ %17s ]\n", g_softsky ? "on" : "off", DEFAULT_SOFTSKY ? "on" : "off");
+	Log("sky level            [ %17d ] [ %17d ] (%d sky rays per sample)\n",
+		g_skylevel, DEFAULT_SKYLEVEL, g_numskynormals[g_softsky ? g_skylevel : SKYLEVEL_SOFTSKYOFF]);
 	safe_snprintf(buf1, sizeof(buf1), "%3.3f", g_translucentdepth);
 	safe_snprintf(buf2, sizeof(buf2), "%3.3f", DEFAULT_TRANSLUCENTDEPTH);
 	Log("translucent depth    [ %17s ] [ %17s ]\n", buf1, buf2);
@@ -3749,6 +3753,29 @@ int             main(const int argc, char** argv)
 				int v = atoi(argv[++i]);
 				v = qmax (0, qmin (v, 255));
 				g_minlight = (unsigned char)v;
+			}
+			else
+			{
+				Usage();
+			}
+		}
+		else if (!strcasecmp(argv[i], "-skylevel"))
+		{
+			if (i + 1 < argc)
+			{
+				g_skylevel = atoi(argv[++i]);
+				if (g_skylevel < SKYLEVEL_SOFTSKYOFF)
+				{
+					Warning("Minimum value for '-skylevel' is %d, using %d",
+						SKYLEVEL_SOFTSKYOFF, SKYLEVEL_SOFTSKYOFF);
+					g_skylevel = SKYLEVEL_SOFTSKYOFF;
+				}
+				else if (g_skylevel > SKYLEVELMAX)
+				{
+					Warning("Maximum value for '-skylevel' is %d, using %d",
+						SKYLEVELMAX, SKYLEVELMAX);
+					g_skylevel = SKYLEVELMAX;
+				}
 			}
 			else
 			{

@@ -129,6 +129,16 @@
 	#define DEFAULT_TRANSFER_COMPRESS_TYPE FLOAT16
 	#define DEFAULT_RGBTRANSFER_COMPRESS_TYPE VECTOR32
 	#define DEFAULT_SOFTSKY true
+	// Subdivision level of the skylight normal sphere, and therefore how many
+	// rays each sample casts at the sky. g_numskynormals is
+	// {0, 6, 18, 66, 258, 1026, 4098, 16386, 65538}, so this is the single
+	// biggest lever on RAD's runtime: measured, the skylight loop accounts for
+	// ~96% of all rays cast. -softsky only ever selected level 7 or level 4,
+	// a 63x jump with nothing in between; this exposes the middle.
+	// Default 6, not 7. Measured on two maps: level 7 costs ~1.7x the RAD time of
+	// level 6 for a maximum per-luxel difference of 1/255, which is not visible.
+	// Use -skylevel 7 to restore the old output exactly.
+	#define DEFAULT_SKYLEVEL 6
 	#define DEFAULT_BLOCKOPAQUE 1
 	#define DEFAULT_TRANSLUCENTDEPTH 2.0f
 	#define DEFAULT_NOTEXTURES false
@@ -450,6 +460,7 @@ extern vec3_t	g_jitter_hack;
 	extern float_type g_transfer_compress_type;
 	extern vector_type g_rgbtransfer_compress_type;
 	extern bool g_softsky;
+	extern int  g_skylevel;
 	extern int g_blockopaque;
 	extern bool g_drawpatch;
 	extern bool g_drawsample;
