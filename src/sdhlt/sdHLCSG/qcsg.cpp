@@ -44,6 +44,7 @@ bool            g_noclip = DEFAULT_NOCLIP;              // no clipping hull "-no
 bool            g_onlyents = DEFAULT_ONLYENTS;          // onlyents mode "-onlyents"
 bool            g_wadtextures = DEFAULT_WADTEXTURES;    // "-nowadtextures"
 bool            g_chart = DEFAULT_CHART;                // show chart "-chart"
+bool            g_deterministic = DEFAULT_DETERMINISTIC; // reproducible output "-nodeterministic" to disable
 bool            g_skyclip = DEFAULT_SKYCLIP;            // no sky clipping "-noskyclip"
 bool            g_estimate = DEFAULT_ESTIMATE;          // progress estimates "-estimate"
 bool            g_info = DEFAULT_INFO;                  // "-info" ?
@@ -626,6 +627,26 @@ static bface_t* CopyFacesToOutside(brushhull_t* bh)
 //  CSGBrush
 // =====================================================================================
 extern const char *ContentsToString (const contents_t type);
+//
+// Runs one of CSG's parallel phases. With g_deterministic the work is done on a
+// single thread, because both the plane table (FindIntPlane appends under a
+// lock, so the winner decides the plane index) and the .p0-.p3 face files
+// (WriteFace fprintf's under a lock, so completion order decides face order)
+// depend on thread timing. Those indices flow into BSP, which is why two
+// compiles of one map yielded different clipnode and marksurface counts.
+//
+static void     RunCsgPhase(int workcount, q_threadfunction fn)
+{
+    int             saved = g_numthreads;
+
+    if (g_deterministic)
+    {
+        g_numthreads = 1;
+    }
+    RunThreadsOnIndividual(workcount, g_estimate, fn);
+    g_numthreads = saved;
+}
+
 static void     CSGBrush(int brushnum)
 {
     int             hull;
@@ -1424,7 +1445,8 @@ static void     ProcessModels()
         // csg them in order
         if (i == 0) // if its worldspawn....
         {
-            NamedRunThreadsOnIndividual(g_entities[i].numbrushes, g_estimate, CSGBrush);
+            Log("%s\n", Localize("CSGBrush:"));
+            RunCsgPhase(g_entities[i].numbrushes, CSGBrush);
             CheckFatal();
         }
         else
@@ -1538,6 +1560,7 @@ static void     Usage()
     Log("    -texdata #       : Alter maximum texture memory limit (in kb)\n");
     Log("    -lightdata #     : Alter maximum lighting memory limit (in kb)\n");
     Log("    -chart           : display bsp statitics\n");
+    Log("    -nodeterministic: allow nondeterministic output (marginally faster)\n");
     Log("    -low | -high     : run program an altered priority level\n");
     Log("    -nolog           : don't generate the compile logfiles\n");
 	Log("    -noresetlog      : Do not delete log file\n");
@@ -1621,6 +1644,7 @@ static void     Settings()
 
     Log("developer             [ %7d ] [ %7d ]\n", g_developer, DEFAULT_DEVELOPER);
     Log("chart                 [ %7s ] [ %7s ]\n", g_chart ? "on" : "off", DEFAULT_CHART ? "on" : "off");
+    Log("reproducible output   [ %7s ] [ %7s ]\n", g_deterministic ? "on" : "off", DEFAULT_DETERMINISTIC ? "on" : "off");
     Log("estimate              [ %7s ] [ %7s ]\n", g_estimate ? "on" : "off", DEFAULT_ESTIMATE ? "on" : "off");
     Log("max texture memory    [ %7d ] [ %7d ]\n", g_max_map_miptex, DEFAULT_MAX_MAP_MIPTEX);
 	Log("max lighting memory   [ %7d ] [ %7d ]\n", g_max_map_lightdata, DEFAULT_MAX_MAP_LIGHTDATA);
@@ -1815,6 +1839,14 @@ int             main(const int argc, char** argv)
         else if (!strcasecmp(argv[i], "-chart"))
         {
             g_chart = true;
+        }
+        else if (!strcasecmp(argv[i], "-nodeterministic"))
+        {
+            g_deterministic = false;
+        }
+        else if (!strcasecmp(argv[i], "-deterministic"))
+        {
+            g_deterministic = true;
         }
         else if (!strcasecmp(argv[i], "-low"))
         {
@@ -2302,7 +2334,8 @@ int             main(const int argc, char** argv)
     CheckForNoClip(); 
 
     // createbrush
-    NamedRunThreadsOnIndividual(g_nummapbrushes, g_estimate, CreateBrush);
+    Log("%s\n", Localize("CreateBrush:"));
+    RunCsgPhase(g_nummapbrushes, CreateBrush);
     CheckFatal();
 
 
@@ -2317,7 +2350,8 @@ int             main(const int argc, char** argv)
     // Calc brush unions
     if ((g_BrushUnionThreshold > 0.0) && (g_BrushUnionThreshold <= 100.0))
     {
-        NamedRunThreadsOnIndividual(g_nummapbrushes, g_estimate, CalculateBrushUnions);
+        Log("%s\n", Localize("CalculateBrushUnions:"));
+        RunCsgPhase(g_nummapbrushes, CalculateBrushUnions);
     }
 
     // open hull files

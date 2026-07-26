@@ -38,6 +38,11 @@
 #define DEFAULT_WADTEXTURES true
 #define DEFAULT_SKYCLIP     true
 #define DEFAULT_CHART       true //seedee
+// Reproducible output by default. CSG's parallel phases number planes and
+// append faces in whatever order threads reach them, so two compiles of the
+// same map produced different BSPs. Serialising those phases costs about 13ms
+// on a mid-size map, against 8.5s of RAD, so correctness wins.
+#define DEFAULT_DETERMINISTIC true
 #define DEFAULT_INFO        true
 
 #define FLOOR_Z 0.7 // Quake default
@@ -257,6 +262,7 @@ extern void		InitDefaultHulls ();
 // csg.c
 
 extern bool     g_chart;
+extern bool     g_deterministic;
 extern bool     g_onlyents;
 extern bool     g_noclip;
 extern bool     g_wadtextures;
