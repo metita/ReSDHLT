@@ -18,6 +18,10 @@ Makefile.cmake
 tools/*.exe
 tools/sd*
 
+# Python
+__pycache__/
+*.py[cod]
+
 # Editor / OS
 .vscode/
 .idea/
