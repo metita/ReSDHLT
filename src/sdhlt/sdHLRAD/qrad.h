@@ -515,6 +515,11 @@ typedef struct
 	int headnode;
 } opaquemodel_t;
 extern opaquemodel_t *opaquemodels;
+extern vec3_t g_opaque_bounds_mins;
+extern vec3_t g_opaque_bounds_maxs;
+extern bool   g_opaque_bounds_valid;
+extern void   BuildOpaqueBounds ();
+extern void   BuildSkyLeafList ();
 #endif
 extern void		CreateOpaqueNodes();
 extern int		TestLineOpaque(int modelnum, const vec3_t modelorigin, const vec3_t start, const vec3_t stop);

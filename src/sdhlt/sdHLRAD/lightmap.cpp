@@ -2442,6 +2442,100 @@ void BuildDiffuseNormals ()
 	free (edges);
 	free (triangles);
 }
+// =====================================================================================
+//  Sky reachability
+//      A luxel deep inside a building still fires one ray per sky normal - 4098
+//      of them at -skylevel 6 - and every one of them comes back occluded. The
+//      PVS already knows better: a ray reaches sky only by crossing the leaf the
+//      sky face belongs to, so if no such leaf is in the sample's PVS, no
+//      straight line from the sample reaches sky. PVS is conservative (a
+//      superset of what is really visible), so a negative answer here cannot
+//      darken anything that would otherwise be lit.
+//
+//      Sky-touching leaves are few, so they are kept as a list of bit indices
+//      and tested one by one instead of scanning the whole PVS.
+// =====================================================================================
+static int*     g_skyleaves = NULL;     // pvs bit index of each sky-touching leaf
+static int      g_numskyleaves = 0;
+static bool     g_skyleaves_usable = false;
+
+void            BuildSkyLeafList()
+{
+	g_skyleaves_usable = false;
+	g_numskyleaves = 0;
+	free (g_skyleaves);
+	g_skyleaves = (int *)malloc (qmax (1, g_dmodels[0].visleafs) * sizeof (int));
+	hlassume (g_skyleaves != NULL, assume_NoMemory);
+
+	// Leaf 0 is the solid outside; visleaf n is g_dleafs[n + 1], and its bit in
+	// a decompressed PVS is n.
+	for (int leafnum = 1; leafnum <= g_dmodels[0].visleafs; leafnum++)
+	{
+		const dleaf_t *leaf = &g_dleafs[leafnum];
+		bool touches_sky = false;
+
+		for (int m = 0; m < leaf->nummarksurfaces && !touches_sky; m++)
+		{
+			int facenum = g_dmarksurfaces[leaf->firstmarksurface + m];
+			const dface_t *f = &g_dfaces[facenum];
+			if (!strncasecmp (GetTextureByNumber (f->texinfo), "sky", 3))
+			{
+				touches_sky = true;
+			}
+		}
+
+		if (touches_sky)
+		{
+			g_skyleaves[g_numskyleaves++] = leafnum - 1;
+		}
+	}
+
+	// Finding no sky face at all means either a map with no sky, where skipping
+	// every sky ray would be correct, or a map this detection did not
+	// understand. A black map is not worth that bet: the optimisation switches
+	// itself off instead.
+	g_skyleaves_usable = (g_numskyleaves > 0);
+}
+
+// True when a sky ray from a sample with this PVS could reach a sky brush.
+static bool     SampleMayReachSky(const byte* const pvs)
+{
+	if (!g_skyleaves_usable)
+	{
+		return true;
+	}
+	for (int i = 0; i < g_numskyleaves; i++)
+	{
+		int bit = g_skyleaves[i];
+		if (pvs[bit >> 3] & (1 << (bit & 7)))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+static void     CalcTexToWorld(int surfacenum, vec3_t textoworld[2])
+{
+	dface_t *f = &g_dfaces[surfacenum];
+	const dplane_t *dp = getPlaneFromFace (f);
+	texinfo_t *tex = &g_texinfo[f->texinfo];
+
+	for (int x = 0; x < 2; x++)
+	{
+		CrossProduct (tex->vecs[1 - x], dp->normal, textoworld[x]);
+		vec_t len = DotProduct (textoworld[x], tex->vecs[x]);
+		if (fabs (len) < NORMAL_EPSILON)
+		{
+			VectorClear (textoworld[x]);
+		}
+		else
+		{
+			VectorScale (textoworld[x], 1 / len, textoworld[x]);
+		}
+	}
+}
+
 static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const vec3_t normal, vec3_t* sample
 								  , byte* styles
 								  , int step
@@ -2465,7 +2559,24 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 	vec3_t			testline_origin;
 	vec3_t			adds[ALLSTYLES];
 	int				style;
-	memset (adds, 0, ALLSTYLES * sizeof(vec3_t));
+	// Which entries of adds[] a sample actually receives light in. One or two,
+	// in practice: clearing all 64 and then scanning all 64 meant 768 bytes of
+	// memset and 64 branches on each of the million-plus calls per map, nearly
+	// all of it on zeroes nobody reads. touch_style() is the only way into
+	// adds[]; adding a write without it would read uninitialised stack.
+	int				touched[ALLSTYLES];
+	int				numtouched = 0;
+	bool			istouched[ALLSTYLES];
+	memset (istouched, 0, sizeof (istouched));
+	auto touch_style = [&](int st)
+	{
+		if (!istouched[st])
+		{
+			istouched[st] = true;
+			touched[numtouched++] = st;
+			VectorClear (adds[st]);
+		}
+	};
 	bool			lighting_diversify;
 	vec_t			lighting_power;
 	vec_t			lighting_scale;
@@ -2473,28 +2584,8 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 	lighting_scale = g_lightingconeinfo[miptex][1];
 	lighting_diversify = (lighting_power != 1.0 || lighting_scale != 1.0);
 	vec3_t			texlightgap_textoworld[2];
-	// calculates textoworld
-	{
-		dface_t *f = &g_dfaces[texlightgap_surfacenum];
-		const dplane_t *dp = getPlaneFromFace (f);
-		texinfo_t *tex = &g_texinfo[f->texinfo];
-		int x;
-		vec_t len;
-
-		for (x = 0; x < 2; x++)
-		{
-			CrossProduct (tex->vecs[1 - x], dp->normal, texlightgap_textoworld[x]);
-			len = DotProduct (texlightgap_textoworld[x], tex->vecs[x]);
-			if (fabs (len) < NORMAL_EPSILON)
-			{
-				VectorClear (texlightgap_textoworld[x]);
-			}
-			else
-			{
-				VectorScale (texlightgap_textoworld[x], 1 / len, texlightgap_textoworld[x]);
-			}
-		}
-	}
+	bool			texlightgap_textoworld_ready = false;
+	const bool		sample_may_reach_sky = SampleMayReachSky (pvs);
 
     for (i = 0; i < 1 + g_dmodels[0].visleafs; i++)
     {
@@ -2508,6 +2599,13 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
                     // skylights work fundamentally differently than normal lights
                     if (l->type == emit_skylight)
                     {
+						// Nothing this sample can see is sky: both the sun loop
+						// and the sky dome below would trace thousands of rays
+						// only to find them all occluded.
+						if (!sample_may_reach_sky)
+						{
+							continue;
+						}
 						if (!g_sky_lighting_fix)
 						{
 							if (sky_used)
@@ -2574,7 +2672,8 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 								else
 									continue; // dynamic light of other styles hits this toggleable opaque entity, then it completely vanishes.
 							}
-							VectorAdd (adds[style], add_one, adds[style]);
+							touch_style (style);
+						VectorAdd (adds[style], add_one, adds[style]);
 						  } // (loop over the normals)
 						}
 						while (0);
@@ -2658,7 +2757,8 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 									else
 										continue; // dynamic light of other styles hits this toggleable opaque entity, then it completely vanishes.
 								}
-								VectorAdd (adds[style], add_one, adds[style]);
+								touch_style (style);
+						VectorAdd (adds[style], add_one, adds[style]);
 							} // (loop over the normals)
 
 						}
@@ -2730,6 +2830,12 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 							if (l->texlightgap > 0)
 							{
 								vec_t test;
+
+								if (!texlightgap_textoworld_ready)
+								{
+									CalcTexToWorld (texlightgap_surfacenum, texlightgap_textoworld);
+									texlightgap_textoworld_ready = true;
+								}
 
 								test = dot2 * dist; // distance from spot to texlight plane;
 								test -= l->texlightgap * fabs (DotProduct (l->normal, texlightgap_textoworld[0])); // maximum distance reduction if the spot is allowed to shift l->texlightgap pixels along s axis
@@ -2889,6 +2995,7 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 							else
 								continue; // dynamic light of other styles hits this toggleable opaque entity, then it completely vanishes.
 						}
+						touch_style (style);
 						VectorAdd (adds[style], add, adds[style]);
                     } // end emit_skylight
 
@@ -2897,8 +3004,24 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
         }
     }
 
-	for (style = 0; style < ALLSTYLES; ++style)
+	// Ascending style order: which slot of styles[] a style lands in depends on
+	// the order they are visited, so keeping that identical to the old full
+	// scan is what makes this a pure speed change. numtouched is 1 or 2 in
+	// practice, so an insertion sort is the right tool.
+	for (int a = 1; a < numtouched; a++)
 	{
+		int key = touched[a];
+		int b = a - 1;
+		for (; b >= 0 && touched[b] > key; b--)
+		{
+			touched[b + 1] = touched[b];
+		}
+		touched[b + 1] = key;
+	}
+
+	for (int t = 0; t < numtouched; ++t)
+	{
+		style = touched[t];
 		if (VectorMaximum(adds[style]) > g_corings[style] * 0.1)
 		{
 			for (style_index = 0; style_index < ALLSTYLES; style_index++)
@@ -3224,9 +3347,9 @@ void CalcLightmap (lightinfo_t *l, byte *styles)
 	int facenum;
 	int i, j;
 	byte pvs[(MAX_MAP_LEAFS + 7) / 8];
-	int lastoffset;
+	int lastoffset = -2;   // -2 = nothing decompressed yet
 	byte pvs2[(MAX_MAP_LEAFS + 7) / 8];
-	int lastoffset2;
+	int lastoffset2 = -2;
 
 	facenum = l->surfnum;
 	memset (l->lmcache, 0, l->lmcachewidth * l->lmcacheheight * sizeof (vec3_t [ALLSTYLES]));
@@ -3386,7 +3509,7 @@ void CalcLightmap (lightinfo_t *l, byte *styles)
 					}
 					else
 					{
-						DecompressVis(&g_dvisdata[leaf->visofs], pvs, sizeof(pvs));
+						DecompressVis(&g_dvisdata[leaf->visofs], pvs, (MAX_MAP_LEAFS + 7) / 8);
 					}
 				}
 				lastoffset = thisoffset;
@@ -3412,7 +3535,7 @@ void CalcLightmap (lightinfo_t *l, byte *styles)
 						}
 						else
 						{
-							DecompressVis(&g_dvisdata[leaf2->visofs], pvs2, sizeof(pvs2));
+							DecompressVis(&g_dvisdata[leaf2->visofs], pvs2, (MAX_MAP_LEAFS + 7) / 8);
 						}
 					}
 					lastoffset2 = thisoffset2;
@@ -3474,6 +3597,7 @@ void CalcLightmap (lightinfo_t *l, byte *styles)
 		}
 	}
 }
+
 void            BuildFacelights(const int facenum)
 {
     PROF_SCOPE(PROF_BUILDFACELIGHTS);

@@ -2566,6 +2566,8 @@ static void     RadWorld()
     MakeTnodes(&g_dmodels[0]);
 	CreateOpaqueNodes();
 	LoadOpaqueEntities();
+	BuildOpaqueBounds();
+	BuildSkyLeafList();
 
     // turn each face into a single patch
     MakePatches();

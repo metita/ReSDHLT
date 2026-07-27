@@ -309,18 +309,31 @@ void            MakeTnodes(dmodel_t* /*bm*/)
 
 //==========================================================
 
-int             TestLine_r(const int node, const vec3_t start, const vec3_t stop
+// A ray is walked down the BSP with this, ~1.8 billion node visits per map, so
+// the call overhead is worth removing where it is free to do so: the three tail
+// positions (both children on one side, and the far half of a split segment)
+// become a loop, and only the genuine two-way splits still recurse. Semantics
+// are unchanged, node for node.
+int             TestLine_r(const int node_in, const vec3_t start_in, const vec3_t stop_in
 						   , int &linecontent
 						   , vec_t *skyhit
 						   )
 {
-    PROF_CALL(PROF_TESTLINE_R);
     tnode_t*        tnode;
     float           front, back;
     vec3_t          mid;
     float           frac;
     int             side;
     int             r;
+    int             node = node_in;
+    vec3_t          start, stop;
+
+    VectorCopy (start_in, start);
+    VectorCopy (stop_in, stop);
+
+    while (1)
+    {
+    PROF_CALL(PROF_TESTLINE_R);
 
 	if (node < 0)
 	{
@@ -369,17 +382,13 @@ int             TestLine_r(const int node, const vec3_t start, const vec3_t stop
 
 	if (front > ON_EPSILON/2 && back > ON_EPSILON/2)
 	{
-		return TestLine_r(tnode->children[0], start, stop
-			, linecontent
-			, skyhit
-			);
+		node = tnode->children[0];
+		continue;
 	}
 	if (front < -ON_EPSILON/2 && back < -ON_EPSILON/2)
 	{
-		return TestLine_r(tnode->children[1], start, stop
-			, linecontent
-			, skyhit
-			);
+		node = tnode->children[1];
+		continue;
 	}
 	if (fabs(front) <= ON_EPSILON && fabs(back) <= ON_EPSILON)
 	{
@@ -412,10 +421,10 @@ int             TestLine_r(const int node, const vec3_t start, const vec3_t stop
 		);
 	if (r != CONTENTS_EMPTY)
 		return r;
-	return TestLine_r(tnode->children[!side], mid, stop
-		, linecontent
-		, skyhit
-		);
+	// tail call: walk the far half of the segment in place
+	node = tnode->children[!side];
+	VectorCopy (mid, start);
+    }
 }
 
 int             TestLine(const vec3_t start, const vec3_t stop
@@ -826,6 +835,33 @@ int TestLineOpaque_r (int nodenum, const vec3_t start, const vec3_t stop)
 		}
 		return TestLineOpaque_r (thisnode->children[side], start, mid)
 			|| TestLineOpaque_r (thisnode->children[!side], mid, stop);
+	}
+}
+
+// Union of every opaque entity's bounds, in world space. A ray that misses this
+// box cannot hit any of them, which turns the per-ray scan over the opaque list
+// into one box test on the maps that have many of them.
+vec3_t g_opaque_bounds_mins;
+vec3_t g_opaque_bounds_maxs;
+bool   g_opaque_bounds_valid = false;
+
+void BuildOpaqueBounds ()
+{
+	g_opaque_bounds_valid = false;
+	VectorFill (g_opaque_bounds_mins,  99999999.0);
+	VectorFill (g_opaque_bounds_maxs, -99999999.0);
+
+	for (unsigned x = 0; x < g_opaque_face_count; x++)
+	{
+		const opaquemodel_t *m = &opaquemodels[g_opaque_face_list[x].modelnum];
+		for (int k = 0; k < 3; k++)
+		{
+			vec_t lo = m->mins[k] + g_opaque_face_list[x].origin[k];
+			vec_t hi = m->maxs[k] + g_opaque_face_list[x].origin[k];
+			if (lo < g_opaque_bounds_mins[k]) g_opaque_bounds_mins[k] = lo;
+			if (hi > g_opaque_bounds_maxs[k]) g_opaque_bounds_maxs[k] = hi;
+		}
+		g_opaque_bounds_valid = true;
 	}
 }
 

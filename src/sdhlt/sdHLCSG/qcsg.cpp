@@ -17,6 +17,7 @@
 #ifdef SYSTEM_WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h> //--vluzacn
+#include <stdio.h>   // _setmaxstdio
 #endif
 
 /*
@@ -1748,6 +1749,14 @@ int             main(const int argc, char** argv)
     const char*     mapname_from_arg = NULL;    // mapname path from passed argvar
 
     g_Program = "sdHLCSG";
+
+#ifdef SYSTEM_WIN32
+    // The CRT allows 512 open streams by default, and CSG keeps one per wad for
+    // the whole run. With MAX_WADPATHS at 512 that ceiling is reachable, and the
+    // failure mode is a confusing "Could not open wad file" on a file that is
+    // right there, so ask for headroom up front.
+    _setmaxstdio(2048);
+#endif
 
 	int argcold = argc;
 	char ** argvold = argv;

@@ -1,6 +1,10 @@
 #include "qrad.h"
 #include "profiling.h"
 
+// Points in a patch winding, past which the sight-area helpers fall back to the
+// heap. Real windings sit far below this; the buffer is 8 KB of stack at worst.
+#define SIGHTAREA_STACK_EDGES 64
+
 // =====================================================================================
 //  point_in_winding
 //      returns whether the point is in the winding (including its edges)
@@ -157,8 +161,15 @@ vec_t			snap_to_winding_noedge(const Winding& w, const dplane_t& plane, vec_t* c
 
 	snap_to_winding (w, plane, point);
 
-	planes = (dplane_t *)malloc (w.m_NumPoints * sizeof (dplane_t));
-	hlassume (planes != NULL, assume_NoMemory);
+	// Same reasoning as the sight-area helpers: this is called per patch pair
+	// and per texlight sample, so the allocator is not the place to be.
+	dplane_t planes_onstack[SIGHTAREA_STACK_EDGES];
+	planes = planes_onstack;
+	if (w.m_NumPoints > SIGHTAREA_STACK_EDGES)
+	{
+		planes = (dplane_t *)malloc (w.m_NumPoints * sizeof (dplane_t));
+		hlassume (planes != NULL, assume_NoMemory);
+	}
 	numplanes = 0;
 	for (x = 0; x < w.m_NumPoints; x++)
 	{
@@ -222,7 +233,10 @@ vec_t			snap_to_winding_noedge(const Winding& w, const dplane_t& plane, vec_t* c
 		}
 	}
 
-	free (planes);
+	if (planes != planes_onstack)
+	{
+		free (planes);
+	}
 
 	VectorCopy (bestpoint, point);
 	return bestwidth;
@@ -301,7 +315,20 @@ bool            TestSegmentAgainstOpaqueList(const vec_t* p1, const vec_t* p2
 		int x;
 		VectorFill (scaleout, 1.0);
 		opaquestyleout = -1;
-	    for (x = 0; x < g_opaque_face_count; x++)
+
+		// One box test stands in for the whole list when the ray goes nowhere
+		// near the opaque entities, which is the common case.
+		bool near_opaque = g_opaque_bounds_valid;
+		for (int k = 0; near_opaque && k < 3; k++)
+		{
+			if (qmin (p1[k], p2[k]) > g_opaque_bounds_maxs[k] + ON_EPSILON ||
+				qmax (p1[k], p2[k]) < g_opaque_bounds_mins[k] - ON_EPSILON)
+			{
+				near_opaque = false;
+			}
+		}
+
+	    for (x = 0; near_opaque && x < g_opaque_face_count; x++)
 		{
 			if (!TestLineOpaque (g_opaque_face_list[x].modelnum, g_opaque_face_list[x].origin, p1, p2))
 			{
@@ -355,9 +382,18 @@ vec_t CalcSightArea (const vec3_t receiver_origin, const vec3_t receiver_normal,
 	// maybe there are faster ways in calculating the weighted area, but at least this way is not bad.
 	vec_t area = 0.0;
 
+	// A patch winding has a handful of points, so the buffer comes off the
+	// stack: this runs once per texlight per sample, and a malloc/free pair per
+	// call is pure overhead (and a lock, on the thread-safe allocators).
+	// The heap is still there for the pathological windings.
 	int numedges = emitter_winding->m_NumPoints;
-	vec3_t *edges = (vec3_t *)malloc (numedges * sizeof (vec3_t));
-	hlassume (edges != NULL, assume_NoMemory);
+	vec3_t edges_onstack[SIGHTAREA_STACK_EDGES];
+	vec3_t *edges = edges_onstack;
+	if (numedges > SIGHTAREA_STACK_EDGES)
+	{
+		edges = (vec3_t *)malloc (numedges * sizeof (vec3_t));
+		hlassume (edges != NULL, assume_NoMemory);
+	}
 	bool error = false;
 	for (int x = 0; x < numedges; x++)
 	{
@@ -402,7 +438,10 @@ vec_t CalcSightArea (const vec3_t receiver_origin, const vec3_t receiver_normal,
 		}
 		area = area * 4 * Q_PI; // convert to absolute sphere area
 	}
-	free (edges);
+	if (edges != edges_onstack)
+	{
+		free (edges);
+	}
 	area *= lighting_scale;
 	return area;
 }
@@ -419,9 +458,18 @@ vec_t CalcSightArea_SpotLight (const vec3_t receiver_origin, const vec3_t receiv
 	// ratio = 0.0 , when stopdot2 >= dot2
 	vec_t area = 0.0;
 
+	// A patch winding has a handful of points, so the buffer comes off the
+	// stack: this runs once per texlight per sample, and a malloc/free pair per
+	// call is pure overhead (and a lock, on the thread-safe allocators).
+	// The heap is still there for the pathological windings.
 	int numedges = emitter_winding->m_NumPoints;
-	vec3_t *edges = (vec3_t *)malloc (numedges * sizeof (vec3_t));
-	hlassume (edges != NULL, assume_NoMemory);
+	vec3_t edges_onstack[SIGHTAREA_STACK_EDGES];
+	vec3_t *edges = edges_onstack;
+	if (numedges > SIGHTAREA_STACK_EDGES)
+	{
+		edges = (vec3_t *)malloc (numedges * sizeof (vec3_t));
+		hlassume (edges != NULL, assume_NoMemory);
+	}
 	bool error = false;
 	for (int x = 0; x < numedges; x++)
 	{
@@ -476,7 +524,10 @@ vec_t CalcSightArea_SpotLight (const vec3_t receiver_origin, const vec3_t receiv
 		}
 		area = area * 4 * Q_PI; // convert to absolute sphere area
 	}
-	free (edges);
+	if (edges != edges_onstack)
+	{
+		free (edges);
+	}
 	area *= lighting_scale;
 	return area;
 }

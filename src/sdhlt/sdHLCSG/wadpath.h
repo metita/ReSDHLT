@@ -3,7 +3,12 @@
 #define WADPATH_H__
 #include "cmdlib.h" //--vluzacn
 
-#define MAX_WADPATHS 128    // arbitrary
+// Was 128, which a mapper with a big texture library reaches by accident: the
+// tools abort with "too many wad files" instead of ignoring the excess. Each
+// slot is a pointer plus an open FILE*, so the only real cost of raising it is
+// file handles, and CSG raises the CRT limit at startup to match.
+// Keep in step with MAX_TEXFILES in textures.cpp.
+#define MAX_WADPATHS 512
 
 typedef struct    
 {

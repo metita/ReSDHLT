@@ -2,7 +2,9 @@
 #include <vector>
 
 #define MAXWADNAME 16
-#define MAX_TEXFILES 128
+// Must stay in step with MAX_WADPATHS in wadpath.h: every wad path that gets
+// pushed ends up opened here.
+#define MAX_TEXFILES 512
 
 //  FindMiptex
 //  TEX_InitFromWad

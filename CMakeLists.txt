@@ -29,6 +29,44 @@ endif()
 
 option(SDHLT_LTO "Enable link time optimisation for Release builds." OFF)
 
+# Instruction set, applied to RAD only. Measured on ba_dust_island with MSVC
+# 19.44, RAD single-threaded, CPU time, interleaved pairs: 4-5% faster, .bsp
+# byte-identical. RAD is ~98% of a compile, so that is where the whole benefit
+# is.
+#
+# It is RAD only on purpose. Building CSG/BSP/VIS with /arch:AVX2 changes their
+# floating-point results, and on koth_sandy that produced a .bsp whose vis data
+# made RAD abort with "DecompressVis Overflow". Those three decide the map's
+# geometry and PVS; a few percent is not worth risking what they emit. RAD only
+# writes light data, and that came out identical on every map tested.
+#
+# WARNING: an AVX2 build does not start at all on a CPU without AVX2 - anything
+# before Intel Haswell (2013) or AMD Excavator (2015) - and the failure is a
+# silent illegal-instruction crash, not a message. Set SDHLT_ARCH="" for
+# binaries you hand to people whose hardware you do not know.
+set(SDHLT_ARCH "avx2" CACHE STRING "Instruction set for RAD: empty (portable), avx2, or native.")
+set_property(CACHE SDHLT_ARCH PROPERTY STRINGS "" avx2 native)
+
+option(SDHLT_ARCH_ALL "Apply SDHLT_ARCH to CSG/BSP/VIS as well. See the warning above." OFF)
+
+if (SDHLT_ARCH)
+    if (MSVC)
+        if (SDHLT_ARCH STREQUAL "native")
+            # MSVC has no -march=native equivalent; AVX2 is the sensible ceiling.
+            set(SDHLT_ARCH_FLAGS /arch:AVX2)
+        else()
+            set(SDHLT_ARCH_FLAGS /arch:${SDHLT_ARCH})
+        endif()
+    else()
+        if (SDHLT_ARCH STREQUAL "native")
+            set(SDHLT_ARCH_FLAGS -march=native)
+        else()
+            set(SDHLT_ARCH_FLAGS -m${SDHLT_ARCH})
+        endif()
+    endif()
+    message("${CMAKE_PROJECT_NAME} > RAD will be built for ${SDHLT_ARCH}: it will not run on CPUs without it")
+endif()
+
 # Counters in the innermost ray-casting functions. Off by default: TestLine_r is
 # entered ~1.8 billion times per map, so even a disabled check is not free.
 # Phase-level timing via RAD's -profile works without this.
@@ -289,6 +327,17 @@ set_target_properties(RIPENT
     PROPERTIES
         PREFIX ${SDHLT_PREFIX}
 )
+
+if (SDHLT_ARCH_FLAGS)
+    target_compile_options(RAD PRIVATE ${SDHLT_ARCH_FLAGS})
+    if (SDHLT_ARCH_ALL)
+        target_compile_options(BSP PRIVATE ${SDHLT_ARCH_FLAGS})
+        target_compile_options(CSG PRIVATE ${SDHLT_ARCH_FLAGS})
+        target_compile_options(VIS PRIVATE ${SDHLT_ARCH_FLAGS})
+        target_compile_options(RIPENT PRIVATE ${SDHLT_ARCH_FLAGS})
+        message(WARNING "${CMAKE_PROJECT_NAME} > SDHLT_ARCH_ALL is on: CSG/BSP/VIS change their floating-point results, which has produced unusable .bsp files")
+    endif()
+endif()
 
 target_compile_definitions(BSP PRIVATE SDHLBSP DOUBLEVEC_T)
 target_compile_definitions(CSG PRIVATE SDHLCSG DOUBLEVEC_T)
