@@ -371,9 +371,29 @@ mod tests {
         assert_eq!(o.output_base().unwrap(), PathBuf::from(&o.output_dir));
         assert_eq!(o.work_dir().unwrap(), PathBuf::from(&o.output_dir));
 
-        // Without an output folder there is no layout to speak of.
+        // Without an output folder and without the layout, everything is
+        // compiled in place, next to the .map.
         o.output_dir.clear();
         assert!(o.output_base().is_none());
+        assert!(o.work_dir().is_none());
+    }
+
+    #[test]
+    fn the_layout_still_applies_without_an_output_folder() {
+        let mut o = Options::default();
+        o.map_path = r"E:\Mapping\ba_dust_island.map".to_string();
+        o.project_name = "zm_hola".to_string();
+
+        // No project subfolder here: the .bsp stays where it has always been,
+        // beside the source map. Only the scratch gets moved out of the way.
+        let base = o.output_base().unwrap();
+        assert_eq!(base, PathBuf::from(r"E:\Mapping"));
+        assert_eq!(o.work_dir().unwrap(), PathBuf::from(r"E:\Mapping\intermedios"));
+
+        // A map path with no folder gives nothing to hang the layout on.
+        o.map_path = "ba_dust_island.map".to_string();
+        assert!(o.output_base().is_none());
+        assert!(o.work_dir().is_none());
     }
 
     #[test]
@@ -587,9 +607,20 @@ impl Options {
     /// With `organize_output` the output folder gets one subfolder per project,
     /// so pointing several maps at the same "Mapas" folder keeps them apart
     /// instead of piling everything together.
+    ///
+    /// With no output folder the .bsp keeps landing next to the source map,
+    /// which is what anyone who leaves the field empty expects. The layout
+    /// still applies there: no per-project subfolder (that would move the .bsp
+    /// out from under them), but the scratch files do get their own.
     pub fn output_base(&self) -> Option<PathBuf> {
         if !self.uses_output_dir() {
-            return None;
+            if !self.organize_output {
+                return None;
+            }
+            return Path::new(self.map_path.trim())
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.to_path_buf());
         }
         let root = PathBuf::from(self.output_dir.trim());
         if self.organize_output {

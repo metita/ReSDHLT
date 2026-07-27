@@ -695,9 +695,14 @@ impl App {
         .count()
     }
 
-    /// Where the .bsp ends up: the output folder if there is one, else next to
-    /// the source map.
+    /// Where the .bsp ends up: the project's folder inside the output folder if
+    /// there is one, else next to the source map.
     fn result_dir(&self) -> Option<PathBuf> {
+        if let Some(base) = self.opts.output_base() {
+            if base.is_dir() {
+                return Some(base);
+            }
+        }
         if self.opts.uses_output_dir() {
             let p = PathBuf::from(self.opts.output_dir.trim());
             return p.is_dir().then_some(p);
@@ -1712,8 +1717,9 @@ impl App {
                 ui,
                 m,
                 "Carpeta de salida",
-                "Dónde queda el .bsp. Si la dejas vacía, todo se genera junto al .map, \
-                 mezclado con tus archivos fuente.\n\n\
+                "Dónde queda el .bsp. Si la dejas vacía, el .bsp se genera junto al .map \
+                 (y si 'Carpeta por proyecto' está activada, la basura del compilado va a \
+                 una subcarpeta 'intermedios' ahí mismo).\n\n\
                  Si la indicas, se copia el .map ahí y se compila esa copia: el .bsp, el \
                  .prt, los logs y los intermedios (.p0 a .p3) quedan todos en esa carpeta \
                  y tu carpeta de trabajo no se ensucia. El .map original nunca se toca.",
@@ -1762,33 +1768,46 @@ impl App {
                  .p3, el .lin y el .pts. Al terminar bien, el .bsp se mueve solo un nivel \
                  arriba.\n\n\
                  Resultado: en la carpeta del proyecto ves el .bsp y nada más. Podés \
-                 apuntar diez mapas a la misma carpeta de salida sin que se mezclen.",
+                 apuntar diez mapas a la misma carpeta de salida sin que se mezclen.\n\n\
+                 Sin carpeta de salida también sirve: no se crea carpeta de proyecto (el \
+                 .bsp sigue quedando junto al .map, donde lo esperás), pero sí la \
+                 subcarpeta 'intermedios' al lado, así tu carpeta de fuentes no se ensucia.",
                 Some("recomendado"),
                 &mut self.opts.organize_output,
             );
 
-            if self.opts.uses_output_dir() {
-                if let Some(base) = self.opts.output_base() {
+            // Shown with and without an output folder: the layout applies in
+            // both cases, and leaving the hint hidden made the toggle look like
+            // it did nothing.
+            let text = match (self.opts.uses_output_dir(), self.opts.organize_output) {
+                (true, true) => self.opts.output_base().map(|base| {
                     let folder = base
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("")
                         .to_string();
-                    let text = if self.opts.organize_output {
-                        format!(
-                            "{folder}\\ para el .bsp, {folder}\\{}\\ para logs e intermedios",
-                            options::WORK_SUBDIR
-                        )
-                    } else {
-                        "Todo suelto en la carpeta de salida".to_string()
-                    };
-                    hint(
-                        ui,
-                        m,
-                        &text,
-                        if self.opts.organize_output { OK } else { MUTED },
-                    );
+                    format!(
+                        "{folder}\\ para el .bsp, {folder}\\{}\\ para logs e intermedios",
+                        options::WORK_SUBDIR
+                    )
+                }),
+                (true, false) => Some("Todo suelto en la carpeta de salida".to_string()),
+                (false, true) => Some(format!(
+                    "Sin carpeta de salida: el .bsp junto al .map, {}\\ al lado para logs e \
+                     intermedios",
+                    options::WORK_SUBDIR
+                )),
+                (false, false) => {
+                    Some("Todo suelto junto al .map, mezclado con tus fuentes".to_string())
                 }
+            };
+            if let Some(text) = text {
+                hint(
+                    ui,
+                    m,
+                    &text,
+                    if self.opts.organize_output { OK } else { MUTED },
+                );
             }
 
             toggle_row(

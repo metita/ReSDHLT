@@ -562,9 +562,9 @@ fn write_wad_cfg(dir: &Path, wads: &[PathBuf]) -> std::io::Result<String> {
 
 /// Decides where the compile happens and puts the .map there.
 ///
-/// Returns the map path the tools should be pointed at. When an output folder
-/// is configured the source map is copied into it and everything the tools
-/// write (.bsp, .prt, logs, the .p0-.p3 intermediates) lands there, leaving the
+/// Returns the map path the tools should be pointed at. Whenever there is a
+/// work folder the source map is copied into it and everything the tools write
+/// (.bsp, .prt, logs, the .p0-.p3 intermediates) lands there, leaving the
 /// source folder untouched.
 fn prepare_workspace(opts: &Options, tx: &Sender<Msg>) -> Option<PathBuf> {
     let src = PathBuf::from(&opts.map_path);
@@ -576,14 +576,14 @@ fn prepare_workspace(opts: &Options, tx: &Sender<Msg>) -> Option<PathBuf> {
         return None;
     }
 
-    if !opts.uses_output_dir() {
-        return Some(src);
-    }
-
     // With organize_output this is <salida>/<proyecto>/intermedios, so the
     // tools scatter their output there and the .bsp gets moved up to
-    // <salida>/<proyecto> once the run succeeds.
-    let out_dir = opts.work_dir()?;
+    // <salida>/<proyecto> once the run succeeds. With no output folder it is
+    // <carpeta del map>/intermedios and the .bsp goes back beside the source.
+    // None means "compile in place", the old behaviour.
+    let Some(out_dir) = opts.work_dir() else {
+        return Some(src);
+    };
     if let Err(e) = std::fs::create_dir_all(&out_dir) {
         let _ = tx.send(Msg::Line(
             LineKind::Error,

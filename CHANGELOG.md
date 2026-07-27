@@ -73,6 +73,12 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
 - `SDHLT_ARCH=avx2` produced `/arch:avx2`, which MSVC ignores with "command line
   warning D9002": every release so far was built without the vectorisation it
   claimed. The flag is upper-cased now
+- `gui/`: "Carpeta por proyecto" did nothing when no output folder was set, and
+  the hint explaining the layout was hidden in that case, so the toggle looked
+  active while every intermediate still landed next to the .map. With no output
+  folder the layout now applies where the map lives: no per-project subfolder
+  (the .bsp stays where it is expected, beside the source), but the compile runs
+  in `intermedios/` there and the .bsp is moved back up when it succeeds
 - `gui/`: the executable's version resource was hardcoded in `assets/icon.rc`
   and kept reporting 0.1.0 in the file properties no matter what was released.
   `build.rs` now generates the whole resource script from `CARGO_PKG_VERSION`
