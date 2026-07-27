@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-changed=assets/icon.rc");
     println!("cargo:rerun-if-changed=assets/resdhlt.ico");
+    println!("cargo:rerun-if-env-changed=CARGO_PKG_VERSION");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
@@ -30,14 +30,20 @@ fn main() {
     let res = out_dir.join("resdhlt.res");
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
 
+    // The version block is generated rather than checked in: a hardcoded one
+    // silently kept saying 0.1.0 in the file properties for every release after
+    // the first.
+    let script = out_dir.join("resdhlt.rc");
+    if let Err(e) = std::fs::write(&script, version_rc(&manifest)) {
+        println!("cargo:warning=no pude escribir el .rc ({e}): sin icono");
+        return;
+    }
+
     let status = Command::new(&rc)
         .arg("/nologo")
-        // The .rc references the .ico by bare name, so compile from the folder
-        // that holds both.
         .arg("/fo")
         .arg(&res)
-        .arg("icon.rc")
-        .current_dir(manifest.join("assets"))
+        .arg(&script)
         .status();
 
     match status {
@@ -47,6 +53,58 @@ fn main() {
         Ok(s) => println!("cargo:warning=rc.exe falló ({s}): el .exe queda sin icono"),
         Err(e) => println!("cargo:warning=no pude ejecutar rc.exe ({e}): sin icono"),
     }
+}
+
+/// The resource script: the icon, and a version block built from the crate
+/// version so the file properties never disagree with what the updater
+/// compares.
+fn version_rc(manifest: &Path) -> String {
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
+    let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    let (major, minor, patch) = (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    );
+    // Backslashes are escapes inside an .rc string.
+    let icon = manifest
+        .join("assets")
+        .join("resdhlt.ico")
+        .display()
+        .to_string()
+        .replace('\\', "\\\\");
+
+    format!(
+        r#"// Generado por build.rs. No editar: se reescribe en cada compilación.
+1 ICON "{icon}"
+
+1 VERSIONINFO
+FILEVERSION     {major},{minor},{patch},0
+PRODUCTVERSION  {major},{minor},{patch},0
+FILEOS          0x4L
+FILETYPE        0x1L
+{{
+    BLOCK "StringFileInfo"
+    {{
+        BLOCK "080904B0"
+        {{
+            VALUE "CompanyName",      "ReSDHLT"
+            VALUE "FileDescription",  "ReSDHLT - compilador de mapas para CS 1.6"
+            VALUE "FileVersion",      "{version}"
+            VALUE "InternalName",     "resdhlt-gui"
+            VALUE "LegalCopyright",   "GPL-2.0-or-later"
+            VALUE "OriginalFilename", "resdhlt-gui.exe"
+            VALUE "ProductName",      "ReSDHLT"
+            VALUE "ProductVersion",   "{version}"
+        }}
+    }}
+    BLOCK "VarFileInfo"
+    {{
+        VALUE "Translation", 0x809, 1200
+    }}
+}}
+"#
+    )
 }
 
 /// Newest `rc.exe` from the installed Windows SDKs, matching the host

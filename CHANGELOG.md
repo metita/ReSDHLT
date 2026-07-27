@@ -55,6 +55,9 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
   Removed
 
 ### Fixed
+- `gui/`: the executable's version resource was hardcoded in `assets/icon.rc`
+  and kept reporting 0.1.0 in the file properties no matter what was released.
+  `build.rs` now generates the whole resource script from `CARGO_PKG_VERSION`
 - `gui/`: toolbar buttons pinned to the right edge of a row were drawn on top of
   the ones next to them once the panel got narrow ("Limpiar intermedios" over
   "Actualizar", the delete button over the project actions, the status line

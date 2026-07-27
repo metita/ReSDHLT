@@ -255,7 +255,7 @@ gui/
 │   ├── make_icon.ps1   genera el .ico y el RGBA crudo (editá esto, no el .ico)
 │   ├── resdhlt.ico     icono del .exe, 16 a 256 px
 │   ├── icon_64.rgba    mismo icono ya decodificado, para la ventana
-│   └── icon.rc         icono + bloque de versión de Windows
+│   (el .rc con el icono y la versión lo genera build.rs)
 └── src/
     ├── main.rs      pestañas, layout y estado de la app
     ├── theme.rs     paleta y estilo de widgets (todo el color vive acá)
