@@ -2,6 +2,7 @@
 #include <vector>
 #include <algorithm>
 
+
 int             g_lerp_enabled = DEFAULT_LERP_ENABLED;
 
 struct interpolation_t
@@ -74,7 +75,15 @@ struct facetriangulation_t
 
 facetriangulation_t *g_facetriangulations[MAX_MAP_FACES];
 
-static bool CalcAdaptedSpot (const localtriangulation_t *lt, const vec3_t position, int surface, vec3_t spot)
+// phongnormal_in: the caller may pass a normal it has already worked out for
+// this (surface, position). InterpolateSampleLight does, and it matters: it
+// calls this once per candidate patch while both arguments stay fixed, so the
+// normal was being recomputed identically ~80 times per sample (8.4M calls for
+// 105k samples on ba_dust_island). Passing NULL keeps the original behaviour,
+// including not computing it at all when the neighbour test below rejects the
+// patch first.
+static bool CalcAdaptedSpot (const localtriangulation_t *lt, const vec3_t position, int surface, vec3_t spot
+							 , const vec_t *phongnormal_in = NULL)
 	// If the surface formed by the face and its neighbor faces is not flat, the surface should be unfolded onto the face plane
 	// CalcAdaptedSpot calculates the coordinate of the unfolded spot on the face plane from the original position on the surface
 	// CalcAdaptedSpot(center) = {0,0,0}
@@ -109,7 +118,14 @@ static bool CalcAdaptedSpot (const localtriangulation_t *lt, const vec3_t positi
 	VectorMA (surfacespot, -dot, lt->normal, spot);
 
 	// use phong normal instead of face normal, because phong normal is a continuous function
-	GetPhongNormal (surface, position, phongnormal);
+	if (phongnormal_in)
+	{
+		VectorCopy (phongnormal_in, phongnormal);
+	}
+	else
+	{
+		GetPhongNormal (surface, position, phongnormal);
+	}
 	dot = DotProduct (spot, phongnormal);
 	if (fabs (dot) > ON_EPSILON)
 	{
@@ -827,13 +843,18 @@ void InterpolateSampleLight (const vec3_t position, int surface, int numstyles, 
 	localinterps.resize (0);
 	if (g_lerp_enabled)
 	{
+		// Fixed for every candidate below, so it is worked out once here rather
+		// than inside CalcAdaptedSpot for each one.
+		vec3_t samplephongnormal;
+		GetPhongNormal (surface, position, samplephongnormal);
+
 		for (i = 0; i < (int)ft->neighbors.size (); i++) // for this face and each of its neighbors
 		{
 			ft2 = g_facetriangulations[ft->neighbors[i]];
 			for (j = 0; j < (int)ft2->localtriangulations.size (); j++) // for each patch on that face
 			{
 				lt = ft2->localtriangulations[j];
-				if (!CalcAdaptedSpot (lt, position, surface, spot))
+				if (!CalcAdaptedSpot (lt, position, surface, spot, samplephongnormal))
 				{
 					if (g_drawlerp && ft2 == ft)
 					{

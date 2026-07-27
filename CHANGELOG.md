@@ -49,6 +49,14 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
   textures now share one. `zhlt_embedlightmapresolution` remains the setting that
   actually decides the size: each doubling divides it by four. See
   docs/BENCHMARKS.md
+- RAD: `InterpolateSampleLight()` works out the sample's phong normal once
+  instead of once per candidate patch. `CalcAdaptedSpot()` was calling
+  `GetPhongNormal()` with the same (surface, position) for every patch it
+  considered: 8.4 million calls for 105k samples on `ba_dust_island`, ~80
+  identical recomputations per sample. `AddPatchLights` is 15.8% faster on that
+  map (2.79s to 2.35s, one thread, interleaved pairs, best of five) and it is a
+  quarter of RAD, so ~4% off a compile. Maps with little lerp work see less.
+  .bsp byte-identical on `ba_dust_island` and `ar_pokemon`
 - CSG's `MAX_WADPATHS` raised from 128 to 512 (and `MAX_TEXFILES` with it). The
   old ceiling is easy to hit with a large texture library, and CSG aborted with
   "too many wad files" instead of ignoring the excess. Each slot is a pointer
