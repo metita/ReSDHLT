@@ -1,0 +1,96 @@
+# Publishes a Windows package when a version tag is pushed.
+#
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# The GUI's updater looks at /releases/latest, so ordinary pushes to master
+# change nothing for users: a release only exists when a tag says so.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check that the tag matches the GUI version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}" -replace '^v', ''
+          if (-not $tag) { $tag = 'sin tag' }
+          $cargo = (Select-String -Path gui/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          Write-Host "tag=$tag  Cargo.toml=$cargo"
+          if ("${{ github.event_name }}" -eq 'push' -and $tag -ne $cargo) {
+            # The updater compares the tag with the version compiled into the
+            # binary; if they disagree it would offer the same update forever.
+            throw "El tag ($tag) no coincide con gui/Cargo.toml ($cargo). Actualiza la version y volve a taggear."
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            gui/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('gui/Cargo.lock') }}
+
+      - name: Build the compile tools
+        shell: pwsh
+        run: |
+          cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release --parallel
+
+      - name: Build the GUI
+        working-directory: gui
+        run: cargo build --release
+
+      - name: Test the GUI
+        working-directory: gui
+        run: cargo test --release
+
+      - name: Assemble the package
+        shell: pwsh
+        run: |
+          $pkg = "package/ReSDHLT-Windows-x64"
+          New-Item -ItemType Directory -Force "$pkg/tools" | Out-Null
+          Copy-Item gui/target/release/resdhlt-gui.exe $pkg/
+
+          # Multi-config generators put the binaries in tools/Release, so the
+          # exes are collected wherever they landed instead of assumed.
+          $exes = Get-ChildItem -Path tools, build -Recurse -File -Include sdHL*.exe, sdRIPENT.exe
+          foreach ($e in $exes) { Copy-Item $e.FullName (Join-Path "$pkg/tools" $e.Name) -Force }
+          foreach ($d in "sdhlt.wad", "sdhlt.fgd", "lights.rad", "settings.txt", "wad.cfg") {
+            if (Test-Path "tools/$d") { Copy-Item "tools/$d" "$pkg/tools/" }
+          }
+          foreach ($f in "README.md", "CHANGELOG.md", "LICENSE.md") { Copy-Item $f $pkg/ }
+          if (Test-Path gui/LEEME.txt) { Copy-Item gui/LEEME.txt $pkg/ }
+
+          # A package missing any of these is useless to whoever downloads it.
+          $needed = @(
+            "resdhlt-gui.exe",
+            "tools/sdHLCSG.exe", "tools/sdHLBSP.exe", "tools/sdHLVIS.exe", "tools/sdHLRAD.exe",
+            "tools/sdhlt.wad"
+          )
+          $missing = $needed | Where-Object { -not (Test-Path (Join-Path $pkg $_)) }
+          if ($missing) { throw "Al paquete le faltan: $($missing -join ', ')" }
+
+          Get-ChildItem -Recurse $pkg -File | Select-Object FullName, Length
+          Compress-Archive -Path "$pkg/*" -DestinationPath "ReSDHLT-Windows-x64.zip" -CompressionLevel Optimal
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ReSDHLT-Windows-x64.zip
+          generate_release_notes: true
