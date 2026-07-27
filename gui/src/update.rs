@@ -429,6 +429,49 @@ mod tests {
         assert!(matches!(parse_release(pre), Ok(None)));
     }
 
+    /// The real thing: ask this repo for its latest release, download the
+    /// asset the way the updater does, and check the package has what a user
+    /// needs. Skipped when there is no network or no release yet.
+    #[test]
+    fn downloads_and_unpacks_the_published_release() {
+        let release = match latest_release(REPO) {
+            Ok(Some(r)) => r,
+            Ok(None) => return, // nothing published yet
+            Err(e) => {
+                eprintln!("sin red o API limitada, salteado: {e}");
+                return;
+            }
+        };
+
+        let work = std::env::temp_dir().join("resdhlt-update-test");
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).unwrap();
+        let zip = work.join("package.zip");
+
+        if let Err(e) = curl(&["--fail", "--output", &zip.display().to_string(), &release.asset_url])
+        {
+            eprintln!("descarga no disponible, salteado: {e}");
+            return;
+        }
+
+        let size = std::fs::metadata(&zip).unwrap().len();
+        assert_eq!(size, release.asset_size, "el .zip no coincide con la release");
+
+        let out = work.join("pkg");
+        unzip(&zip, &out).unwrap();
+        for needed in [
+            "resdhlt-gui.exe",
+            "tools/sdHLCSG.exe",
+            "tools/sdHLBSP.exe",
+            "tools/sdHLVIS.exe",
+            "tools/sdHLRAD.exe",
+            "tools/sdhlt.wad",
+        ] {
+            assert!(out.join(needed).is_file(), "falta {needed} en la release");
+        }
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
     /// End to end against GitHub, using a repo that does publish releases.
     /// Skipped rather than failed when the network is not available, so the
     /// suite still runs offline.

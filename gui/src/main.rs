@@ -1099,27 +1099,25 @@ impl App {
                         self.save_library();
                     }
 
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if self.confirm_delete == Some(sel) {
-                            let del = egui::Button::new(RichText::new("Confirmar borrado").strong())
-                                .fill(ERR.linear_multiply(0.35))
-                                .stroke(egui::Stroke::new(1.0_f32, ERR));
-                            if ui.add(del).clicked() {
-                                self.delete_project(sel);
-                            }
-                            if ui.button("No").clicked() {
-                                self.confirm_delete = None;
-                            }
-                        } else if ui
-                            .button("Borrar")
-                            .on_hover_text(
-                                "Borra el proyecto de la lista. No toca ningún archivo del mapa.",
-                            )
-                            .clicked()
-                        {
-                            self.confirm_delete = Some(sel);
+                    if self.confirm_delete == Some(sel) {
+                        let del = egui::Button::new(RichText::new("Confirmar borrado").strong())
+                            .fill(ERR.linear_multiply(0.35))
+                            .stroke(egui::Stroke::new(1.0_f32, ERR));
+                        if ui.add(del).clicked() {
+                            self.delete_project(sel);
                         }
-                    });
+                        if ui.button("No").clicked() {
+                            self.confirm_delete = None;
+                        }
+                    } else if ui
+                        .button(RichText::new("Borrar").color(ERR))
+                        .on_hover_text(
+                            "Borra el proyecto de la lista. No toca ningún archivo del mapa.",
+                        )
+                        .clicked()
+                    {
+                        self.confirm_delete = Some(sel);
+                    }
                 });
             },
         );
@@ -1224,33 +1222,34 @@ impl App {
                 if ui.button("Actualizar").clicked() {
                     do_refresh = true;
                 }
+                // In the same left-to-right flow as the other two: pinning this
+                // one to the right edge made it sit on top of "Actualizar" as
+                // soon as the panel was narrow.
                 if !junk.is_empty() {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if self.confirm_clean {
-                            let btn = egui::Button::new(RichText::new("Confirmar").strong())
-                                .fill(ERR.linear_multiply(0.35))
-                                .stroke(egui::Stroke::new(1.0_f32, ERR));
-                            if ui.add(btn).clicked() {
-                                do_clean = true;
-                            }
-                            if ui.button("No").clicked() {
-                                self.confirm_clean = false;
-                            }
-                        } else if ui
-                            .button(format!(
-                                "Limpiar intermedios ({}, {})",
-                                junk.len(),
-                                projects::fmt_size(junk_bytes)
-                            ))
-                            .on_hover_text(
-                                "Borra .p0 a .p3, .lin, .pts, .wa_, .ext y .max. El .map, \
-                                 el .bsp y los logs no se tocan.",
-                            )
-                            .clicked()
-                        {
-                            self.confirm_clean = true;
+                    if self.confirm_clean {
+                        let btn = egui::Button::new(RichText::new("Confirmar").strong())
+                            .fill(ERR.linear_multiply(0.35))
+                            .stroke(egui::Stroke::new(1.0_f32, ERR));
+                        if ui.add(btn).clicked() {
+                            do_clean = true;
                         }
-                    });
+                        if ui.button("No").clicked() {
+                            self.confirm_clean = false;
+                        }
+                    } else if ui
+                        .button(format!(
+                            "Limpiar intermedios ({}, {})",
+                            junk.len(),
+                            projects::fmt_size(junk_bytes)
+                        ))
+                        .on_hover_text(
+                            "Borra .p0 a .p3, .lin, .pts, .wa_, .ext y .max. El .map, \
+                             el .bsp y los logs no se tocan.",
+                        )
+                        .clicked()
+                    {
+                        self.confirm_clean = true;
+                    }
                 }
             });
 
@@ -2685,8 +2684,6 @@ impl App {
                 Some(false) => ERR,
                 None => MUTED,
             };
-            ui.label(RichText::new(&self.status).color(color).small());
-
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let mut check_now = false;
                 ui.menu_button("Actualizaciones", |ui| {
@@ -2751,6 +2748,15 @@ impl App {
                         open_in_explorer(&d);
                     }
                 }
+
+                // Whatever room the buttons left over, and not a pixel more.
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.add(
+                        egui::Label::new(RichText::new(&self.status).color(color).small())
+                            .truncate(),
+                    )
+                    .on_hover_text(&self.status);
+                });
             });
         });
     }
