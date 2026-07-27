@@ -4,7 +4,13 @@
 //! real CS 1.6 maps with the tools in this repository; see docs/BENCHMARKS.md
 //! for the raw figures and docs/FPS_Y_TOOL_TEXTURES.md for the FPS side.
 
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
+
+/// Subfolder that holds everything a compile produces except the .bsp: logs,
+/// the portal file, the .p0-.p3 intermediates and the copied .map.
+pub const WORK_SUBDIR: &str = "intermedios";
 
 /// Radiosity visibility matrix method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,7 +99,11 @@ impl VisQuality {
 }
 
 /// Everything the UI can set. Serialised as the saved profile.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `PartialEq` is what the project auto-save watches: the options are compared
+/// against the stored copy each frame, which is cheaper and more reliable than
+/// threading a "changed" flag through every widget.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Options {
     // ---- paths ----
@@ -103,8 +113,15 @@ pub struct Options {
     pub output_dir: String,
     /// Folder holding the .wad files this map uses.
     pub wad_dir: String,
-    /// Rewrite the worldspawn "wad" key of the copied map to point at wad_dir.
-    pub rewrite_wad_key: bool,
+    /// Resolve the map's WAD list and hand CSG a generated wad.cfg instead of
+    /// letting it read the (often broken) paths stored in the map.
+    #[serde(alias = "rewrite_wad_key")]
+    pub auto_wads: bool,
+    /// Give the compile its own folder inside the output folder, named after
+    /// the project, with the scratch files in a subfolder of that.
+    pub organize_output: bool,
+    /// Name of the project this belongs to. Empty means "use the map's name".
+    pub project_name: String,
 
     // ---- shared ----
     pub threads: u32, // 0 = autodetect
@@ -149,6 +166,11 @@ pub struct Options {
     pub nostudioshadow: bool,
     pub profile: bool,
     pub rad_extra: String,
+
+    // ---- interface ----
+    /// Zoom applied to the whole UI. Saved so a 4K user does not have to
+    /// re-scale on every launch.
+    pub ui_scale: f32,
 }
 
 impl Default for Options {
@@ -159,7 +181,9 @@ impl Default for Options {
             tools_dir: String::new(),
             output_dir: String::new(),
             wad_dir: String::new(),
-            rewrite_wad_key: true,
+            auto_wads: true,
+            organize_output: true,
+            project_name: String::new(),
 
             threads: 0,
             chart: true,
@@ -204,6 +228,8 @@ impl Default for Options {
             nostudioshadow: false,
             profile: false,
             rad_extra: String::new(),
+
+            ui_scale: 1.0,
         }
     }
 }
@@ -245,21 +271,39 @@ impl Preset {
         }
     }
 
+    /// Whether these options are exactly what this preset produces.
+    ///
+    /// Rather than tracking "which preset was clicked", which goes stale the
+    /// moment a slider moves, the preset is re-applied to a copy and compared:
+    /// what `apply` preserves (paths, threads, layout, UI scale) is ignored for
+    /// free.
+    pub fn is_active(self, o: &Options) -> bool {
+        let mut expected = o.clone();
+        self.apply(&mut expected);
+        expected == *o
+    }
+
     /// Applies the preset, preserving paths and thread count.
     pub fn apply(self, o: &mut Options) {
         let map = o.map_path.clone();
         let tools = o.tools_dir.clone();
         let out = o.output_dir.clone();
         let wad = o.wad_dir.clone();
-        let rewrite = o.rewrite_wad_key;
+        let rewrite = o.auto_wads;
         let threads = o.threads;
+        let scale = o.ui_scale;
+        let organize = o.organize_output;
+        let project = o.project_name.clone();
 
         *o = Options::default();
+        o.ui_scale = scale;
+        o.organize_output = organize;
+        o.project_name = project;
         o.map_path = map;
         o.tools_dir = tools;
         o.output_dir = out;
         o.wad_dir = wad;
-        o.rewrite_wad_key = rewrite;
+        o.auto_wads = rewrite;
         o.threads = threads;
 
         match self {
@@ -276,6 +320,68 @@ impl Preset {
                 o.skylevel = 7;
             }
         }
+    }
+}
+
+/// Project names are free text but end up as a folder, so the characters
+/// Windows refuses are replaced rather than failing the compile.
+pub fn sanitize_folder(name: &str) -> String {
+    let cleaned: String = name
+        .trim()
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if (c as u32) < 32 => '_',
+            c => c,
+        })
+        .collect();
+    let cleaned = cleaned.trim_end_matches([' ', '.']).to_string();
+    if cleaned.is_empty() {
+        "mapa".to_string()
+    } else {
+        cleaned
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_layout_puts_the_bsp_alone_and_the_rest_below() {
+        let mut o = Options::default();
+        o.map_path = r"E:\Mapping\ba_dust_island.map".to_string();
+        o.output_dir = r"C:\Users\marce\Desktop\Mapas".to_string();
+        o.project_name = "zm_hola".to_string();
+
+        let base = o.output_base().unwrap();
+        let work = o.work_dir().unwrap();
+        assert!(base.ends_with(r"Mapas\zm_hola"), "{}", base.display());
+        assert_eq!(work, base.join(WORK_SUBDIR));
+
+        // No project name: the map names the folder.
+        o.project_name.clear();
+        assert!(o
+            .output_base()
+            .unwrap()
+            .ends_with(r"Mapas\ba_dust_island"));
+
+        // Turned off, everything lands in the output folder as before.
+        o.organize_output = false;
+        assert_eq!(o.output_base().unwrap(), PathBuf::from(&o.output_dir));
+        assert_eq!(o.work_dir().unwrap(), PathBuf::from(&o.output_dir));
+
+        // Without an output folder there is no layout to speak of.
+        o.output_dir.clear();
+        assert!(o.output_base().is_none());
+    }
+
+    #[test]
+    fn project_names_survive_becoming_folders() {
+        assert_eq!(sanitize_folder("zm_hola"), "zm_hola");
+        assert_eq!(sanitize_folder(r"de_dust: beta/3"), "de_dust_ beta_3");
+        assert_eq!(sanitize_folder("  raro.  "), "raro");
+        assert_eq!(sanitize_folder("   "), "mapa");
     }
 }
 
@@ -462,17 +568,57 @@ impl Options {
         a
     }
 
+    /// Folder name for this compile: the project's name, or the map's if there
+    /// is no project.
+    pub fn effective_name(&self) -> String {
+        let name = self.project_name.trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+        Path::new(self.map_path.trim())
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .unwrap_or("mapa")
+            .to_string()
+    }
+
+    /// Where the finished .bsp ends up.
+    ///
+    /// With `organize_output` the output folder gets one subfolder per project,
+    /// so pointing several maps at the same "Mapas" folder keeps them apart
+    /// instead of piling everything together.
+    pub fn output_base(&self) -> Option<PathBuf> {
+        if !self.uses_output_dir() {
+            return None;
+        }
+        let root = PathBuf::from(self.output_dir.trim());
+        if self.organize_output {
+            Some(root.join(sanitize_folder(&self.effective_name())))
+        } else {
+            Some(root)
+        }
+    }
+
+    /// Where the tools actually run. Everything they scatter around lands here.
+    pub fn work_dir(&self) -> Option<PathBuf> {
+        let base = self.output_base()?;
+        if self.organize_output {
+            Some(base.join(WORK_SUBDIR))
+        } else {
+            Some(base)
+        }
+    }
+
     /// True when the compile happens on a copy in the output folder rather than
     /// beside the source map.
     pub fn uses_output_dir(&self) -> bool {
         !self.output_dir.trim().is_empty()
     }
 
-    /// Whether the map's WAD list will actually be rewritten.
-    pub fn will_rewrite_wads(&self) -> bool {
-        self.rewrite_wad_key
-            && !self.wad_dir.trim().is_empty()
-            && self.uses_output_dir()
+    /// Whether CSG will get a generated WAD list. Only needs the switch: the
+    /// map's own entries are resolved even without a WAD folder.
+    pub fn will_resolve_wads(&self) -> bool {
+        self.auto_wads && self.run_csg
     }
 
     /// Problems worth warning about before a compile starts.
@@ -535,13 +681,11 @@ impl Options {
                     .to_string(),
             );
         }
-        if self.rewrite_wad_key
-            && !self.wad_dir.trim().is_empty()
-            && !self.uses_output_dir()
-        {
+        if !self.auto_wads {
             w.push(
-                "Para reescribir la lista de WADs hace falta una carpeta de salida: el \
-                 .map original nunca se modifica, se compila una copia."
+                "WADs automáticos desactivado: CSG va a usar las rutas guardadas en el \
+                 .map. Si el mapa viene de otra PC o de otro disco, va a fallar con \
+                 'Could not open wad file'."
                     .to_string(),
             );
         }
