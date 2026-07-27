@@ -17,6 +17,11 @@ Makefile.cmake
 # Compiled tools output
 tools/*.exe
 tools/sd*
+# ...except the data files a compile needs. sdhlt.wad holds the tool textures
+# (NULL, HINT, SKIP, BEVELHINT) and no map compiles without it, so the release
+# package has to carry it.
+!tools/sdhlt.wad
+!tools/sdhlt.fgd
 
 # Python
 __pycache__/
