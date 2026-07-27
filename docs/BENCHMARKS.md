@@ -393,3 +393,38 @@ Verificado con `scripts/bspcheck.py` (geometría sana) y revisando el lump de
 texturas: dimensiones múltiplo de 16, mips dentro del lump, todos los
 `texinfo->miptex` en rango. Un mapa sin la clave compila byte por byte igual que
 antes.
+
+### Agua: por qué dejaba de moverse
+
+`zhlt_embedlightmap` sobre un `func_water` rompía el agua, y la causa estaba en
+dos bloques comentados en `loadtextures.cpp`.
+
+GoldSrc decide que una superficie es agua **por el `!` al principio del nombre
+de la textura**, y lee el color y la densidad de la niebla de las entradas 3 y 4
+de la paleta. RAD hacía las dos cosas mal:
+
+```
+antes:  !leanwater_w5   paleta[3],[4] = [25,69,155, 31,65,132]
+        __rad00026MLe00 paleta[3],[4] = [9,71,117, 14,70,117]   <- ya no es agua
+
+ahora:  !_rad00026oI400 paleta[3],[4] = [25,69,155, 31,65,132]  <- sigue siendo agua
+```
+
+Sin el `!` el motor la trata como una superficie común: se acabaron las olas, la
+niebla y el comportamiento de agua al mirarla desde abajo. Y la paleta
+requantizada se llevaba puesta la niebla aunque el nombre se hubiera arreglado.
+
+Ahora el nombre conserva el `!` y las primeras 16 entradas de la paleta se
+copian tal cual desde la textura original; los colores horneados usan las 240
+restantes.
+
+**Queda por comprobar en juego:** el motor dibuja el agua con una distorsión
+senoidal de hasta 8 téxeles, y la textura horneada no repite como la original,
+así que en los bordes de cada cara puede verse algo de bleeding. El horneado
+deja un margen de `(texturasize * resolution - extent) / 2` píxeles a cada lado,
+que en la mayoría de los casos alcanza. Si ves costuras en el borde del agua,
+subí `zhlt_embedlightmapresolution` o sacá la clave de esa entidad.
+
+Un aviso de tamaño: un solo brush de agua grande se subdivide en muchas caras
+(23 en el mapa de prueba), y cada una hornea su propia textura. El agua es de lo
+más caro donde poner esta clave.

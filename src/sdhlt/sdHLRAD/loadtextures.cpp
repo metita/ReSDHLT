@@ -1360,15 +1360,20 @@ void EmbedLightmapInTextures ()
 				palettemaxcolors = 255;
 				VectorCopy (tex->palette[255], palette[255]); // the transparency color
 			}
-			/*else if (texname[0] == '!')
+			else if (texname[0] == '!')
 			{
-				paletteoffset = 16; // because the 4th entry and the 5th entry are reserved for fog color and fog density
+				// Water carries its fog colour in palette entry 3 and its fog
+				// density in entry 4. Requantising the whole palette threw both
+				// away, so the water came out with the wrong fog. The first
+				// sixteen entries are copied over untouched and the baked colours
+				// get the rest.
+				paletteoffset = 16;
 				for (j = 0; j < 16; j++)
 				{
 					VectorCopy (tex->palette[j], palette[j]);
 				}
 				palettemaxcolors = 256 - 16;
-			}*/
+			}
 			else
 			{
 				paletteoffset = 0;
@@ -1480,10 +1485,13 @@ void EmbedLightmapInTextures ()
 		{
 			strcpy (miptex->name, "{_rad");
 		}
-		/*else if (texname[0] == '!')
+		else if (texname[0] == '!')
 		{
+			// GoldSrc decides a surface is water by this '!'. Renaming the baked
+			// texture to "__rad..." silently turned every water face into an
+			// ordinary one: no wave warp, no water fog, no cull-from-below.
 			strcpy (miptex->name, "!_rad");
-		}*/
+		}
 		else
 		{
 			strcpy (miptex->name, "__rad");

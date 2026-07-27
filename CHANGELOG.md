@@ -64,6 +64,12 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
   Removed
 
 ### Fixed
+- `zhlt_embedlightmap` on a `func_water` turned the water into an ordinary
+  surface: no waves, no fog. The baked texture was renamed from `!leanwater_w5`
+  to `__rad...`, and GoldSrc decides a surface is water by that leading `!`. The
+  requantised palette also destroyed entries 3 and 4, where the engine keeps the
+  water's fog colour and density. Both paths existed in the upstream source but
+  were commented out; they are enabled and verified against a real map
 - `SDHLT_ARCH=avx2` produced `/arch:avx2`, which MSVC ignores with "command line
   warning D9002": every release so far was built without the vectorisation it
   claimed. The flag is upper-cased now
