@@ -55,7 +55,11 @@ if (SDHLT_ARCH)
             # MSVC has no -march=native equivalent; AVX2 is the sensible ceiling.
             set(SDHLT_ARCH_FLAGS /arch:AVX2)
         else()
-            set(SDHLT_ARCH_FLAGS /arch:${SDHLT_ARCH})
+            # /arch: is case sensitive: "/arch:avx2" is silently ignored with
+            # "cl : Command line warning D9002", so the build looks fine and is
+            # not actually vectorised.
+            string(TOUPPER "${SDHLT_ARCH}" SDHLT_ARCH_UPPER)
+            set(SDHLT_ARCH_FLAGS /arch:${SDHLT_ARCH_UPPER})
         endif()
     else()
         if (SDHLT_ARCH STREQUAL "native")

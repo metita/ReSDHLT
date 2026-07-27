@@ -338,3 +338,58 @@ python3 scripts/compilebench.py --compare antes.json despues.json
 
 Nota: los `.map` traen rutas absolutas de WAD de la máquina donde se hicieron. Hay que reescribir la
 clave `"wad"` del worldspawn a rutas locales antes de compilar.
+
+## zhlt_embedlightmap: por qué pesa tanto
+
+`zhlt_embedlightmap` existe porque el motor no aplica lightmaps a las entidades
+con render mode especial (aditivo, texturizado, etc.). RAD resuelve eso
+**horneando la luz dentro de la textura**, y para eso genera **una textura nueva
+por cara**, no por entidad ni por textura original.
+
+Medido sobre `ba_dust_island`, poniendo la clave en sus 6 `func_breakable`
+(190 caras), con `-fast -bounce 1 -skylevel 4`:
+
+| `zhlt_embedlightmapresolution` | .bsp | texturas | bytes de textura |
+|---|---|---|---|
+| sin la clave | 673 KB | 0 | 0 |
+| 1 (default) | 12.540 KB | 190 | 11.859 KB |
+| 2 | 3.759 KB | 190 | 3.078 KB |
+| 4 | 1.570 KB | 190 | 889 KB |
+| 8 | 1.255 KB | 190 | 573 KB |
+| 16 | 994 KB | 190 | 312 KB |
+
+**El mapa pasó de 673 KB a 12,5 MB: 18 veces más grande.** Con `resolution 1`
+cada cara se guarda a la resolución nativa de su textura (16 píxeles por luxel),
+más 4 niveles de mipmap y una paleta de 256 colores propia (768 bytes) por
+textura.
+
+La resolución es lo único que mueve la aguja de verdad: cada duplicación divide
+por cuatro. Baja el detalle de la textura base, no el de la luz, que de por sí
+sólo tiene una muestra cada 16 unidades.
+
+### Lo que cambió este fork
+
+Dos cosas, ninguna toca la calidad de la luz:
+
+| | res 1 | res 2 | res 4 | res 8 |
+|---|---|---|---|---|
+| antes | 11.859 KB | 3.078 KB | 889 KB | 573 KB |
+| ahora | 9.048 KB | 2.210 KB | 687 KB | 380 KB |
+| | **-24%** | **-28%** | **-23%** | **-34%** |
+
+1. **Sin redondeo a potencia de dos.** Cada textura se redondeaba hacia arriba a
+   la potencia de dos siguiente, y una cara de 272x144 terminaba ocupando
+   512x256: 2,4 veces los píxeles necesarios. GoldSrc sólo exige múltiplos de
+   16, que el código ya garantizaba. `"zhlt_embedlightmappoweroftwo" "1"`
+   devuelve el comportamiento anterior si hiciera falta.
+2. **Texturas idénticas compartidas.** Las caras repetidas (cajones, columnas,
+   rejas) horneaban los mismos bytes una y otra vez. Ahora se comparan y se
+   reutiliza la misma textura: 12 caras compartidas en este mapa a resolución 1,
+   más a resoluciones altas. Sólo se comparte entre caras que vengan del mismo
+   texinfo original, porque el nombre de la textura generada codifica cuál era y
+   las tools lo leen de vuelta.
+
+Verificado con `scripts/bspcheck.py` (geometría sana) y revisando el lump de
+texturas: dimensiones múltiplo de 16, mips dentro del lump, todos los
+`texinfo->miptex` en rango. Un mapa sin la clave compila byte por byte igual que
+antes.

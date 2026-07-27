@@ -853,9 +853,12 @@ static int CQ_MapPoint (const unsigned char point[CQ_DIM], const unsigned char (
 // =====================================================================================
 
 #define RADTEXTURES_MAX 2048 // should be smaller than 62 * 62 and smaller than MAX_MAP_TEXTURES
+static unsigned int Hash (int size, void *data); // defined below, used by the dedupe
+
 static int g_newtextures_num = 0;
 static byte *g_newtextures_data[RADTEXTURES_MAX];
 static int g_newtextures_size[RADTEXTURES_MAX];
+static unsigned int g_newtextures_hash[RADTEXTURES_MAX]; // of the payload, name excluded
 
 int NewTextures_GetCurrentMiptexIndex ()
 {
@@ -873,7 +876,47 @@ void NewTextures_PushTexture (int size, void *data)
 	hlassume (g_newtextures_data[g_newtextures_num] != NULL, assume_NoMemory);
 	memcpy (g_newtextures_data[g_newtextures_num], data, size);
 	g_newtextures_size[g_newtextures_num] = size;
+	g_newtextures_hash[g_newtextures_num] =
+		Hash (size - (int)sizeof (((miptex_t *)0)->name), (byte *)data + sizeof (((miptex_t *)0)->name));
 	g_newtextures_num++;
+}
+
+// =====================================================================================
+//  NewTextures_FindIdentical
+//      Index of a texture already created in this run with the same pixels,
+//      palette and original texinfo, or -1.
+//
+//      Every face gets its own baked texture, and a map full of repeated
+//      brushwork - crates, pillars, railings - bakes the same bytes over and
+//      over. The name is skipped in the comparison because it carries a
+//      per-texture counter, but its first eleven characters still have to
+//      match: they encode which texinfo the texture came from, and the tools
+//      read that back to recover the original texture.
+// =====================================================================================
+int NewTextures_FindIdentical (int size, const void *data)
+{
+	const int namelen = (int)sizeof (((miptex_t *)0)->name);
+	const byte *bytes = (const byte *)data;
+	unsigned int hash = Hash (size - namelen, (void *)(bytes + namelen));
+	dmiptexlump_t *texdata = (dmiptexlump_t *)g_dtexdata;
+
+	for (int i = 0; i < g_newtextures_num; i++)
+	{
+		if (g_newtextures_size[i] != size || g_newtextures_hash[i] != hash)
+		{
+			continue;
+		}
+		const byte *other = g_newtextures_data[i];
+		if (memcmp (bytes, other, 11) != 0) // '{' or '_', "_rad", and the five digits
+		{
+			continue;
+		}
+		if (memcmp (bytes + namelen, other + namelen, size - namelen) == 0)
+		{
+			return texdata->nummiptex + i;
+		}
+	}
+	return -1;
 }
 
 void NewTextures_Write ()
@@ -1030,6 +1073,8 @@ void EmbedLightmapInTextures ()
 	int miplevel;
 	int count = 0;
 	int count_bytes = 0;
+	int shared = 0;
+	int shared_bytes = 0;
 	bool logged = false;
 
 	for (i = 0; i < g_numfaces; i++)
@@ -1078,6 +1123,10 @@ void EmbedLightmapInTextures ()
 		}
 
 		bool poweroftwo = DEFAULT_EMBEDLIGHTMAP_POWEROFTWO;
+		if (*ValueForKey (ent, "zhlt_embedlightmappoweroftwo"))
+		{
+			poweroftwo = IntForKey (ent, "zhlt_embedlightmappoweroftwo") != 0;
+		}
 		vec_t denominator = DEFAULT_EMBEDLIGHTMAP_DENOMINATOR;
 		vec_t gamma = DEFAULT_EMBEDLIGHTMAP_GAMMA;
 		int resolution = DEFAULT_EMBEDLIGHTMAP_RESOLUTION;
@@ -1466,9 +1515,19 @@ void EmbedLightmapInTextures ()
 		miptex->name[13] = table[(count / 62) % 62];
 		miptex->name[14] = table[(count) % 62];
 		miptex->name[15] = '\0';
-		NewTextures_PushTexture (miptexsize, miptex);
-		count++;
-		count_bytes += miptexsize;
+		int identical = NewTextures_FindIdentical (miptexsize, miptex);
+		if (identical >= 0)
+		{
+			info->miptex = identical;
+			shared++;
+			shared_bytes += miptexsize;
+		}
+		else
+		{
+			NewTextures_PushTexture (miptexsize, miptex);
+			count++;
+			count_bytes += miptexsize;
+		}
 		Developer (DEVELOPER_LEVEL_MESSAGE, "Created texture '%s' for face (texture %s) at (%4.3f %4.3f %4.3f)\n", miptex->name, texname, g_face_centroids[i][0], g_face_centroids[i][1], g_face_centroids[i][2]);
 
 		free (miptex);
@@ -1486,6 +1545,10 @@ void EmbedLightmapInTextures ()
 	if (logged)
 	{
 		Log ("added %d texinfos and textures (%d bytes)\n", count, count_bytes);
+		if (shared)
+		{
+			Log ("%d faces reused an identical texture (%d bytes saved)\n", shared, shared_bytes);
+		}
 	}
 }
 

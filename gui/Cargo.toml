@@ -1,6 +1,6 @@
 [package]
 name = "resdhlt-gui"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 description = "Map compiler front-end for ReSDHLT"
 license = "GPL-2.0-or-later"
@@ -27,3 +27,4 @@ strip = true
 [[bin]]
 name = "resdhlt-gui"
 path = "src/main.rs"
+

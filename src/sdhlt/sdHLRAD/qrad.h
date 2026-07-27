@@ -147,7 +147,12 @@
 	#define DEFAULT_BLUR 1.5 // classic lighting is equivalent to "-blur 1.0"
 	#define DEFAULT_NOEMITTERRANGE false
 	#define DEFAULT_BLEEDFIX true
-	#define DEFAULT_EMBEDLIGHTMAP_POWEROFTWO true
+	// Rounding each baked texture up to a power of two wastes up to four times
+	// the pixels; GoldSrc only requires multiples of 16, which the code already
+	// guarantees. Measured on ba_dust_island: 11.6 MB of textures with rounding,
+	// 9.8 MB without. "zhlt_embedlightmappoweroftwo" "1" restores the old
+	// behaviour per entity.
+	#define DEFAULT_EMBEDLIGHTMAP_POWEROFTWO false
 	#define DEFAULT_EMBEDLIGHTMAP_DENOMINATOR 188.0
 	#define DEFAULT_EMBEDLIGHTMAP_GAMMA 1.05
 	#define DEFAULT_EMBEDLIGHTMAP_RESOLUTION 1
@@ -377,6 +382,7 @@ extern int g_numtextures;
 extern radtexture_t *g_textures;
 extern void AddWadFolder (const char *path);
 extern void LoadTextures ();
+extern int NewTextures_FindIdentical (int size, const void *data);
 extern void EmbedLightmapInTextures ();
 
 typedef struct

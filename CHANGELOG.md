@@ -40,6 +40,15 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
 - Combined, all of the above: 5-13% off RAD's CPU time depending on map and run
   (measured on `ba_dust_island` and `koth_sandy`, interleaved pairs, process CPU
   time), with every .bsp byte-identical to the unoptimised build
+- `zhlt_embedlightmap` produces 24-34% less texture data. It bakes one texture
+  per face, so a map using it grows enormously (measured: 673 KB to 12.5 MB on
+  ba_dust_island with 190 faces). Two changes, neither touching the lighting:
+  baked textures are no longer rounded up to a power of two (GoldSrc only needs
+  multiples of 16, and the rounding wasted up to 4x the pixels;
+  `zhlt_embedlightmappoweroftwo` restores it), and faces that bake byte-identical
+  textures now share one. `zhlt_embedlightmapresolution` remains the setting that
+  actually decides the size: each doubling divides it by four. See
+  docs/BENCHMARKS.md
 - CSG's `MAX_WADPATHS` raised from 128 to 512 (and `MAX_TEXFILES` with it). The
   old ceiling is easy to hit with a large texture library, and CSG aborted with
   "too many wad files" instead of ignoring the excess. Each slot is a pointer
@@ -55,6 +64,9 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
   Removed
 
 ### Fixed
+- `SDHLT_ARCH=avx2` produced `/arch:avx2`, which MSVC ignores with "command line
+  warning D9002": every release so far was built without the vectorisation it
+  claimed. The flag is upper-cased now
 - `gui/`: the executable's version resource was hardcoded in `assets/icon.rc`
   and kept reporting 0.1.0 in the file properties no matter what was released.
   `build.rs` now generates the whole resource script from `CARGO_PKG_VERSION`
