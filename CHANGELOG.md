@@ -57,6 +57,15 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
   map (2.79s to 2.35s, one thread, interleaved pairs, best of five) and it is a
   quarter of RAD, so ~4% off a compile. Maps with little lerp work see less.
   .bsp byte-identical on `ba_dust_island` and `ar_pokemon`
+- RAD: the sample interpolation reuses its scratch buffers per thread instead of
+  allocating them per sample and per candidate patch. `CalcWeight()` and
+  `CalcInterpolation()` each built a `std::vector` on every call, and every
+  accepted candidate got a `new interpolation_t` carrying another one: ~1.2
+  million allocations per map on `ba_dust_island`. `AddPatchLights` is 21.5%
+  faster (2.37s to 1.86s) and RAD as a whole 6.4% (10.01s to 9.37s), one thread,
+  interleaved pairs, best of five. Combined with the phong normal change above,
+  that phase went from 2.79s to 1.86s, a third off. .bsp byte-identical on
+  `ba_dust_island` and `ar_pokemon`, at one thread and at six
 - CSG's `MAX_WADPATHS` raised from 128 to 512 (and `MAX_TEXFILES` with it). The
   old ceiling is easy to hit with a large texture library, and CSG aborted with
   "too many wad files" instead of ignoring the excess. Each slot is a pointer

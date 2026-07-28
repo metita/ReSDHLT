@@ -230,7 +230,10 @@ static bool CalcWeight (const localtriangulation_t *lt, const vec3_t spot, vec_t
 	int i;
 	int j;
 	vec_t angle;
-	std::vector< vec_t > angles;
+	// Kept across calls: this runs once per candidate patch, millions of times
+	// per map, and a fresh vector meant a malloc/free pair every time. resize()
+	// on a live vector keeps the capacity it already grew to.
+	static thread_local std::vector< vec_t > angles;
 	vec_t frac;
 	vec_t len;
 	vec_t dist;
@@ -515,7 +518,7 @@ static void CalcInterpolation (const localtriangulation_t *lt, const vec3_t spot
 	int i;
 	int j;
 	vec_t angle;
-	std::vector< vec_t > angles;
+	static thread_local std::vector< vec_t > angles;      // see CalcWeight
 
 	if (GetDirection (spot, lt->normal, direction) <= 2 * ON_EPSILON)
 	{
@@ -813,8 +816,32 @@ void InterpolateSampleLight (const vec3_t position, int surface, int numstyles, 
 	
 	const facetriangulation_t *ft;
 	interpolation_t *maininterp;
-	std::vector< vec_t > localweights;
-	std::vector< interpolation_t * > localinterps;
+
+	// All three used to be built and thrown away per sample, and the pool below
+	// used to be a `new interpolation_t` per accepted candidate: ~1.2 million
+	// allocations per map on ba_dust_island, each one carrying a std::vector of
+	// its own. They are kept per thread instead. Nothing here escapes the call,
+	// so reuse is safe, and CalcInterpolation() always resize()s what it fills
+	// rather than assuming an empty object.
+	// The pool owns what it hands out. RunThreadsOn() starts fresh threads for
+	// every phase, so without this each phase would leak its pools.
+	struct interppool_t
+	{
+		std::vector< interpolation_t * > items;
+		~interppool_t ()
+		{
+			for (size_t k = 0; k < items.size (); k++)
+			{
+				delete items[k];
+			}
+		}
+	};
+
+	static thread_local std::vector< vec_t > localweights;
+	static thread_local std::vector< interpolation_t * > localinterps;
+	static thread_local interppool_t interppool;
+	static thread_local interpolation_t mainstorage;
+	size_t poolused = 0;
 
 	int i;
 	int j;
@@ -835,7 +862,7 @@ void InterpolateSampleLight (const vec3_t position, int surface, int numstyles, 
 		Error ("InterpolateSampleLight: internal error: surface number out of range.");
 	}
 	ft = g_facetriangulations[surface];
-	maininterp = new interpolation_t;
+	maininterp = &mainstorage;
 	maininterp->points.reserve (64);
 
 	// Calculate local interpolations and their weights
@@ -866,8 +893,12 @@ void InterpolateSampleLight (const vec3_t position, int surface, int numstyles, 
 				{
 					continue;
 				}
-				interp = new interpolation_t;
-				interp->points.reserve (4);
+				if (poolused == interppool.items.size ())
+				{
+					interppool.items.push_back (new interpolation_t);
+					interppool.items.back ()->points.reserve (4);
+				}
+				interp = interppool.items[poolused++];
 				CalcInterpolation (lt, spot, interp);
 
 				localweights.push_back (weight);
@@ -1025,12 +1056,8 @@ void InterpolateSampleLight (const vec3_t position, int surface, int numstyles, 
 			}
 		}
 	}
-	delete maininterp;
-
-	for (i = 0; i < (int)localinterps.size (); i++)
-	{
-		delete localinterps[i];
-	}
+	// Nothing to free: maininterp is the thread's own storage and the local
+	// interpolations go back to the thread's pool by resetting the count.
 
 	}
 	catch (std::bad_alloc)
