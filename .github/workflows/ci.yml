@@ -67,7 +67,9 @@ jobs:
       shell: bash
       run: |
         set -e
-        cd tools
+        # The Visual Studio generator is multi-config, so on Windows the
+        # binaries land in tools/Release rather than tools.
+        if [ -d tools/${{ matrix.build_type }} ]; then cd tools/${{ matrix.build_type }}; else cd tools; fi
         for tool in sdHLCSG sdHLBSP sdHLVIS sdHLRAD sdRIPENT; do
           if [ -f "./$tool" ]; then bin="./$tool"; else bin="./$tool.exe"; fi
           if [ ! -f "$bin" ]; then echo "MISSING: $tool"; exit 1; fi

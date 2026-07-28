@@ -28,6 +28,7 @@
 
 #include <atomic>
 #include <mutex>
+#include <system_error>                                    // std::system_error
 #include <thread>
 #include <vector>
 
