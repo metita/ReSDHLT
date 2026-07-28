@@ -882,6 +882,71 @@ void NewTextures_PushTexture (int size, void *data)
 }
 
 // =====================================================================================
+//  BakedTexturePrefix
+//      What the baked texture has to be called so the engine still treats the
+//      surface the way the mapper intended.
+//
+//      GoldSrc decides what a surface *is* from the texture name and nothing
+//      else, when it loads the map (Mod_LoadSurfaces):
+//
+//          "sky"      (3)  -> SURF_DRAWSKY
+//          '!' or '*'      -> SURF_DRAWTURB   (water: wave warp, fog, culling)
+//          "water"    (5)  -> SURF_DRAWTURB
+//          "laser"    (5)  -> SURF_DRAWTURB
+//          "scroll"   (6)  -> SURF_CONVEYOR   (func_conveyor movement)
+//          "{scroll"  (7)  -> SURF_CONVEYOR | SURF_TRANSPARENT
+//          '{'             -> SURF_TRANSPARENT
+//
+//      Baking the lightmap renames the texture, so any of those that is not
+//      carried over silently turns the surface into an ordinary one: that is
+//      how func_water lost its waves and how func_conveyor stops moving.
+//
+//      The four water spellings all mean the same flag, so they can all be
+//      baked as '!' - one character, which is what the classic name layout has
+//      room for. "scroll" needs the long layout (see below). "sky" never gets
+//      here: EmbedLightmapInTextures skips it.
+//
+//      Returns the length of the prefix written to prefix_out, or -1 when the
+//      name cannot be preserved and the face must be left alone.
+// =====================================================================================
+int BakedTexturePrefix (const char *texname, char *prefix_out)
+{
+	// Conveyor and masked at once. "{scroll" is seven characters and the name
+	// has no room left for the texinfo and a unique suffix, and dropping either
+	// half of it would break something the mapper asked for, so this one is
+	// refused rather than half-kept.
+	if (!strncasecmp (texname, "{scroll", 7))
+	{
+		return -1;
+	}
+
+	if (!strncasecmp (texname, "scroll", 6))
+	{
+		memcpy (prefix_out, "scroll", 6);
+		return 6;
+	}
+
+	if (texname[0] == '{')
+	{
+		prefix_out[0] = '{';
+		return 1;
+	}
+
+	// Every spelling of water maps onto '!': the engine gives them all
+	// SURF_DRAWTURB, and '!' is the one that fits in a single character.
+	if (texname[0] == '!' || texname[0] == '*'
+		|| !strncasecmp (texname, "water", 5)
+		|| !strncasecmp (texname, "laser", 5))
+	{
+		prefix_out[0] = '!';
+		return 1;
+	}
+
+	prefix_out[0] = '_';
+	return 1;
+}
+
+// =====================================================================================
 //  NewTextures_FindIdentical
 //      Index of a texture already created in this run with the same pixels,
 //      palette and original texinfo, or -1.
@@ -889,10 +954,23 @@ void NewTextures_PushTexture (int size, void *data)
 //      Every face gets its own baked texture, and a map full of repeated
 //      brushwork - crates, pillars, railings - bakes the same bytes over and
 //      over. The name is skipped in the comparison because it carries a
-//      per-texture counter, but its first eleven characters still have to
-//      match: they encode which texinfo the texture came from, and the tools
-//      read that back to recover the original texture.
+//      per-texture counter, but the part of it that encodes which texinfo the
+//      texture came from still has to match, because the tools read that back
+//      to recover the original texture. Share two textures across a texinfo
+//      boundary and the faces of one of them get the other's original.
 // =====================================================================================
+static int BakedNameIdentityLength (const byte *name)
+{
+	// "scroll" pushes the texinfo out to characters 10-12, so the comparison
+	// has to reach further than in the classic layout.
+	if (!strncasecmp ((const char *)name, "scroll", 6)
+		&& !strncasecmp ((const char *)name + 6, "_rad", 4))
+	{
+		return 13;                                         // "scroll_rad" + 3
+	}
+	return 11;                                             // "?_rad" + 5 digits + 1
+}
+
 int NewTextures_FindIdentical (int size, const void *data)
 {
 	const int namelen = (int)sizeof (((miptex_t *)0)->name);
@@ -907,7 +985,7 @@ int NewTextures_FindIdentical (int size, const void *data)
 			continue;
 		}
 		const byte *other = g_newtextures_data[i];
-		if (memcmp (bytes, other, 11) != 0) // '{' or '_', "_rad", and the five digits
+		if (memcmp (bytes, other, BakedNameIdentityLength (bytes)) != 0)
 		{
 			continue;
 		}
@@ -1043,7 +1121,9 @@ static bool GetValidTextureName (int miptex, char name[16])
 		return false;
 	}
 	
-	if (strlen (name) >= 5 && !strncasecmp (&name[1], "_rad", 4))
+	// Already a baked texture, in either layout: not a name to bake again.
+	if ((strlen (name) >= 5 && !strncasecmp (&name[1], "_rad", 4))
+		|| (strlen (name) >= 10 && !strncasecmp (name, "scroll", 6) && !strncasecmp (&name[6], "_rad", 4)))
 	{
 		return false;
 	}
@@ -1073,6 +1153,7 @@ void EmbedLightmapInTextures ()
 	int miplevel;
 	int count = 0;
 	int count_bytes = 0;
+	bool warnedname = false;
 	int shared = 0;
 	int shared_bytes = 0;
 	bool logged = false;
@@ -1112,6 +1193,22 @@ void EmbedLightmapInTextures ()
 		if (!IntForKey (ent, "zhlt_embedlightmap"))
 		{
 			continue;
+		}
+		{
+			// A name the baked texture cannot carry over. Baking it would cost
+			// the surface something the mapper asked for, so the face keeps its
+			// original texture instead: it loses the baked lighting, which is
+			// the smaller loss and the visible one.
+			char prefixtest[8];
+			if (BakedTexturePrefix (texname, prefixtest) < 0)
+			{
+				if (!warnedname)
+				{
+					Warning ("zhlt_embedlightmap: '%s' is both a conveyor and a masked texture, and the baked name has no room for '{scroll'. Those faces keep their original texture and get no embedded lightmap.", texname);
+					warnedname = true;
+				}
+				continue;
+			}
 		}
 
 		if (!logged)
@@ -1360,8 +1457,13 @@ void EmbedLightmapInTextures ()
 				palettemaxcolors = 255;
 				VectorCopy (tex->palette[255], palette[255]); // the transparency color
 			}
-			else if (texname[0] == '!')
+			else if (texname[0] == '!' || texname[0] == '*'
+					 || !strncasecmp (texname, "water", 5)
+					 || !strncasecmp (texname, "laser", 5))
 			{
+				// All four spellings are water to the engine, so all four keep
+				// their fog entries, not just the '!' one.
+				//
 				// Water carries its fog colour in palette entry 3 and its fog
 				// density in entry 4. Requantising the whole palette threw both
 				// away, so the water came out with the wrong fog. The first
@@ -1481,47 +1583,56 @@ void EmbedLightmapInTextures ()
 			Error ("EmbedLightmapInTextures: internal error");
 		}
 
-		if (texname[0] == '{')
-		{
-			strcpy (miptex->name, "{_rad");
-		}
-		else if (texname[0] == '!')
-		{
-			// GoldSrc decides a surface is water by this '!'. Renaming the baked
-			// texture to "__rad..." silently turned every water face into an
-			// ordinary one: no wave warp, no water fog, no cull-from-below.
-			strcpy (miptex->name, "!_rad");
-		}
-		else
-		{
-			strcpy (miptex->name, "__rad");
-		}
 		if (originaltexinfonum < 0 || originaltexinfonum > 99999)
 		{
 			Error ("EmbedLightmapInTextures: internal error: texinfo out of range");
 		}
-		miptex->name[5] = '0' + (originaltexinfonum / 10000) % 10; // store the original texinfo
-		miptex->name[6] = '0' + (originaltexinfonum / 1000) % 10;
-		miptex->name[7] = '0' + (originaltexinfonum / 100) % 10;
-		miptex->name[8] = '0' + (originaltexinfonum / 10) % 10;
-		miptex->name[9] = '0' + (originaltexinfonum) % 10;
 		char table[62];
 		for (int k = 0; k < 62; k++)
 		{
 			table[k] = k >= 36? 'a' + (k - 36): k >= 10? 'A' + (k - 10): '0' + k; // same order as the ASCII table
 		}
-		miptex->name[10] = '\0';
-		miptex->name[11] = '\0';
-		miptex->name[12] = '\0';
-		miptex->name[13] = '\0';
-		miptex->name[14] = '\0';
-		miptex->name[15] = '\0';
-		unsigned int hash = Hash (miptexsize, miptex);
-		miptex->name[10] = table[(hash / 62 / 62) % 52 + 10];
-		miptex->name[11] = table[(hash / 62) % 62];
-		miptex->name[12] = table[(hash) % 62];
-		miptex->name[13] = table[(count / 62) % 62];
-		miptex->name[14] = table[(count) % 62];
+
+		char prefix[8];
+		const int prefixlen = BakedTexturePrefix (texname, prefix);
+		memset (miptex->name, 0, sizeof (miptex->name));
+		memcpy (miptex->name, prefix, prefixlen);
+		memcpy (miptex->name + prefixlen, "_rad", 4);
+
+		if (prefixlen == 1)
+		{
+			// The layout every released version has written: one character of
+			// prefix, "_rad", the texinfo in five decimal digits, three
+			// characters of content hash and two of counter.
+			miptex->name[5] = '0' + (originaltexinfonum / 10000) % 10; // store the original texinfo
+			miptex->name[6] = '0' + (originaltexinfonum / 1000) % 10;
+			miptex->name[7] = '0' + (originaltexinfonum / 100) % 10;
+			miptex->name[8] = '0' + (originaltexinfonum / 10) % 10;
+			miptex->name[9] = '0' + (originaltexinfonum) % 10;
+			unsigned int hash = Hash (miptexsize, miptex);
+			miptex->name[10] = table[(hash / 62 / 62) % 52 + 10];
+			miptex->name[11] = table[(hash / 62) % 62];
+			miptex->name[12] = table[(hash) % 62];
+			miptex->name[13] = table[(count / 62) % 62];
+			miptex->name[14] = table[(count) % 62];
+		}
+		else
+		{
+			// "scroll" eats six of the fifteen characters, so the texinfo goes
+			// in base 62 (three characters hold 199,888, well past the 99,999
+			// ceiling above) and the counter alone provides uniqueness - it is
+			// a counter, so it cannot collide the way a hash could.
+			//
+			// The first texinfo character is always a letter. That is what lets
+			// the readers tell the two layouts apart: a digit after "_rad"
+			// means the classic one, a letter means this one.
+			const int p = prefixlen + 4;
+			miptex->name[p + 0] = table[(originaltexinfonum / 62 / 62) % 52 + 10];
+			miptex->name[p + 1] = table[(originaltexinfonum / 62) % 62];
+			miptex->name[p + 2] = table[(originaltexinfonum) % 62];
+			miptex->name[p + 3] = table[(count / 62) % 62];
+			miptex->name[p + 4] = table[(count) % 62];
+		}
 		miptex->name[15] = '\0';
 		int identical = NewTextures_FindIdentical (miptexsize, miptex);
 		if (identical >= 0)

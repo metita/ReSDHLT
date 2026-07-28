@@ -87,6 +87,19 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
   requantised palette also destroyed entries 3 and 4, where the engine keeps the
   water's fog colour and density. Both paths existed in the upstream source but
   were commented out; they are enabled and verified against a real map
+- `zhlt_embedlightmap` broke every other surface GoldSrc recognises by texture
+  name, not just water. The engine reads the name at load time, so renaming the
+  baked texture turns the surface into an ordinary one: a `func_conveyor`
+  (`scroll*`) stopped scrolling, and `water*`, `laser*` and `*` stopped being
+  water. All four water spellings now bake as `!`, which is the same flag in one
+  character. `scroll` needs six, so baked names have a second layout,
+  `scroll_radTTTcc`, with the texinfo in base 62; the character after `_rad`
+  tells them apart (digit = the old layout, letter = the new one), so a .bsp
+  from an earlier version still reads. `{scroll` is seven characters and cannot
+  keep both halves of its meaning, so those faces are left unbaked with a
+  warning instead of silently losing one. Verified on a test map with all five
+  cases; maps without them, maps baking an ordinary texture, and `func_water`
+  with the key all compile byte-identical. See docs/BENCHMARKS.md
 - `SDHLT_ARCH=avx2` produced `/arch:avx2`, which MSVC ignores with "command line
   warning D9002": every release so far was built without the vectorisation it
   claimed. The flag is upper-cased now

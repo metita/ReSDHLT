@@ -1107,6 +1107,71 @@ void            PrintBSPFileSizes()
 //  ParseImplicitTexinfoFromTexture
 //      purpose: get the actual texinfo for a face. the tools shouldn't directly use f->texinfo after embedlightmap is done
 // =====================================================================================
+// =====================================================================================
+//  ParseTexinfoFromBakedName
+//      Recovers the original texinfo index that hlrad stored in the name of a
+//      texture it baked a lightmap into, or -1 if this is not one of those.
+//
+//      Two layouts exist, and both have to be read: a .bsp built by an earlier
+//      version only contains the first one.
+//
+//        <c>_radDDDDDhhhcc   one prefix character, texinfo in five decimals
+//        scroll_radTTTcc     six, texinfo in three base-62 characters
+//
+//      A conveyor keeps its "scroll" prefix or the engine stops scrolling it,
+//      and that leaves too few characters for five decimals. What tells the two
+//      apart is the character right after "_rad": a digit means the old layout,
+//      a letter means the new one (its first base-62 character is always a
+//      letter, by construction).
+// =====================================================================================
+int ParseTexinfoFromBakedName (const char *name)
+{
+	int         marker = -1;
+	const int   len = (int)strlen (name);
+
+	if (len >= 6 && !strncasecmp (&name[1], "_rad", 4))
+	{
+		marker = 1;
+	}
+	else if (len >= 11 && !strncasecmp (name, "scroll", 6) && !strncasecmp (&name[6], "_rad", 4))
+	{
+		marker = 6;
+	}
+	if (marker < 0)
+	{
+		return -1;
+	}
+
+	const char *field = &name[marker + 4];
+
+	if ('0' <= field[0] && field[0] <= '9')
+	{
+		return atoi (field);                               // classic: five decimals
+	}
+
+	// base 62, three characters, in the same order as the ASCII table.
+	//
+	// The writer shifts the leading digit by ten so that it always lands on a
+	// letter, which is the marker that distinguishes this layout; that shift
+	// has to come back off here.
+	int value = 0;
+	for (int i = 0; i < 3; i++)
+	{
+		const char c = field[i];
+		int digit;
+		if ('0' <= c && c <= '9')       digit = c - '0';
+		else if ('A' <= c && c <= 'Z')  digit = 10 + (c - 'A');
+		else if ('a' <= c && c <= 'z')  digit = 36 + (c - 'a');
+		else                            return -1;
+		if (i == 0)
+		{
+			digit -= 10;
+		}
+		value = value * 62 + digit;
+	}
+	return value;
+}
+
 int	ParseImplicitTexinfoFromTexture (int miptex)
 {
 	int texinfo;
@@ -1131,13 +1196,12 @@ int	ParseImplicitTexinfoFromTexture (int miptex)
 
 	mt = (miptex_t *)&g_dtexdata[offset];
 	safe_strncpy (name, mt->name, 16);
-	
-	if (!(strlen (name) >= 6 && !strncasecmp (&name[1], "_rad", 4) && '0' <= name[5] && name[5] <= '9'))
+
+	texinfo = ParseTexinfoFromBakedName (name);
+	if (texinfo < 0)
 	{
 		return -1;
 	}
-
-	texinfo = atoi (&name[5]);
 	if (texinfo < 0 || texinfo >= g_numtexinfo)
 	{
 		Warning ("Invalid index of original texinfo: %d parsed from texture name '%s'.", texinfo, name);

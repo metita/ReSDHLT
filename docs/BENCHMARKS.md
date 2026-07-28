@@ -211,6 +211,49 @@ coarse-to-fine podría testear primero un nivel grueso y, en las regiones totalm
 subdivisiones finas. Es real pero complejo, y aproxima, así que hay que decidir cuánta desviación se
 acepta. Comparado con eso, `-skylevel` da 1.65× con una línea de configuración.
 
+### 4.7 Trazador externo (Embree) y GPU: medido y descartado ❌
+
+La pregunta era si conviene reemplazar el descenso por el BSP (`TestLine`) por un BVH de producción, o
+llevar el trazado a la GPU. Ambas cosas cuestan semanas, así que primero se midió el techo con
+`-raybench` (ver §"Cómo reproducir"): captura los rayos de cielo **reales** del compilado y los vuelve a
+trazar aislados, contra el mismo BSP, en un hilo.
+
+`ba_dust_island`, MSVC 19.44, Release, AVX2, un hilo, 13.339.167 rayos de cielo (208.832 muestreados en
+tiradas contiguas de 64, para que los rayos vecinos compartan origen como los ve el compilado real):
+
+| trazador | Mrays/s | ns/rayo | vs `TestLine` |
+|---|---|---|---|
+| `TestLine` (BSP walk) | 7.47 | 134 | — |
+| Embree `rtcIntersect1` | 7.70 | 130 | **1.03×** |
+| Embree `rtcIntersect8` (paquetes) | 7.91 | 126 | **1.06×** |
+| Embree `rtcOccluded1` | 13.58 | 74 | 1.8× (no sirve: no puede decir cielo o sólido) |
+
+**Embree no gana nada.** El motivo es el tamaño de la geometría: el mapa entero son **1.876 triángulos**.
+Un BVH de producción está construido para escenas de millones de primitivas; con 1.876 el costo por rayo
+es overhead fijo (armar el rayo, cruzar la frontera de la biblioteca, recorrer un árbol de pocos niveles),
+no complejidad de escena. Los paquetes de 8 tampoco ayudan por lo mismo: no hay trabajo que amortizar.
+
+Y el techo del proyecto entero es más chico de lo que parecía. RAD completo en un hilo sobre ese mapa
+tarda **9.31 s**; los 13.3M de rayos de cielo a 7.47 Mrays/s son **1.79 s**, o sea **19% de RAD**. Con
+`-extra` (14.09 s, misma cantidad de rayos) baja a **12.7%**.
+
+> Aunque el trazado fuese **gratis**, RAD bajaría 19% en calidad normal y 13% con `-extra`.
+> Embree, al 1.06×, deja eso en ~1%.
+
+**Decisión: no implementar ninguno de los dos.** GPU queda descartado por el mismo cálculo y con
+desventajas extra: el mismo techo del 19%, más transferencias, más dependencia de drivers, un fallback
+CPU obligatorio de por vida, y adiós al `.bsp` byte-idéntico que es como se valida todo en este fork.
+
+Lo que el número sí dice es dónde mirar: el **80% restante de RAD** no es trazado de rayos. Es el resto
+de `GatherSampleLight` (recorrido de la lista de luces, estilos, opacos), los transfers y el rebote.
+
+Nota metodológica: el trazador de Embree que se midió construye un soup de triángulos de todas las caras
+y coincide con `TestLine` en cielo/no-cielo en **78%** de los rayos. No es un port correcto y no pretende
+serlo — `TestLine` resuelve `contents` por leaf (incluidas transiciones de agua) y desciende por ambos
+lados de un plano casi coplanar vía `ON_EPSILON`, cosas que un BVH no tiene. Para medir **velocidad**
+sirve igual: el trabajo de traversal es el mismo orden. Si el resultado hubiese sido 10×, el paso
+siguiente habría sido resolver esa parte; con 1.06× no hace falta.
+
 ## 5. Fusión de caras: sin margen real (investigado a fondo)
 
 Esta era la vía candidata a bajar `wpoly`. La respuesta, con evidencia, es que no hay margen.
@@ -339,6 +382,29 @@ python3 scripts/compilebench.py --compare antes.json despues.json
 Nota: los `.map` traen rutas absolutas de WAD de la máquina donde se hicieron. Hay que reescribir la
 clave `"wad"` del worldspawn a rutas locales antes de compilar.
 
+### Medir solo el trazado de rayos (`-raybench`)
+
+Para saber qué techo tiene cualquier plan de acelerar el trazado (§4.7), sin que lo tape el resto del
+compilado:
+
+```sh
+sdHLRAD mapa -raybench
+```
+
+Captura los rayos de cielo reales mientras corre y al terminar `BuildFacelights` los vuelve a trazar en
+un hilo, informando Mrays/s. Comparar contra el total de RAD **con `-threads 1`** da directamente el
+porcentaje que el trazado representa, que es el techo de Amdahl del proyecto.
+
+Para comparar contra Embree hay que compilar aparte (nada de esto entra en un build normal):
+
+```sh
+cmake -B build-embree -S . -DCMAKE_BUILD_TYPE=Release \
+      -DSDHLT_EMBREE=ON -DEMBREE_ROOT=<sdk de embree>
+cmake --build build-embree --target RAD
+```
+
+El binario resultante depende de `embree4.dll`; es solo para investigación.
+
 ## zhlt_embedlightmap: por qué pesa tanto
 
 `zhlt_embedlightmap` existe porque el motor no aplica lightmaps a las entidades
@@ -393,6 +459,60 @@ Verificado con `scripts/bspcheck.py` (geometría sana) y revisando el lump de
 texturas: dimensiones múltiplo de 16, mips dentro del lump, todos los
 `texinfo->miptex` en rango. Un mapa sin la clave compila byte por byte igual que
 antes.
+
+### Qué otras superficies rompía, y por qué
+
+El agua no era un caso especial: era **el primero que se notó**. GoldSrc decide qué es una superficie
+únicamente por el **nombre de la textura**, al cargar el mapa (`Mod_LoadSurfaces`):
+
+| nombre | chars | resultado |
+|---|---|---|
+| `sky` | 3 | `SURF_DRAWSKY` |
+| `!` o `*` | 1 | `SURF_DRAWTURB` (agua: onda, fog, culling desde abajo) |
+| `water` | 5 | `SURF_DRAWTURB` |
+| `laser` | 5 | `SURF_DRAWTURB` |
+| `scroll` | 6 | `SURF_CONVEYOR` (movimiento de `func_conveyor`) |
+| `{scroll` | 7 | `SURF_CONVEYOR` + `SURF_TRANSPARENT` |
+| `{` | 1 | `SURF_TRANSPARENT` |
+
+Como hornear renombra la textura, **cada uno de esos que no se preserve convierte la superficie en una
+común**. El fix del agua cubría `!` y `{`; faltaban `*`, `water`, `laser` y `scroll`.
+
+`sky` nunca llega: `EmbedLightmapInTextures` ya salta el cielo y las `TEX_SPECIAL`.
+
+**Las cuatro formas de escribir agua producen el mismo flag**, así que las cuatro se hornean con `!`, que
+es lo que entra en un carácter.
+
+`scroll` no entra: el nombre horneado tenía un solo carácter de prefijo (`?_rad` + 5 dígitos de texinfo +
+3 de hash + 2 de contador = los 15 caracteres justos). Por eso hay un **segundo layout**:
+
+```
+<c>_radDDDDDhhhcc     el de siempre: 1 char de prefijo, texinfo en 5 decimales
+scroll_radTTTcc       nuevo: 6 de prefijo, texinfo en 3 caracteres base 62
+```
+
+Lo que distingue uno de otro al leerlos es el carácter que sigue a `_rad`: **dígito** = layout viejo,
+**letra** = nuevo (el primer carácter base 62 se fuerza a letra al escribirlo). Así un `.bsp` hecho con
+una versión anterior se sigue leyendo igual.
+
+`{scroll` (7 caracteres) **no se hornea**: no quedan caracteres para el texinfo más un sufijo único, y
+quedarse con la mitad del nombre rompería o el movimiento o la transparencia. Esas caras conservan su
+textura original y su lightmap normal, con un aviso en el log.
+
+Verificado sobre un mapa de prueba con las cinco texturas (`scroll*`, `water*`, `laser*`, `{scroll*` y
+una común) y `zhlt_embedlightmap` en cinco entidades:
+
+| | antes | después |
+|---|---|---|
+| `func_conveyor` (`scrolltest`) | `__rad*` (deja de moverse) | **`scroll_rad*`** |
+| `watertest`, `lasertest` | `__rad*` (deja de ser agua) | **`!_rad*`** |
+| `{scrolltst` | `{_rad*` (deja de moverse) | sin hornear, con aviso |
+| textura común | `__rad*` | `__rad*` |
+
+Y sin regresiones, todo byte a byte: mapa sin la clave, mapa con la clave sobre textura común, y
+`func_water` con la clave dan `.bsp` **idénticos** a los de antes del cambio. Recompilar RAD dos veces
+sobre el mismo `.bsp` también da el mismo resultado, que es lo que prueba que
+`DeleteEmbeddedLightmaps()` reconoce el nombre nuevo y restaura bien el texinfo.
 
 ### Agua: por qué dejaba de moverse
 
