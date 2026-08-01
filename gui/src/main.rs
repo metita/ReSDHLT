@@ -2046,58 +2046,116 @@ impl App {
                     m,
                     "Fusionar entidades estáticas",
                     "Junta en una sola entidad las entidades brush que son intercambiables \
-                     entre sí: mismo classname (func_wall o func_illusionary), exactamente los \
-                     mismos keyvalues, sin nombre, sin target y sin brush de origin.\n\n\
-                     QUÉ CAMBIA: cada entidad brush cuesta un modelo BSP, y esos modelos salen \
-                     de la misma tabla de precache que comparten los modelos de jugadores, \
-                     armas y sprites. Un campo de 200 arbustos idénticos hechos con \
+                     entre sí. Los brushes no se tocan: misma geometría, mismas texturas, \
+                     misma iluminación, mismas colisiones. Lo único que cambia es de qué \
+                     entidad cuelgan.\n\n\
+                     QUÉ CAMBIA: cada entidad brush cuesta un modelo BSP, y esos modelos \
+                     salen de la misma tabla de precache que comparten los modelos de \
+                     jugadores, armas y sprites. Un campo de 200 arbustos hechos con \
                      func_illusionary pasa de gastar 200 slots a gastar unos pocos, uno por \
-                     zona. Los brushes no se tocan: misma geometría, mismas texturas, misma \
-                     iluminación.\n\n\
-                     Se fusionan solo los render modes que el motor no ordena por \
-                     profundidad: Normal y Solid, que es justamente el de las texturas '{' de \
-                     la vegetación. Para incluir los modos mezclados hay que pasar \
-                     -mergeblend a mano, y sabiendo que pueden dibujarse en el orden \
-                     equivocado entre ellos.\n\n\
+                     zona. Eso se paga por entidad, no por brush: un func_illusionary de 1 \
+                     brush y otro de 80 cuestan lo mismo.\n\n\
+                     PARA QUE TUS ARBUSTOS SE FUSIONEN, en el editor:\n\
+                     · classname func_illusionary (o func_wall)\n\
+                     · textura con '{' y rendermode Solid, renderamt 255\n\
+                     · SIN targetname, sin target, sin brush de origin\n\
+                     · todos con exactamente los mismos keyvalues\n\n\
+                     NO tienes que agruparlos a mano en el editor. El compilador los agrupa \
+                     por cercanía él solo, y a mano es más fácil colar en el grupo algo que \
+                     tenga nombre.\n\n\
+                     Basta con que UNA clave difiera (un renderamt distinto, zhlt_noclip \
+                     puesto en unos sí y otros no) para que vayan a grupos separados. No es \
+                     un error: es la garantía de que la fusión no cambia el comportamiento.\n\n\
+                     Para dejar una entidad concreta fuera, ponle zhlt_nomerge 1.\n\n\
+                     CÓMO SABER SI FUNCIONÓ: al terminar CSG el log dice 'Merged N static \
+                     brush entities into M'. Si dice 0, o no aparece, es que algo las \
+                     descalifica; activa 'Verbose' y el log lista cada grupo que sí armó.\n\n\
+                     CUÁNDO NO USARLO: si tu mapa tiene pocas entidades brush no ganas nada. \
+                     Esto es para mapas con mucha decoración repetida.\n\n\
                      Ver docs/MERGE_DE_ENTIDADES.md.",
-                    Some("útil si usas mucha decoración"),
+                    Some("si usas mucha decoración"),
                     &mut self.opts.mergeentities,
                 );
                 if self.opts.mergeentities {
+                    hint(
+                        ui,
+                        m,
+                        "En el editor: func_illusionary + textura '{' + rendermode Solid + \
+                         renderamt 255, sin targetname. Se agrupan solos, no los juntes a mano",
+                        OK,
+                    );
                     row(
                         ui,
                         m,
                         "Tamaño de grupo",
                         "Hasta cuántas unidades puede medir, en cualquier eje, la caja de un \
-                         grupo fusionado.\n\n\
+                         grupo fusionado. Es el único valor que quizá quieras tocar, y solo \
+                         si sabes cómo es tu mapa.\n\n\
                          QUÉ CAMBIA: una entidad brush se descarta con el bounding box de su \
-                         modelo. Si se fusionara todo el mapa en una entidad, esa caja estaría \
-                         en el PVS desde casi cualquier lado y se dibujaría decoración que no \
-                         se ve. El límite mantiene cada grupo dentro de algo parecido a un \
-                         sector. Súbelo en mapas abiertos, bájalo en mapas de pasillos. \
-                         0 = sin límite (no recomendado).",
+                         modelo: si la caja no está en el PVS del jugador, ni se manda ni se \
+                         dibuja. Si se fusionara el mapa entero en una entidad, esa caja \
+                         sería del tamaño del mapa y estaría en el PVS desde casi cualquier \
+                         lado, así que se dibujaría decoración que no se ve. El límite \
+                         mantiene cada grupo dentro de algo parecido a un sector.\n\n\
+                         VALORES:\n\
+                         · 512 — mapas de pasillos y habitaciones chicas, culling más fino\n\
+                         · 1024 — el default, sirve para casi todo\n\
+                         · 2048 — mapas abiertos, donde el PVS es malo igual y conviene \
+                         ahorrar más slots\n\
+                         · 0 — sin límite. No lo uses salvo que te estés quedando sin \
+                         modelos y no te importe el rendimiento\n\n\
+                         Si tras subirlo ves en r_speeds decoración dibujándose desde lejos, \
+                         bájalo.",
                         Some("1024"),
                         |ui| slider_u32(ui, m, &mut self.opts.mergesize, 0..=8192, 256.0),
                     );
+                    if self.opts.mergesize == 0 {
+                        hint(
+                            ui,
+                            m,
+                            "Sin límite: la caja de un grupo puede abarcar el mapa entero y \
+                             quedar siempre en el PVS. Ahorras modelos y pierdes culling",
+                            WARN,
+                        );
+                    } else if self.opts.mergesize >= 2048 {
+                        hint(
+                            ui,
+                            m,
+                            "Grupos grandes: solo para mapas abiertos. Mira r_speeds antes de \
+                             dejarlo así",
+                            WARN,
+                        );
+                    }
                     toggle_row(
                         ui,
                         m,
                         "Fusionar también los modos mezclados",
-                        "Por defecto solo se fusionan los render modes que el motor NO ordena \
+                        "Déjalo apagado salvo que sepas exactamente por qué lo enciendes.\n\n\
+                         Por defecto solo se fusionan los render modes que el motor NO ordena \
                          por profundidad: Normal y Solid. Solid es el alpha test de las \
                          texturas '{' — el de la vegetación — y recorta el píxel en vez de \
-                         mezclarlo, así que no hay nada que ordenar.\n\n\
-                         QUÉ CAMBIA: esto suma los modos que sí se mezclan (Texture, Additive, \
+                         mezclarlo, así que no hay nada que ordenar. Por eso el caso de los \
+                         arbustos entra sin restricciones y no necesitas esta opción.\n\n\
+                         QUÉ CAMBIA: suma los modos que sí se mezclan (Texture, Additive, \
                          Glow, Color). El motor los ordena usando un solo punto por entidad; \
                          si fusionas varias en una, todas pasan a compartir ese punto y se \
                          pueden dibujar en el orden equivocado entre ellas. Un cristal se ve \
                          delante de otro que en realidad está más cerca.\n\n\
-                         Úsalo solo si tienes muchas entidades mezcladas juntas en una zona \
-                         donde no se superponen entre sí, y míralo en el juego antes de darlo \
-                         por bueno.",
+                         Solo tiene sentido si tienes muchas entidades mezcladas juntas en \
+                         una zona donde no se superponen visualmente entre sí. Y hay que \
+                         verlo en el juego, porque el compilador no puede avisarte de esto.",
                         Some("déjalo apagado"),
                         &mut self.opts.mergeblend,
                     );
+                    if self.opts.mergeblend {
+                        hint(
+                            ui,
+                            m,
+                            "Los cristales y efectos aditivos fusionados pueden dibujarse en \
+                             el orden equivocado entre sí. Compruébalo en el juego",
+                            WARN,
+                        );
+                    }
                 }
                 row(
                     ui,
