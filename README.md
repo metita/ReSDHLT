@@ -41,6 +41,9 @@ but has not been exercised on a real compile. See `gui/README.md`.
 - `docs/FPS_Y_TOOL_TEXTURES.md` - how to actually lower `wpoly` and raise FPS. Start
   here if you make maps: the compiler cannot do this for you, and this is the
   largest lever that exists.
+- `docs/MERGE_DE_ENTIDADES.md` - `-mergeentities`, which folds equivalent static
+  brush entities into one so a field of identical `func_illusionary` bushes stops
+  costing one BSP model each.
 - `docs/PERFILAR_RAD.md` - how to profile RAD on your own machine (it is >95% of
   compile time), what is already ruled out, and where a real win would come from.
 - `docs/BENCHMARKS.md` - every measurement taken, including the negative results

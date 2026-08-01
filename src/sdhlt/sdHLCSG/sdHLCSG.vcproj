@@ -241,6 +241,10 @@
 				>
 			</File>
 			<File
+				RelativePath=".\mergeents.cpp"
+				>
+			</File>
+			<File
 				RelativePath=".\properties.cpp"
 				>
 			</File>

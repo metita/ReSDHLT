@@ -62,6 +62,9 @@
 #define DEFAULT_NOUTF8 false
 #endif
 #define DEFAULT_NULLIFYTRIGGER true
+#define DEFAULT_MERGE_ENTITIES false
+#define DEFAULT_MERGE_MAXSIZE 1024.0 // longest side a merged group may reach, 0 = no limit
+#define DEFAULT_MERGE_BLEND false
 
 // AJM: added in
 #define UNLESS(a)  if (!(a))
@@ -235,6 +238,14 @@ extern hullshape_t g_hullshapes[MAX_HULLSHAPES];
 
 extern void     TextureAxisFromPlane(const plane_t* const pln, vec3_t xv, vec3_t yv);
 extern void     LoadMapFile(const char* const filename);
+
+//=============================================================================
+// mergeents.cpp
+
+extern bool     g_merge_entities;
+extern vec_t    g_merge_maxsize;
+extern bool     g_merge_blend;
+extern void     MergeStaticEntities();
 
 //=============================================================================
 // textures.cpp

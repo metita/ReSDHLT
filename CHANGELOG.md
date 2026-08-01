@@ -132,6 +132,18 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
 - CI ran `ctest` with no registered tests and always failed that step
 
 ### Added
+- CSG: `-mergeentities` folds equivalent static brush entities into one, so a
+  field of 200 identical `func_illusionary` bushes costs one BSP model instead
+  of 200. Models are the scarce resource here: the engine precache table they
+  live in is shared with studio models and sprites. Entities are only folded
+  when they carry the exact same keyvalues, have no name/target/origin of any
+  kind, belong to a whitelist of purely static classes (`func_illusionary`,
+  `func_wall`) and use a render mode the engine does not depth sort. Groups are
+  clustered by proximity and capped at `-mergesize` units (1024 by default) so
+  the merged model does not end up with a map-sized bounding box that defeats
+  culling; `-mergeblend` lifts the render mode restriction, and `zhlt_nomerge`
+  `1` opts a single entity out. Off by default, ignored under `-onlyents`.
+  See `docs/MERGE_DE_ENTIDADES.md`
 - `gui/`: updates from GitHub Releases. Checks once a day, offers the update in
   a window with the release notes, and swaps the executable and `tools/` with a
   helper script once the GUI has exited. Only releases count, so pushing to

@@ -2041,6 +2041,45 @@ impl App {
                     Some("déjalo apagado"),
                     &mut self.opts.nodeterministic,
                 );
+                toggle_row(
+                    ui,
+                    m,
+                    "Fusionar entidades estáticas",
+                    "Junta en una sola entidad las entidades brush que son intercambiables \
+                     entre sí: mismo classname (func_wall o func_illusionary), exactamente los \
+                     mismos keyvalues, sin nombre, sin target y sin brush de origin.\n\n\
+                     QUÉ CAMBIA: cada entidad brush cuesta un modelo BSP, y esos modelos salen \
+                     de la misma tabla de precache que comparten los modelos de jugadores, \
+                     armas y sprites. Un campo de 200 arbustos idénticos hechos con \
+                     func_illusionary pasa de gastar 200 slots a gastar unos pocos, uno por \
+                     zona. Los brushes no se tocan: misma geometría, mismas texturas, misma \
+                     iluminación.\n\n\
+                     Se fusionan solo los render modes que el motor no ordena por \
+                     profundidad: Normal y Solid, que es justamente el de las texturas '{' de \
+                     la vegetación. Para incluir los modos mezclados hay que pasar \
+                     -mergeblend a mano, y sabiendo que pueden dibujarse en el orden \
+                     equivocado entre ellos.\n\n\
+                     Ver docs/MERGE_DE_ENTIDADES.md.",
+                    Some("útil si usas mucha decoración"),
+                    &mut self.opts.mergeentities,
+                );
+                if self.opts.mergeentities {
+                    row(
+                        ui,
+                        m,
+                        "Tamaño de grupo",
+                        "Hasta cuántas unidades puede medir, en cualquier eje, la caja de un \
+                         grupo fusionado.\n\n\
+                         QUÉ CAMBIA: una entidad brush se descarta con el bounding box de su \
+                         modelo. Si se fusionara todo el mapa en una entidad, esa caja estaría \
+                         en el PVS desde casi cualquier lado y se dibujaría decoración que no \
+                         se ve. El límite mantiene cada grupo dentro de algo parecido a un \
+                         sector. Súbelo en mapas abiertos, bájalo en mapas de pasillos. \
+                         0 = sin límite (no recomendado).",
+                        Some("1024"),
+                        |ui| slider_u32(ui, m, &mut self.opts.mergesize, 0..=8192, 256.0),
+                    );
+                }
                 row(
                     ui,
                     m,

@@ -268,6 +268,13 @@
 	]
 ]
 
+// zhlt_nomerge
+// Not an entity: a key you can add by hand to any func_wall or func_illusionary.
+// With -mergeentities, CSG folds brush entities that carry the exact same
+// keyvalues into a single one so they stop costing a BSP model each. Setting
+// zhlt_nomerge to 1 keeps that particular entity separate.
+// See docs/MERGE_DE_ENTIDADES.md
+
 // info_hullshape
 // It replaces the default cuboid shape of the player when generating collision hulls for certain brushes.
 @SolidClass = info_hullshape : "Hull shape definition"

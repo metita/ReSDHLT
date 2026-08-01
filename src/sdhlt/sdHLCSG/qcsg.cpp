@@ -1578,6 +1578,10 @@ static void     Usage()
     Log("    -nonulltex       : Turns off null texture stripping\n");
 	Log("    -nonullifytrigger: don't remove 'aaatrigger' texture\n");
 
+	Log("    -mergeentities   : merge identical static brush entities to save models\n");
+	Log("    -mergesize #     : max size of a merged group, 0 for no limit\n");
+	Log("    -mergeblend      : also merge blended render modes (may reorder them)\n");
+
 
 	Log("    -nolightopt      : don't optimize engine light entities\n");
 
@@ -1685,6 +1689,16 @@ static void     Settings()
 	Log("wad.cfg config name   [ %7s ] [ %7s ]\n", g_wadconfigname? g_wadconfigname: "None", "None");
 	Log("nullfile              [ %7s ] [ %7s ]\n", g_nullfile ? g_nullfile : "None", "None");
 	Log("nullify trigger       [ %7s ] [ %7s ]\n", g_nullifytrigger? "on": "off", DEFAULT_NULLIFYTRIGGER? "on": "off");
+	Log("merge static entities [ %7s ] [ %7s ]\n", g_merge_entities? "on": "off", DEFAULT_MERGE_ENTITIES? "on": "off");
+	{
+		char            merge_size[10];
+		char            default_merge_size[10];
+
+		safe_snprintf(merge_size, sizeof(merge_size), "%3.0f", g_merge_maxsize);
+		safe_snprintf(default_merge_size, sizeof(default_merge_size), "%3.0f", (vec_t)DEFAULT_MERGE_MAXSIZE);
+		Log("merge group size      [ %7s ] [ %7s ]\n", merge_size, default_merge_size);
+	}
+	Log("merge blended modes   [ %7s ] [ %7s ]\n", g_merge_blend? "on": "off", DEFAULT_MERGE_BLEND? "on": "off");
     // calc min surface area
     {
         char            tiny_penetration[10];
@@ -2086,6 +2100,27 @@ int             main(const int argc, char** argv)
 		else if (!strcasecmp (argv[i], "-nonullifytrigger"))
 		{
 			g_nullifytrigger = false;
+		}
+		else if (!strcasecmp (argv[i], "-mergeentities"))
+		{
+			g_merge_entities = true;
+		}
+		else if (!strcasecmp (argv[i], "-mergesize"))
+		{
+			if (i + 1 < argc)
+			{
+				g_merge_maxsize = atof(argv[++i]);
+				g_merge_entities = true;
+			}
+			else
+			{
+				Usage();
+			}
+		}
+		else if (!strcasecmp (argv[i], "-mergeblend"))
+		{
+			g_merge_blend = true;
+			g_merge_entities = true;
 		}
         else if (argv[i][0] == '-')
         {

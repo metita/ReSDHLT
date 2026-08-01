@@ -101,6 +101,7 @@ HLCSG_CPPFILES = \
 			sdHLCSG/brushunion.cpp \
 			sdHLCSG/hullfile.cpp \
 			sdHLCSG/map.cpp \
+			sdHLCSG/mergeents.cpp \
 			sdHLCSG/properties.cpp \
 			sdHLCSG/qcsg.cpp \
 			sdHLCSG/textures.cpp \

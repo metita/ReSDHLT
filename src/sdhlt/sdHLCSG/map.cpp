@@ -1076,6 +1076,10 @@ void            LoadMapFile(const char* const filename)
 		g_numparsedentities++;
     }
 
+	// fold equivalent static brush entities together before anything starts
+	// counting entities or handing out models
+	MergeStaticEntities();
+
     // AJM debug
     /*
     for (int i = 0; i < g_numentities; i++)

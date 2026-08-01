@@ -134,6 +134,8 @@ pub struct Options {
     pub nowadtextures: bool,
     pub nodeterministic: bool,
     pub worldextent: u32, // 0 = leave default
+    pub mergeentities: bool,
+    pub mergesize: u32, // longest side a merged group may reach, 0 = no limit
     pub csg_extra: String,
 
     // ---- BSP ----
@@ -196,6 +198,8 @@ impl Default for Options {
             nowadtextures: true,
             nodeterministic: false,
             worldextent: 0,
+            mergeentities: false,
+            mergesize: 1024,
             csg_extra: String::new(),
 
             run_bsp: true,
@@ -504,6 +508,12 @@ impl Options {
         }
         if self.worldextent > 0 {
             push_num(&mut a, "-worldextent", self.worldextent);
+        }
+        if self.mergeentities {
+            a.push("-mergeentities".to_string());
+            if self.mergesize != 1024 {
+                push_num(&mut a, "-mergesize", self.mergesize);
+            }
         }
         push_extra(&mut a, &self.csg_extra);
         a

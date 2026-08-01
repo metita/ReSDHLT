@@ -160,6 +160,7 @@
     <ClCompile Include="brushunion.cpp" />
     <ClCompile Include="hullfile.cpp" />
     <ClCompile Include="map.cpp" />
+    <ClCompile Include="mergeents.cpp" />
     <ClCompile Include="properties.cpp" />
     <ClCompile Include="qcsg.cpp" />
     <ClCompile Include="textures.cpp" />
