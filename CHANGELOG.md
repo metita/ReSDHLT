@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Strike 1.6.
 
 ### Changed
+- `gui/`: the launch check now updates on its own. It ignores the daily
+  throttle, because opening the compiler and being told "there was something
+  new yesterday" helps nobody, and it installs what it finds without asking:
+  the window still opens naming the version and showing the progress, so it is
+  never a mystery, but nothing has to be clicked. A check that lands later,
+  with the app already open, only opens that window and waits - and an
+  automatic install never runs while a compile is in progress. The menu
+  checkbox that used to say "Buscar al abrir (una vez por día)" now says
+  "Actualizar sola al abrir" and is still the way to turn all of it off
+- `gui/`: when idle the app now asks for a repaint every 30s while update
+  checks are enabled. egui sleeps until an input event, and the reply from the
+  check thread is not one, so an app left open for days would sit there having
+  finished a check nobody ever drained
 - RAD: `GatherSampleLight()` no longer computes the `-texlightgap` texture basis
   on every call (two cross products and two divides, ~1M calls per map) when the
   option is off, which is the default; it is built on first use

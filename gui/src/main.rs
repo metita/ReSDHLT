@@ -120,6 +120,17 @@ struct App {
     update_found: Option<Release>,
     update_status: String,
     update_window: bool,
+    /// The launch check has already gone out. Until it does, the daily throttle
+    /// is ignored: updating on startup is pointless if yesterday's check still
+    /// counts.
+    startup_check_done: bool,
+    /// Whatever the check in flight finds should be installed without asking.
+    /// Only ever set for the launch check.
+    update_install_when_found: bool,
+    /// Release to install, and how many frames to wait first. The download
+    /// blocks the UI thread, so the update window gets a frame to paint itself
+    /// before everything stops.
+    pending_auto_install: Option<(Release, u8)>,
     installing: bool,
 }
 
@@ -193,6 +204,9 @@ impl Default for App {
             update_found: None,
             update_status: String::new(),
             update_window: false,
+            startup_check_done: false,
+            update_install_when_found: false,
+            pending_auto_install: None,
             installing: false,
         }
     }
@@ -432,11 +446,22 @@ impl App {
 
     // ---------------- updates ----------------
 
-    /// Once a day at most, and only if the user leaves it on. A release is a
-    /// deliberate act, so there is nothing to gain from asking more often.
+    /// Once on launch, and once a day after that while the app stays open.
+    ///
+    /// The launch check ignores the daily throttle and installs what it finds
+    /// on its own: someone who opens the compiler should be compiling with the
+    /// current tools, not with whatever they had when they last let a check
+    /// through. A check found later, with the app already open and possibly a
+    /// compile in progress, only opens the window and waits to be told.
     fn maybe_check_updates(&mut self) {
         const DAY: u64 = 24 * 60 * 60;
         if !self.lib.check_updates || self.update_check.is_some() || self.update_found.is_some() {
+            return;
+        }
+        if !self.startup_check_done {
+            self.startup_check_done = true;
+            self.update_install_when_found = true;
+            self.start_update_check(false);
             return;
         }
         if projects::now_secs().saturating_sub(self.lib.last_update_check) < DAY {
@@ -468,8 +493,21 @@ impl App {
         self.update_check = None;
         match msg {
             update::Msg::Available(release) => {
-                self.update_status = format!("Hay una versión nueva: {}", release.tag);
+                let auto = std::mem::take(&mut self.update_install_when_found);
+                // Never yank the binaries out from under a running compile.
+                let auto = auto && self.job.is_none();
+                self.update_status = if auto {
+                    format!("Actualizando a {}...", release.tag)
+                } else {
+                    format!("Hay una versión nueva: {}", release.tag)
+                };
                 self.status = self.update_status.clone();
+                // Either way the window opens: it names the version and shows
+                // the progress, so an automatic update is never a mystery.
+                self.update_window = true;
+                if auto {
+                    self.pending_auto_install = Some((release.clone(), 2));
+                }
                 self.update_found = Some(release);
             }
             update::Msg::UpToDate => {
@@ -582,24 +620,49 @@ impl App {
             self.update_window = false;
         }
         if install {
-            self.installing = true;
-            self.update_status = "Descargando...".to_string();
-            match update::install(&release) {
-                Ok(()) => {
-                    // The helper is waiting for this process to exit before it
-                    // can replace the files.
-                    let _ = save_profile(&self.opts);
-                    self.sync_active_project();
-                    self.save_library();
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-                Err(e) => {
-                    self.installing = false;
-                    self.update_status = format!("Falló la actualización: {e}");
-                    self.status = self.update_status.clone();
-                }
+            self.pending_auto_install = None;
+            self.do_install(ctx, &release);
+        }
+    }
+
+    /// Downloads and hands over to the swapper, then quits so it can replace
+    /// the files. Blocks the UI thread for the length of the download, which is
+    /// why the automatic path lets the window paint first.
+    fn do_install(&mut self, ctx: &egui::Context, release: &Release) {
+        self.installing = true;
+        self.update_status = "Descargando...".to_string();
+        match update::install(release) {
+            Ok(()) => {
+                // The helper is waiting for this process to exit before it
+                // can replace the files.
+                let _ = save_profile(&self.opts);
+                self.sync_active_project();
+                self.save_library();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(e) => {
+                self.installing = false;
+                self.update_status = format!("Falló la actualización: {e}");
+                self.status = self.update_status.clone();
+                // Leave the window up with the button in it rather than a dead
+                // status line, so a failed automatic update can be retried.
+                self.update_window = true;
             }
         }
+    }
+
+    /// Runs the automatic install once the update window has had a frame or two
+    /// to appear.
+    fn drain_auto_install(&mut self, ctx: &egui::Context) {
+        let Some((release, waits)) = self.pending_auto_install.take() else {
+            return;
+        };
+        if waits > 0 {
+            self.pending_auto_install = Some((release, waits - 1));
+            ctx.request_repaint();
+            return;
+        }
+        self.do_install(ctx, &release);
     }
 
     // ---------------- projects ----------------
@@ -2940,7 +3003,13 @@ impl App {
                     }
                     let mut auto = self.lib.check_updates;
                     if ui
-                        .checkbox(&mut auto, "Buscar al abrir (una vez por día)")
+                        .checkbox(&mut auto, "Actualizar sola al abrir")
+                        .on_hover_text(
+                            "Al abrir la app se busca versión nueva y, si la hay, se instala \
+                             y la app se reinicia sola. Con la app ya abierta se vuelve a \
+                             mirar una vez al día, y ahí solo avisa: nunca se actualiza con \
+                             un compilado en curso.",
+                        )
                         .changed()
                     {
                         self.lib.check_updates = auto;
@@ -3008,6 +3077,7 @@ impl eframe::App for App {
         self.maybe_check_updates();
         self.drain_update_check();
         self.ui_update_window(ctx);
+        self.drain_auto_install(ctx);
         self.handle_drops(ctx);
 
         if (self.opts.ui_scale - self.applied_scale).abs() > 0.001 {
@@ -3018,6 +3088,11 @@ impl eframe::App for App {
         if self.job.is_some() {
             // Keep painting while output streams in and the timers run.
             ctx.request_repaint_after(std::time::Duration::from_millis(80));
+        } else if self.update_check.is_some() || self.lib.check_updates {
+            // Idle, egui sleeps until something happens, and nothing ever
+            // would: the reply from the check thread is not an input event, and
+            // an app left open for days would never reach its daily check.
+            ctx.request_repaint_after(std::time::Duration::from_secs(30));
         }
 
         // Keyboard: F5 compiles, Esc cancels.
