@@ -268,6 +268,29 @@
 	]
 ]
 
+// SOLIDHINT / BEVELHINT
+// Not entities: tool textures you put on a brush face.
+//
+// Nothing to do with HINT. HINT places split planes in empty space to help VIS.
+// SOLIDHINT places a split plane inside solid space, so it changes how the
+// visible faces around it are cut and merged. Use it to fix lighting seams,
+// "Bad surface extents", or wpoly caused by a bad face split.
+//
+// The face is kept even though it is buried in solid, it is a free choice for
+// the BSP splitter (it costs nothing in the heuristic), it is never subdivided,
+// and it is never written to the bsp: no wpoly, no lightmap, invisible.
+//
+// IMPORTANT: only works on a face that has solid on BOTH sides, that is, a face
+// of a brush embedded in another solid brush. On a face with empty space behind
+// it the texture silently turns into NULL and you get a hole in your wall.
+//
+// How to use it: build a brush embedded in the solid geometry, texture the face
+// whose plane you want as a split plane with SOLIDHINT, and texture every other
+// face of that brush with NULL.
+//
+// BEVELHINT is the same thing, and additionally marks the side as a bevel for
+// the collision hulls.
+
 // zhlt_nomerge
 // Not an entity: a key you can add by hand to any func_wall or func_illusionary.
 // With -mergeentities, CSG folds brush entities that carry the exact same

@@ -280,13 +280,16 @@ static void ParseBrush(entity_t* mapent)
 				strcpy (g_token, "NULL");
 				b->bevel = true;
 			}
-			if (!strncasecmp (g_token, "BEVEL", 5))
-			{
-				strcpy (g_token, "NULL");
-				side->bevel = true;
-			}
+			// must precede the "BEVEL" test below: that one matches only the
+			// first five characters, so it would rename BEVELHINT to NULL and
+			// every later BEVELHINT check would never fire
 			if (!strncasecmp(g_token, "BEVELHINT", 9))
 			{
+				side->bevel = true;
+			}
+			else if (!strncasecmp (g_token, "BEVEL", 5))
+			{
+				strcpy (g_token, "NULL");
 				side->bevel = true;
 			}
 			if (!strncasecmp (g_token, "CLIP", 4))
