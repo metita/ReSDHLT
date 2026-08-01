@@ -2079,6 +2079,25 @@ impl App {
                         Some("1024"),
                         |ui| slider_u32(ui, m, &mut self.opts.mergesize, 0..=8192, 256.0),
                     );
+                    toggle_row(
+                        ui,
+                        m,
+                        "Fusionar también los modos mezclados",
+                        "Por defecto solo se fusionan los render modes que el motor NO ordena \
+                         por profundidad: Normal y Solid. Solid es el alpha test de las \
+                         texturas '{' — el de la vegetación — y recorta el píxel en vez de \
+                         mezclarlo, así que no hay nada que ordenar.\n\n\
+                         QUÉ CAMBIA: esto suma los modos que sí se mezclan (Texture, Additive, \
+                         Glow, Color). El motor los ordena usando un solo punto por entidad; \
+                         si fusionas varias en una, todas pasan a compartir ese punto y se \
+                         pueden dibujar en el orden equivocado entre ellas. Un cristal se ve \
+                         delante de otro que en realidad está más cerca.\n\n\
+                         Úsalo solo si tienes muchas entidades mezcladas juntas en una zona \
+                         donde no se superponen entre sí, y míralo en el juego antes de darlo \
+                         por bueno.",
+                        Some("déjalo apagado"),
+                        &mut self.opts.mergeblend,
+                    );
                 }
                 row(
                     ui,

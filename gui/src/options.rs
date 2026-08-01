@@ -136,6 +136,7 @@ pub struct Options {
     pub worldextent: u32, // 0 = leave default
     pub mergeentities: bool,
     pub mergesize: u32, // longest side a merged group may reach, 0 = no limit
+    pub mergeblend: bool,
     pub csg_extra: String,
 
     // ---- BSP ----
@@ -200,6 +201,7 @@ impl Default for Options {
             worldextent: 0,
             mergeentities: false,
             mergesize: 1024,
+            mergeblend: false,
             csg_extra: String::new(),
 
             run_bsp: true,
@@ -401,6 +403,35 @@ mod tests {
     }
 
     #[test]
+    fn merging_only_reaches_the_command_line_when_it_is_asked_for() {
+        let mut o = Options::default();
+
+        // Off by default, and the size alone means nothing without it.
+        o.mergesize = 512;
+        assert!(!o.csg_args().iter().any(|a| a.starts_with("-merge")));
+
+        // The default size is left implicit, so the command line stays short.
+        o.mergesize = 1024;
+        o.mergeentities = true;
+        let a = o.csg_args();
+        assert!(a.contains(&"-mergeentities".to_string()));
+        assert!(!a.iter().any(|a| a == "-mergesize"));
+
+        // A size that is not the default is passed through, 0 included.
+        o.mergesize = 0;
+        let a = o.csg_args();
+        let i = a.iter().position(|a| a == "-mergesize").unwrap();
+        assert_eq!(a[i + 1], "0");
+
+        o.mergeblend = true;
+        assert!(o.csg_args().contains(&"-mergeblend".to_string()));
+
+        // Blending is a modifier of the merge, never a switch of its own.
+        o.mergeentities = false;
+        assert!(!o.csg_args().iter().any(|a| a.starts_with("-merge")));
+    }
+
+    #[test]
     fn project_names_survive_becoming_folders() {
         assert_eq!(sanitize_folder("zm_hola"), "zm_hola");
         assert_eq!(sanitize_folder(r"de_dust: beta/3"), "de_dust_ beta_3");
@@ -513,6 +544,9 @@ impl Options {
             a.push("-mergeentities".to_string());
             if self.mergesize != 1024 {
                 push_num(&mut a, "-mergesize", self.mergesize);
+            }
+            if self.mergeblend {
+                a.push("-mergeblend".to_string());
             }
         }
         push_extra(&mut a, &self.csg_extra);
