@@ -81,6 +81,14 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
   Removed
 
 ### Fixed
+- `gui/`: updating the app left the compile running old binaries whenever the
+  tools folder pointed somewhere else - a mapper using their editor's copy
+  (`...\JACK\tools_sdhlt\`) got a new GUI over July's compilers, and the first
+  sign of it was a compile dying on `Unknown option "-mergeentities"`. The
+  updater only replaces the `tools` beside the executable, and it should not go
+  writing into folders the user chose, so the fix is to notice instead: the
+  folder in use is compared against the shipped one and, when the shipped one is
+  newer, a warning offers to switch to it or to copy the new binaries over
 - `zhlt_embedlightmap` on a `func_water` turned the water into an ordinary
   surface: no waves, no fog. The baked texture was renamed from `!leanwater_w5`
   to `__rad...`, and GoldSrc decides a surface is water by that leading `!`. The

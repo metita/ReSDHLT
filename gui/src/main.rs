@@ -70,6 +70,11 @@ struct Checks {
     map_ok: bool,
     tools_key: String,
     tools_ok: bool,
+    /// The tools folder in use is not the one shipped beside this executable,
+    /// and the shipped one is newer. Updating the app does not touch a folder
+    /// the user pointed somewhere else, so the compile would silently keep
+    /// running the old binaries.
+    tools_stale: Option<PathBuf>,
 }
 
 struct App {
@@ -241,6 +246,56 @@ fn dir_has_wads(dir: &Path) -> bool {
 
 /// Looks for the tools next to the GUI, which is where they end up in a normal
 /// build of this repository. Saves the first-run user from browsing.
+/// The `tools` folder that ships beside this executable, which is the one the
+/// updater replaces.
+fn bundled_tools_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    [dir.join("tools"), dir.to_path_buf()]
+        .into_iter()
+        .find(|d| has_tools(d))
+}
+
+/// Compares the tools folder in use against the one shipped with the app and
+/// returns the shipped one when it is newer.
+///
+/// The updater swaps the app and the `tools` beside it, but somebody who
+/// pointed this at their editor's own copy (JACK, Hammer, an old install) keeps
+/// compiling with those binaries after every update, with no sign that the new
+/// options are missing until a compile dies on "Unknown option".
+fn stale_against_bundled(in_use: &Path) -> Option<PathBuf> {
+    let bundled = bundled_tools_dir()?;
+    let same = std::fs::canonicalize(&bundled).ok()? == std::fs::canonicalize(in_use).ok()?;
+    if same {
+        return None;
+    }
+
+    let built = |dir: &Path| {
+        std::fs::metadata(dir.join("sdHLCSG.exe"))
+            .or_else(|_| std::fs::metadata(dir.join("sdHLCSG")))
+            .and_then(|md| md.modified())
+            .ok()
+    };
+    (built(&bundled)? > built(in_use)?).then_some(bundled)
+}
+
+/// Copies the shipped tools over the folder in use, for the mapper whose editor
+/// launches the compilers from its own folder and needs them current there.
+fn copy_bundled_tools(from: &Path, to: &Path) -> Result<usize, String> {
+    let mut copied = 0;
+    for entry in std::fs::read_dir(from).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        std::fs::copy(entry.path(), to.join(entry.file_name())).map_err(|e| {
+            format!("no pude copiar {}: {e}", entry.file_name().to_string_lossy())
+        })?;
+        copied += 1;
+    }
+    Ok(copied)
+}
+
 fn detect_tools_dir() -> Option<String> {
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
@@ -676,6 +731,11 @@ impl App {
             self.checks.tools_key = self.opts.tools_dir.clone();
             self.checks.tools_ok = !self.opts.tools_dir.trim().is_empty()
                 && has_tools(Path::new(self.opts.tools_dir.trim()));
+            self.checks.tools_stale = self
+                .checks
+                .tools_ok
+                .then(|| stale_against_bundled(Path::new(self.opts.tools_dir.trim())))
+                .flatten();
         }
     }
 
@@ -1697,7 +1757,11 @@ impl App {
                 m,
                 "Herramientas",
                 "La carpeta con sdHLCSG, sdHLBSP, sdHLVIS y sdHLRAD. Si compilaste \
-                 este repo, es la carpeta 'tools'. La GUI la busca sola al arrancar.",
+                 este repo, es la carpeta 'tools'. La GUI la busca sola al arrancar.\n\n\
+                 OJO: si la apuntas a la carpeta de otro programa (JACK, Hammer, una \
+                 instalación vieja), actualizar la app NO actualiza esos binarios. La app \
+                 solo reemplaza el 'tools' que tiene al lado. Si eso pasa te avisamos aquí \
+                 abajo.",
                 None,
                 |ui| {
                     let ok = self.checks.tools_ok;
@@ -1712,6 +1776,37 @@ impl App {
                     );
                 },
             );
+
+            if let Some(bundled) = self.checks.tools_stale.clone() {
+                hint(
+                    ui,
+                    m,
+                    "Estas herramientas son más viejas que las que trae esta versión de la \
+                     app. Actualizar la app no toca una carpeta que apunta a otro lado, así \
+                     que compilarías con los binarios viejos y sin las opciones nuevas",
+                    WARN,
+                );
+                ui.horizontal(|ui| {
+                    ui.add_space(m.label_w + 10.0);
+                    if ui.button("Usar las que trae la app").clicked() {
+                        self.opts.tools_dir = bundled.display().to_string();
+                        self.status = "Ahora se usan las herramientas de la app".to_string();
+                    }
+                    if ui.button("Copiar las nuevas ahí").clicked() {
+                        let to = PathBuf::from(self.opts.tools_dir.trim());
+                        self.status = match copy_bundled_tools(&bundled, &to) {
+                            Ok(n) => {
+                                // Force the check to run again against the files
+                                // that are now there.
+                                self.checks.tools_key.clear();
+                                format!("{n} archivos copiados a {}", to.display())
+                            }
+                            Err(e) => format!("No pude copiar: {e}"),
+                        };
+                    }
+                });
+                ui.add_space(2.0);
+            }
 
             row(
                 ui,
@@ -3084,6 +3179,46 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(App::default()))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copying_the_bundled_tools_overwrites_the_old_ones() {
+        let work = std::env::temp_dir().join("resdhlt-tools-copy-test");
+        let _ = std::fs::remove_dir_all(&work);
+        let from = work.join("bundled");
+        let to = work.join("en_uso");
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::create_dir_all(&to).unwrap();
+
+        std::fs::write(from.join("sdHLCSG.exe"), "nuevo").unwrap();
+        std::fs::write(from.join("sdhlt.fgd"), "nuevo").unwrap();
+        std::fs::create_dir(from.join("subcarpeta")).unwrap();
+        std::fs::write(to.join("sdHLCSG.exe"), "viejo").unwrap();
+        // Something of the mapper's own that has no counterpart: it stays.
+        std::fs::write(to.join("mis_wads.cfg"), "mío").unwrap();
+
+        let copied = copy_bundled_tools(&from, &to).unwrap();
+
+        assert_eq!(copied, 2, "solo los archivos, no la subcarpeta");
+        assert_eq!(std::fs::read_to_string(to.join("sdHLCSG.exe")).unwrap(), "nuevo");
+        assert_eq!(std::fs::read_to_string(to.join("sdhlt.fgd")).unwrap(), "nuevo");
+        assert_eq!(std::fs::read_to_string(to.join("mis_wads.cfg")).unwrap(), "mío");
+
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn the_tools_in_use_are_not_stale_against_themselves() {
+        // Whatever folder the shipped tools are in, it can never be reported as
+        // out of date with respect to itself.
+        if let Some(bundled) = bundled_tools_dir() {
+            assert!(stale_against_bundled(&bundled).is_none());
+        }
+    }
 }
 
 
