@@ -303,6 +303,12 @@ void            WriteFace(const int hull, const bface_t* const f
     // .p0 format
     w = f->w;
 
+    // hull 0 is the visible geometry, which is the only thing a texture paints
+    if (!hull)
+    {
+        AccumulateTextureArea(f->texinfo, w->getArea());
+    }
+
     // plane summary
 	fprintf (out[hull], "%i %i %i %i %u\n", detaillevel, f->planenum, f->texinfo, f->contents, w->m_NumPoints);
 
@@ -1236,6 +1242,10 @@ void WriteBSP(const char* const name)
 	if (g_onlyents)
 		LoadWadValue ();
 
+	// after WriteMiptex, because that is what fills the lump and turns each
+	// texinfo's miptex field into a real index into it
+	TextureCostReport();
+
     UnparseEntities();
     ConvertHintToEmpty(); // this is ridiculous. --vluzacn
     if (g_chart)
@@ -1582,6 +1592,9 @@ static void     Usage()
 	Log("    -mergesize #     : max size of a merged group, 0 for no limit\n");
 	Log("    -mergeblend      : also merge blended render modes (may reorder them)\n");
 
+	Log("    -texchart        : report what each texture costs the bsp and whether\n");
+	Log("                       its resolution is doing any work\n");
+
 
 	Log("    -nolightopt      : don't optimize engine light entities\n");
 
@@ -1689,6 +1702,7 @@ static void     Settings()
 	Log("wad.cfg config name   [ %7s ] [ %7s ]\n", g_wadconfigname? g_wadconfigname: "None", "None");
 	Log("nullfile              [ %7s ] [ %7s ]\n", g_nullfile ? g_nullfile : "None", "None");
 	Log("nullify trigger       [ %7s ] [ %7s ]\n", g_nullifytrigger? "on": "off", DEFAULT_NULLIFYTRIGGER? "on": "off");
+	Log("texture cost report  [ %7s ] [ %7s ]\n", g_texreport? "on": "off", DEFAULT_TEXREPORT? "on": "off");
 	Log("merge static entities [ %7s ] [ %7s ]\n", g_merge_entities? "on": "off", DEFAULT_MERGE_ENTITIES? "on": "off");
 	{
 		char            merge_size[10];
@@ -2100,6 +2114,10 @@ int             main(const int argc, char** argv)
 		else if (!strcasecmp (argv[i], "-nonullifytrigger"))
 		{
 			g_nullifytrigger = false;
+		}
+		else if (!strcasecmp (argv[i], "-texchart"))
+		{
+			g_texreport = true;
 		}
 		else if (!strcasecmp (argv[i], "-mergeentities"))
 		{

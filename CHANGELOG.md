@@ -167,7 +167,21 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
 - CI ran `ctest` with no registered tests and always failed that step
 
 ### Added
-- CSG: `-mergeentities` folds equivalent static brush entities into one, so a
+- CSG: `-texchart` reports what each texture costs the bsp. On a map compiled
+  with `-nowadtextures` the texture lump is most of the file - measured at
+  82.8% on `zm_azteca` and 69.9% on `zm_eichen`, against 8.7% and 15.4% for
+  lighting - and `-chart` stops at a single `texdata` total, which is where the
+  question starts. The report lists textures by bytes, flags any whose pixels
+  are byte for byte identical, and crosses each one against the surface area it
+  actually paints: the texture axes carry the texels-per-unit scale, so the
+  pixels a texture ever displays is a number, not a guess. Anything with 4x
+  more pixels than it displays can lose half its resolution in each axis and
+  still have a pixel per pixel on screen. That distinction matters - a naive
+  "halve everything 256px and up" projection claimed 70% off `zm_azteca`, and
+  the real answer there is that nothing is oversampled at all, because those
+  textures tile across very large surfaces. On `zm_eichen` it finds 3 textures
+  worth halving (6.1%) and one duplicated pair. Off by default and it only
+  reads back the lump CSG has already written
   field of 200 identical `func_illusionary` bushes costs one BSP model instead
   of 200. Models are the scarce resource here: the engine precache table they
   live in is shared with studio models and sprites. Entities are only folded

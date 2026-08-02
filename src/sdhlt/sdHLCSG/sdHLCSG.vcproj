@@ -245,6 +245,10 @@
 				>
 			</File>
 			<File
+				RelativePath=".\texreport.cpp"
+				>
+			</File>
+			<File
 				RelativePath=".\properties.cpp"
 				>
 			</File>

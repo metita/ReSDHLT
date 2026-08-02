@@ -62,6 +62,7 @@
 #define DEFAULT_NOUTF8 false
 #endif
 #define DEFAULT_NULLIFYTRIGGER true
+#define DEFAULT_TEXREPORT false
 #define DEFAULT_MERGE_ENTITIES false
 #define DEFAULT_MERGE_MAXSIZE 1024.0 // longest side a merged group may reach, 0 = no limit
 #define DEFAULT_MERGE_BLEND false
@@ -246,6 +247,13 @@ extern bool     g_merge_entities;
 extern vec_t    g_merge_maxsize;
 extern bool     g_merge_blend;
 extern void     MergeStaticEntities();
+
+//=============================================================================
+// texreport.cpp
+
+extern bool     g_texreport;
+extern void     AccumulateTextureArea(int texinfo, vec_t area);
+extern void     TextureCostReport();
 
 //=============================================================================
 // textures.cpp

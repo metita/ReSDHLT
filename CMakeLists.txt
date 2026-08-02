@@ -176,6 +176,7 @@ set(CSG_SOURCES
     ${CSG_DIR}/mergeents.cpp
     ${CSG_DIR}/properties.cpp
     ${CSG_DIR}/qcsg.cpp
+    ${CSG_DIR}/texreport.cpp
     ${CSG_DIR}/textures.cpp
     ${CSG_DIR}/wadcfg.cpp
     ${CSG_DIR}/wadpath.cpp
