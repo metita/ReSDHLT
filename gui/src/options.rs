@@ -137,6 +137,7 @@ pub struct Options {
     pub mergeentities: bool,
     pub mergesize: u32, // longest side a merged group may reach, 0 = no limit
     pub mergeblend: bool,
+    pub texchart: bool,
     pub csg_extra: String,
 
     // ---- BSP ----
@@ -202,6 +203,7 @@ impl Default for Options {
             mergeentities: false,
             mergesize: 1024,
             mergeblend: false,
+            texchart: false,
             csg_extra: String::new(),
 
             run_bsp: true,
@@ -432,6 +434,18 @@ mod tests {
     }
 
     #[test]
+    fn the_texture_report_is_asked_for_on_its_own() {
+        let mut o = Options::default();
+        assert!(!o.csg_args().contains(&"-texchart".to_string()));
+
+        // It reports, it does not change the bsp, so it depends on nothing else.
+        o.texchart = true;
+        let a = o.csg_args();
+        assert!(a.contains(&"-texchart".to_string()));
+        assert!(!a.iter().any(|a| a.starts_with("-merge")));
+    }
+
+    #[test]
     fn project_names_survive_becoming_folders() {
         assert_eq!(sanitize_folder("zm_hola"), "zm_hola");
         assert_eq!(sanitize_folder(r"de_dust: beta/3"), "de_dust_ beta_3");
@@ -548,6 +562,9 @@ impl Options {
             if self.mergeblend {
                 a.push("-mergeblend".to_string());
             }
+        }
+        if self.texchart {
+            a.push("-texchart".to_string());
         }
         push_extra(&mut a, &self.csg_extra);
         a
