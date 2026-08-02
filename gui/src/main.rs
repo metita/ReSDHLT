@@ -2315,6 +2315,45 @@ impl App {
                         );
                     }
                 }
+                toggle_row(
+                    ui,
+                    m,
+                    "Informe de coste de texturas",
+                    "No cambia el .bsp. Solo añade un informe al final de CSG diciendo qué \
+                     texturas lo están engordando.\n\n\
+                     PARA QUÉ: si compilas con 'Meter las texturas en el BSP', el lump de \
+                     texturas suele ser la mayor parte del archivo. Medido en mapas reales: \
+                     82.8% y 69.9% del .bsp, contra 8.7% y 15.4% de la iluminación. El chart \
+                     normal te da un único total y ahí se acaba; este te dice de qué está \
+                     hecho.\n\n\
+                     QUÉ MIRAR, la columna 'oversampled': cuántos píxeles tiene la textura \
+                     por cada píxel que llega a mostrarse. Se calcula con la superficie real \
+                     que pinta en el mapa y la escala de textura, no es una estimación.\n\
+                     · 4x o más — le sobra resolución. Puedes bajarla a la mitad en cada eje \
+                     y seguir teniendo un píxel por píxel en pantalla\n\
+                     · alrededor de 1x — está usada a su resolución nativa, no la toques\n\
+                     · por debajo de 1x — se repite sobre una superficie grande. Bajarla se \
+                     va a notar\n\n\
+                     Esa columna es el motivo de la opción. Mirando solo el tamaño parece que \
+                     bajar todas las texturas de 256px ahorraría muchísimo, y en un mapa real \
+                     medido resultó que no sobraba resolución en ninguna: eran texturas que \
+                     se repiten sobre paredes enormes y bajarlas solo se habría visto peor.\n\n\
+                     También avisa si dos texturas tienen los píxeles idénticos, que es peso \
+                     pagado dos veces.\n\n\
+                     CUÁNDO USARLO: cuando el .bsp pese más de lo que te gustaría. No hace \
+                     falta dejarlo puesto en cada compilación.",
+                    Some("cuando quieras adelgazar el mapa"),
+                    &mut self.opts.texchart,
+                );
+                if self.opts.texchart {
+                    hint(
+                        ui,
+                        m,
+                        "Mira la columna 'oversampled': 4x o más significa que puedes bajar \
+                         esa textura a la mitad sin que se note. Cerca de 1x, déjala",
+                        OK,
+                    );
+                }
                 row(
                     ui,
                     m,

@@ -167,6 +167,12 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
 - CI ran `ctest` with no registered tests and always failed that step
 
 ### Added
+- `gui/`: `-texchart` has a toggle under CSG, "Informe de coste de texturas",
+  with the explanation aimed at the decision rather than the mechanism: what
+  the `oversampled` column means and what to do at each value (4x or more,
+  halve it; around 1x, leave it; below 1x, it tiles and halving will show).
+  It also carries the reason the column exists at all, since reading the size
+  column alone suggests savings that are not there
 - CSG: `-texchart` reports what each texture costs the bsp. On a map compiled
   with `-nowadtextures` the texture lump is most of the file - measured at
   82.8% on `zm_azteca` and 69.9% on `zm_eichen`, against 8.7% and 15.4% for
