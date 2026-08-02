@@ -94,6 +94,20 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
   Removed
 
 ### Fixed
+- CSG: the `BEVELHINT` tool texture never did anything. `ParseBrush()` tested
+  for `BEVEL` first, comparing only the first five characters, so `BEVELHINT`
+  matched it, had its texture name overwritten with `NULL`, and never reached
+  the test right below meant for it. The name was already gone by the time it
+  was stored on the side, so all eight later `BEVELHINT` checks in CSG and BSP
+  were unreachable and a mapper using it silently got a plain `BEVEL`. The test
+  now runs before `BEVEL`, the way `BEVELBRUSH` already does - that one only
+  survived the collision because it is ten characters long. Measured on a face
+  buried inside a solid brush, which is the case the texture exists for: the
+  surface file went from 361 lines (identical to `NULL`, i.e. the face was
+  discarded) to 373 (identical to `SOLIDHINT`), with `NULL` unchanged
+- `tools/sdhlt.fgd`: documented `SOLIDHINT` and `BEVELHINT`, including the trap
+  that they turn into `NULL` on a face that is not solid on both sides, which
+  leaves a hole in the wall with no warning
 - `gui/`: updating the app left the compile running old binaries whenever the
   tools folder pointed somewhere else - a mapper using their editor's copy
   (`...\JACK\tools_sdhlt\`) got a new GUI over July's compilers, and the first
