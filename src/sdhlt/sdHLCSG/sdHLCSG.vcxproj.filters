@@ -65,6 +65,9 @@
     <ClCompile Include="mergeents.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="texreport.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="properties.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

@@ -104,6 +104,7 @@ HLCSG_CPPFILES = \
 			sdHLCSG/mergeents.cpp \
 			sdHLCSG/properties.cpp \
 			sdHLCSG/qcsg.cpp \
+			sdHLCSG/texreport.cpp \
 			sdHLCSG/textures.cpp \
 			sdHLCSG/wadcfg.cpp \
 			sdHLCSG/wadpath.cpp \

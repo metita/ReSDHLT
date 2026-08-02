@@ -161,6 +161,7 @@
     <ClCompile Include="hullfile.cpp" />
     <ClCompile Include="map.cpp" />
     <ClCompile Include="mergeents.cpp" />
+    <ClCompile Include="texreport.cpp" />
     <ClCompile Include="properties.cpp" />
     <ClCompile Include="qcsg.cpp" />
     <ClCompile Include="textures.cpp" />
