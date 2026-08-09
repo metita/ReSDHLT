@@ -28,12 +28,17 @@ extern int      g_gpu_adapter;                             // -gpuadapter, -1 = 
 // 0 = the GPU path is not running, 1 = collect pass, 2 = consume pass.
 extern int      g_gpu_phase;
 
-extern bool     GpuGatherRun();                            // true if the GPU path is live
-extern void     GpuGatherFinish();
+// Runs the whole BuildFacelights phase on the GPU path. Returns false without
+// having touched anything if the map or the machine is outside what the kernel
+// covers, in which case RAD runs its ordinary CPU pass.
+extern bool     GpuBuildFacelights();
 extern void     GpuGatherBeginFace(int facenum);
 extern void     GpuGatherIntercept(const vec3_t pos, const byte* const pvs, const vec3_t normal,
                                    vec3_t* sample, byte* styles, int step, int miptex,
                                    int texlightgap_surfacenum);
+// Drops the next stored result for the current face into a sample/styles pair,
+// through the same coring and style-slot tail the CPU gather ends with.
+extern void     GpuGatherApply(vec3_t* sample, byte* styles);
 extern const char* GpuDeviceDescription();
 
 // Provided by lightmap.cpp, which owns the state the marshaller needs.
@@ -42,6 +47,13 @@ extern struct directlight_s* RadGpuDirectLights(int leafnum);
 extern void     RadGpuResetFace(int facenum);
 extern void     RadGpuTexToWorld(int surfacenum, vec3_t textoworld[2]);
 extern bool     RadGpuSampleMayReachSky(const byte* const pvs);
+
+// The two halves of BuildFacelights, so the expensive first one runs once.
+extern bool     RadGpuFaceBegin(int facenum, void* state);
+extern void     RadGpuFaceEnd(int facenum, void* state);
+extern void     RadGpuFaceAbandon(void* state);
+extern size_t   RadGpuFaceStateSize();
+extern size_t   RadGpuFaceStateBytes(void* state);
 
 // Provided by trace.cpp: the tnodes, in the flat layout the kernel expects.
 typedef struct

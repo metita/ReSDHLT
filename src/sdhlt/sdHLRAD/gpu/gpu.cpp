@@ -17,7 +17,14 @@
 
 #include "spirv/trace_bsp_spirv.h" // generated: g_trace_bsp_spirv[]
 #include "spirv/gather_spirv.h"    // generated: g_gather_spirv[]
-#include "spirv/gather_f32_spirv.h" // generated: g_gather_f32_spirv[] (float_normalize)
+// One float-normalize gather kernel per traversal-stack depth. The stack is
+// seven per-thread arrays, so the shallowest variant that still covers the
+// map's real BSP depth is the one that keeps the most threads resident.
+#include "spirv/gather_f32_d16_spirv.h"
+#include "spirv/gather_f32_d24_spirv.h"
+#include "spirv/gather_f32_d32_spirv.h"
+#include "spirv/gather_f32_d48_spirv.h"
+#include "spirv/gather_f32_d64_spirv.h"
 #include "spirv/formfactor_spirv.h" // generated: g_formfactor_spirv[]
 
 // vulkan host plumbing for the gpu lighting backend the loader is opened
@@ -116,6 +123,7 @@ namespace rad
                 VkPipeline ff_pipeline = VK_NULL_HANDLE;
 
                 bool has_float64 = false;
+                int gather_f32_depth = 0;   // stack depth the cached kernel was built for
 
                 std::string name;
                 std::string error;
@@ -571,15 +579,51 @@ namespace rad
                                                g.trace_pipeline_layout, g.trace_pipeline);
             }
 
-            bool ensure_gather_pipeline_locked(bool float_normalize)
+            struct gather_variant
+            {
+                int depth;
+                const unsigned char *spirv;
+                unsigned int size;
+                const char *name;
+            };
+
+            const gather_variant *pick_gather_variant(int tree_depth)
+            {
+                static const gather_variant variants[] = {
+                    {16, g_gather_f32_d16_spirv, g_gather_f32_d16_spirv_size, "gather_f32_d16"},
+                    {24, g_gather_f32_d24_spirv, g_gather_f32_d24_spirv_size, "gather_f32_d24"},
+                    {32, g_gather_f32_d32_spirv, g_gather_f32_d32_spirv_size, "gather_f32_d32"},
+                    {48, g_gather_f32_d48_spirv, g_gather_f32_d48_spirv_size, "gather_f32_d48"},
+                    {64, g_gather_f32_d64_spirv, g_gather_f32_d64_spirv_size, "gather_f32_d64"},
+                };
+                for (size_t i = 0; i < sizeof(variants) / sizeof(variants[0]); i++)
+                {
+                    if (tree_depth <= variants[i].depth)
+                        return &variants[i];
+                }
+                return nullptr;
+            }
+
+            bool ensure_gather_pipeline_locked(bool float_normalize, int tree_depth)
             {
                 if (float_normalize)
                 {
-                    if (g.gather_f32_pipeline)
+                    const gather_variant *v = pick_gather_variant(tree_depth);
+                    if (!v)
+                    {
+                        g.error = "gather_begin: bsp tree depth " + std::to_string(tree_depth)
+                            + " exceeds the deepest kernel variant (64)";
+                        return false;
+                    }
+                    if (g.gather_f32_pipeline && g.gather_f32_depth == v->depth)
                         return true;
+                    // A different depth than the cached one: the pipeline is
+                    // kept for the life of the process, so build the new one.
+                    g.gather_f32_pipeline = VK_NULL_HANDLE;
+                    g.gather_f32_depth = v->depth;
                     return ensure_descriptor_pool_locked()
-                        && create_compute_pipeline(g_gather_f32_spirv, g_gather_f32_spirv_size,
-                                                   11, 32, "gather_f32", g.gather_f32_set_layout,
+                        && create_compute_pipeline(v->spirv, v->size,
+                                                   11, 32, v->name, g.gather_f32_set_layout,
                                                    g.gather_f32_pipeline_layout,
                                                    g.gather_f32_pipeline);
                 }
@@ -840,8 +884,6 @@ namespace rad
             // results the environment variable enables fp64 comparison
             const char *fp64_env = std::getenv("SDHLT_GPU_FP64_NORMALIZE");
             const bool float_normalize = !(fp64_env && *fp64_env && *fp64_env != '0');
-            if (!ensure_device_locked() || !ensure_gather_pipeline_locked(float_normalize))
-                return false;
             if (max_chunk_items == 0 || scene.tnodes.empty() || scene.lightleafs.empty()
                 || scene.lights.empty() || pvs_words.empty())
             {
@@ -849,6 +891,8 @@ namespace rad
                 return false;
             }
 
+            // The kernel is chosen by the map's real tree depth, so this has to
+            // come before the pipeline is built.
             const int depth = tnode_tree_depth(scene.tnodes);
             if (depth > kernel_trace_stack)
             {
@@ -856,6 +900,8 @@ namespace rad
                     + " exceeds the kernel trace stack (" + std::to_string(kernel_trace_stack) + ")";
                 return false;
             }
+            if (!ensure_device_locked() || !ensure_gather_pipeline_locked(float_normalize, depth))
+                return false;
 
             // per pvs row, the ascending list of lit leaf indices the row can
             // see (the leaf 0 entry obeys sky_lighting_fix); the kernel walks

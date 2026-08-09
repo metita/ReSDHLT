@@ -26,9 +26,16 @@ OUT = os.path.join(ROOT, "src", "sdhlt", "sdHLRAD", "gpu", "spirv")
 KERNELS = [
     ("trace_bsp", "trace_bsp", "g_trace_bsp_spirv", []),
     ("gather", "gather", "g_gather_spirv", []),
-    ("gather", "gather_f32", "g_gather_f32_spirv", ["FLOAT_NORMALIZE"]),
     ("formfactor", "formfactor", "g_formfactor_spirv", []),
 ]
+
+# The gather kernel's traversal stack is seven per-thread arrays, so its depth
+# decides occupancy. One variant per depth; the host picks the smallest that
+# covers the map's real BSP depth.
+for _depth in (16, 24, 32, 48, 64):
+    KERNELS.append(("gather", "gather_f32_d%d" % _depth,
+                    "g_gather_f32_d%d_spirv" % _depth,
+                    ["FLOAT_NORMALIZE", "TRACE_STACK_DEPTH=%d" % _depth]))
 
 
 def find_compiler(explicit):

@@ -124,18 +124,39 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
   kernel cannot do exactly - the texlight near branch, which needs the
   emitter's winding and a sight-area integration - come back to the CPU and are
   resolved with the reference functions. **The .bsp comes out byte-identical**
-  on `ba_dust_island` and `ar_pokemon`, with and without `-extra`. It declines
+  on `ba_dust_island` and `ar_pokemon` with and without `-extra`, and on four
+  of five light-count fixtures; the fifth differs by one byte in 95,982, by one
+  step out of 255, because the kernel normalizes in float where the CPU does
+  not. `SDHLT_GPU_FP64_NORMALIZE=1` selects the double-precision parity variant
+  for comparison. It declines
   and leaves RAD on the CPU path, with a reason on the console, for opaque
   entities, studio shadows, more distinct light styles than the kernel has
   slots, a BSP deeper than its traversal stack, or no Vulkan driver.
   `-gpuadapter #` picks the device by index.
 
-  **It is currently slower than the CPU path on the maps tested** - 5.6s vs
-  2.8s on `ba_dust_island -extra`, GTX 1060 against 6 threads - and it is off
-  by default for that reason. The cost is structural: the collect pass repeats
-  all of BuildFacelights except the tracing, so the extra pass alone costs more
-  than this fork's already-cheap CPU gather saves. Measured breakdown and what
-  would have to change in docs/BENCHMARKS.md §4.8
+  BuildFacelights is split in two halves that each run once - the first does
+  sample placement, phong normals, PVS and records the gather calls; the second
+  drops the device's answers where the CPU gather would have written them and
+  carries on with the blur, the patches and the lightmap. The state between
+  them is carried in a `facebuild_t`, and faces are processed in memory-bounded
+  batches because the lmcache is megabytes per face with `-extra`. Without
+  `-gpu` the two halves run back to back and it is the same function it was
+
+  **What decides whether it wins is how many direct lights the map has.** Same
+  room, same settings, only the light count changing, GTX 1060 against 6
+  threads with `-extra`: 1 light 0.66s CPU vs 1.32s GPU (half the speed), 256
+  lights 1.59s vs 1.29s, 512 lights 2.27s vs **1.31s**, 1024 lights 3.91s vs
+  **1.72s** - 2.27x. CPU time grows linearly with the light count because every
+  sample walks the lights its PVS can see one at a time; device time barely
+  moves (0.28s to 0.56s across a 1024x increase), which is the thing a GPU is
+  for. The crossover is around 150-200 lights.
+
+  That is why `ba_dust_island` looks bad and always will: it marshals to a
+  single light in a single leaf, the worst possible case. It is also why
+  hltools measures 2.96x on a map whose CPU RAD takes 115s - same curve,
+  different point on it. Off by default because the answer depends on the map;
+  `-gpu` prints the light count and a collect/device/finish breakdown so the
+  call can be made from numbers. docs/BENCHMARKS.md §4.8
 - The Vulkan headers and the compiled SPIR-V kernels are in the tree, so
   building needs no Vulkan SDK; `scripts/gen_spirv.py` regenerates them after a
   shader edit. `-DSDHLT_GPU=OFF` leaves the backend out entirely

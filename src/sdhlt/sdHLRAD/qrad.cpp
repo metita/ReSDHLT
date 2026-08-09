@@ -2664,22 +2664,20 @@ static void     RadWorld()
 
     // build initial facelights
 	//
-	// -gpu runs BuildFacelights twice: GpuGatherRun() does a collect pass that
-	// records every gather call and throws the rest away, dispatches them all
-	// to the device, and leaves the results indexed by call. The run below is
-	// then the real one, and each gather call reads its stored result instead
-	// of tracing. If anything about the map is outside what the kernel
-	// implements it declines, and this is just the ordinary CPU pass.
-	bool gpu_active = false;
-	if (g_gpu)
+	// -gpu drives the phase itself: it walks the faces in chunks, runs the
+	// first half of BuildFacelights for a chunk (sample placement, phong
+	// normals, PVS, and the gather calls recorded rather than traced),
+	// dispatches that chunk's calls in one go, then runs the second half with
+	// the answers in hand. No face's work happens twice. If anything about the
+	// map is outside what the kernel implements it declines, and this is the
+	// ordinary CPU pass.
+	if (!(g_gpu && GpuBuildFacelights()))
 	{
-		gpu_active = GpuGatherRun();
+		NamedRunThreadsOnIndividual(g_numfaces, g_estimate, BuildFacelights);
 	}
-    NamedRunThreadsOnIndividual(g_numfaces, g_estimate, BuildFacelights);
-	if (gpu_active)
-	{
-		GpuGatherFinish();
-	}
+
+    // Here and not later: the sky rays have all been cast by now, and the
+    // tnodes they need are still alive.
 
 	FreePositionMaps ();
 

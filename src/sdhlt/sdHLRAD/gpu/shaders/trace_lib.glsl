@@ -23,7 +23,15 @@ const int PLANE_Z = 2;
 
 const float ON_EPSILON = 0.04;
 const float NORMAL_EPSILON = 0.00001;
-const int TRACE_STACK_SIZE = 64;
+// Seven arrays of this length live in every thread's private storage, so the
+// size is what decides how many threads the GPU can keep resident: at 64 it is
+// 1792 bytes a thread, which spills and starves the traversal of occupancy.
+// The host compiles several variants and picks the smallest one that still
+// covers the map's real BSP depth (gpu.cpp, tnode_tree_depth).
+#ifndef TRACE_STACK_DEPTH
+#define TRACE_STACK_DEPTH 64
+#endif
+const int TRACE_STACK_SIZE = TRACE_STACK_DEPTH;
 
 const int TRACE_FLAG_COPLANAR = 1;
 const int TRACE_FLAG_STACK_OVERFLOW = 2;

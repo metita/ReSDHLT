@@ -244,9 +244,12 @@ tarda **9.31 s**; los 13.3M de rayos de cielo a 7.47 Mrays/s son **1.79 s**, o s
 desventajas extra: el mismo techo del 19%, más transferencias, más dependencia de drivers, un fallback
 CPU obligatorio de por vida, y adiós al `.bsp` byte-idéntico que es como se valida todo en este fork.
 
-> La GPU se implementó igual después, para tener el número medido en vez del estimado. Ver §4.8: el
-> `.bsp` byte-idéntico sí se pudo conservar, la velocidad no. La estimación de acá era optimista por el
-> lado equivocado — el problema no resultó ser el techo del trazado sino el costo de la pasada extra.
+> **Esta decisión se revirtió.** La GPU se implementó después y se midió: ver §4.8. En un mapa con muchas
+> luces directas gana claramente (2.27× con 1024 luces), y el `.bsp` sigue saliendo byte-idéntico. Lo que
+> este análisis midió mal fue el alcance: `-raybench` midió el **trazado de cielo**, que efectivamente es
+> el 19%, pero el gather completo es bastante más que eso — recorre la lista de luces por muestra, y eso
+> crece lineal con la cantidad de luces del mapa. `ba_dust_island` tiene una sola luz, así que era
+> justamente el mapa donde no se veía.
 
 Lo que el número sí dice es dónde mirar: el **80% restante de RAD** no es trazado de rayos. Es el resto
 de `GatherSampleLight` (recorrido de la lista de luces, estilos, opacos), los transfers y el rebote.
@@ -276,33 +279,68 @@ CPU (leaf ascendente, después la lista de cada leaf) y las ramas que no puede h
 branch* de los texlights, que necesita el winding del emisor y una integración de área — vuelven a la CPU
 y se resuelven con el código de referencia.
 
-**Velocidad: pierde.** GTX 1060 3GB contra Ryzen de 6 núcleos, 6 hilos, `ba_dust_island`, `-extra`:
+**El trabajo duplicado se eliminó.** La primera versión corría `BuildFacelights` **dos veces**: una para
+anotar las llamadas y otra para consumirlas. `BuildFacelights` está partido en dos mitades que se ejecutan
+una sola vez cada una:
 
-| | RAD total | de eso, en el device |
+- `BuildFacelights_Begin` — `CalcPoints` y la parte cara de `CalcLightmap`: posición de cada muestra,
+  normal de phong, PVS, y la llamada al gather **anotada** en vez de trazada. También guarda los dos
+  booleanos por punto (`blocked`, `nudged`) que la cola necesita.
+- `BuildFacelights_End` — `CalcLightmap` en modo *apply*, que salta directo a la cola y deja cada
+  resultado donde la CPU lo habría escrito, y después el blur, los patches y el lightmap.
+
+El estado entre las dos mitades (el `lightinfo_t` con su `lmcache`) se guarda en un `facebuild_t`. Como el
+`lmcache` son megabytes por cara con `-extra`, las caras se procesan **por lotes** acotados por presupuesto
+de memoria: se corre `Begin` sobre el lote, se despacha todo el lote en un dispatch, se corre `End`. Sin
+`-gpu` las dos mitades se llaman una detrás de la otra y es exactamente la función de antes.
+
+**Lo que decide si gana: cuántas luces directas tiene el mapa.** Ésta es la medición importante, y explica
+por qué las primeras pruebas daban pérdida. Misma sala sellada, mismo tamaño, mismo `-extra -threads 6`,
+GTX 1060 3GB contra un Ryzen de 6 núcleos; lo único que cambia es la cantidad de `light`:
+
+| luces | CPU | `-gpu` | | tiempo en el device | `.bsp` |
+|---:|---:|---:|---|---:|---|
+| 1 | 0.66 s | 1.32 s | **0.5×** (pierde) | 0.28 s | idéntico |
+| 64 | 1.17 s | 1.39 s | 0.84× | 0.30 s | idéntico |
+| 256 | 1.59 s | 1.29 s | 1.23× | 0.35 s | 1 byte de 95.982, ±1 |
+| 512 | 2.27 s | 1.31 s | **1.73×** | 0.41 s | idéntico |
+| 1024 | 3.91 s | 1.72 s | **2.27×** | 0.56 s | idéntico |
+
+El tiempo de CPU crece **lineal** con la cantidad de luces: cada muestra recorre la lista de luces que su
+PVS ve, una por una. El tiempo de device casi no se mueve (0.28 s a 0.56 s con 1024× más luces), porque eso
+es exactamente lo que una GPU hace bien. El cruce está alrededor de las **150-200 luces**, y de ahí para
+arriba la ventaja sigue creciendo.
+
+Por eso `ba_dust_island` daba pérdida y seguirá dándola: el mapa marshalado tiene **1 sola luz en 1 leaf**.
+Es el peor caso posible — no hay nada que paralelizar por muestra, y lo único que queda es el costo fijo
+del descenso por el BSP, que en este fork ya está muy bien resuelto en la CPU (atajo de PVS de cielo §4.5,
+caja única contra los opacos, AVX2). Con `-extra`:
+
+| | RAD total | fase `BuildFacelights` |
 |---|---|---|
-| CPU | **2.78 s** | — |
-| `-gpu` | 5.57 s | 1.9 s (1.054.380 muestras, 23 dispatches) |
+| CPU | 3.33 s | 0.96 s (todo, incluido el trazado) |
+| `-gpu` | 4.93 s | collect 0.62 s + device 0.93 s + finish 0.51 s |
 
-El problema es estructural, no de tuning. La pasada *collect* vuelve a hacer todo `BuildFacelights` menos
-el trazado, o sea ~1.8 s, y la *consume* otros ~1.8 s. Aunque el kernel tardara **cero**, el total serían
-~3.6 s contra los 2.78 s de la CPU. Y el kernel no tarda cero: tarda 1.9 s, más que el gather completo de
-la CPU.
+Es decir: el número de hltools (2.96× en `speedrun_celerior`, un mapa cuyo RAD de CPU tarda 115 s) y el
+número de acá no se contradicen. Son el mismo comportamiento medido en dos puntos distintos de la misma
+curva.
 
-La razón por la que a hltools sí le rinde (3× en su mapa) es que su gather de CPU es más lento: este fork
-ya tiene el atajo de PVS de cielo (§4.5 y `SampleMayReachSky`), la caja única contra la lista de opacos, y
-AVX2. Con el gather de CPU ya barato, duplicar el resto de la fase cuesta más de lo que la GPU ahorra. El
-atajo de cielo se le pasó también al kernel — está en el work item — y no cambió el resultado en un mapa
-al aire libre, donde casi toda muestra ve cielo.
+**Sobre el `.bsp` idéntico.** El kernel normaliza en `float` mientras la CPU usa la ruta de
+`VectorNormalize`; en cuatro de los cinco mapas medidos eso da el mismo archivo byte a byte, y en el
+restante da **un byte de 95.982 con una diferencia de 1** sobre 255 — un canal de un luxel, un escalón.
+`SDHLT_GPU_FP64_NORMALIZE=1` selecciona la variante de paridad en `double` para comparar, a costa de
+velocidad (en las GeForce el `fp64` va a 1/32).
 
-**Qué haría falta para que gane.** Que la pasada *collect* no repita el trabajo caro: hoy corre
-`CalcPoints`, `CalcLightmap` y el blur por muestra sólo para generar la secuencia de llamadas. Separar la
-generación de llamadas del resto es un refactor grande de `BuildFacelights` y no está hecho.
+**Se deja opcional (`-gpu`, apagado por defecto)** porque el resultado depende del mapa, y en uno con pocas
+luces cuesta caro. Cae al camino CPU con un aviso claro cuando el mapa tiene entidades opacas, sombras de
+modelos, más estilos de luz de los que el kernel maneja, un árbol BSP más profundo que su stack de
+traversal, o cuando no hay driver Vulkan. Y siempre imprime el desglose (`collect`, `device`, `finish`) más
+la cantidad de luces marshaladas, que es el número con el que se decide si conviene.
 
-**Se deja igual.** Es opcional (`-gpu`), correcto, y cae al camino CPU con un aviso claro cuando el mapa
-tiene entidades opacas, sombras de modelos, más estilos de luz de los que el kernel maneja, un árbol BSP
-más profundo que su stack de traversal, o simplemente cuando no hay driver Vulkan. En hardware distinto —
-GPU más rápida contra CPU más lenta — el balance puede darse vuelta, y el número está acá para medirlo sin
-volver a escribirlo.
+Nota sobre la pila de traversal: son siete arreglos por hilo, así que su profundidad decide la ocupación.
+El kernel se compila en variantes de 16/24/32/48/64 y el host elige la más chica que cubra el árbol real
+del mapa. En `ba_dust_island` no movió el tiempo de device — con una sola luz el cuello no está ahí — pero
+es gratis y en mapas grandes es donde puede notarse.
 
 ## 5. Fusión de caras: sin margen real (investigado a fondo)
 

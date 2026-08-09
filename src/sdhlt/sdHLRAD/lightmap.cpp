@@ -2595,11 +2595,11 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 								  )
 {
     PROF_SCOPE(PROF_GATHERSAMPLELIGHT);
-	if (g_gpu_phase)
+	if (g_gpu_phase == 1)
 	{
-		// -gpu: record the call, or replay its result. Same arguments, same
-		// place in the same loop - the CPU body below is what the kernel
-		// implements, so nothing here runs twice.
+		// -gpu collect: record what this call would trace and return. The
+		// answer arrives later, through GpuGatherApply, at the same point in
+		// the same loop.
 		GpuGatherIntercept (pos, pvs, normal, sample, styles, step, miptex, texlightgap_surfacenum);
 		return;
 	}
@@ -3401,7 +3401,27 @@ const vec3_t    s_circuscolors[] = {
 // =====================================================================================
 //  BuildFacelights
 // =====================================================================================
-void CalcLightmap (lightinfo_t *l, byte *styles)
+// Which of the three ways CalcLightmap can be run. LM_NORMAL is the CPU
+// compile and the only one that exists without -gpu.
+//
+// The split exists because of what this loop costs. Per lmcache point it works
+// out the sample position, nudges it off walls, gets its phong normal and
+// decompresses its PVS - and then calls GatherSampleLight, which writes
+// straight into l->lmcache[i]. Everything before the gather is the expensive
+// part; everything after it is a blend and a store.
+//
+// So LM_COLLECT runs the expensive part once, records the gather calls for the
+// device, and remembers the two per-point booleans the tail needs. LM_APPLY
+// then skips straight to the tail and drops each result where the CPU would
+// have put it. Nothing expensive happens twice.
+enum
+{
+	LM_NORMAL = 0,
+	LM_COLLECT,
+	LM_APPLY,
+};
+
+void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflags)
 {
 	int facenum;
 	int i, j;
@@ -3432,7 +3452,19 @@ void CalcLightmap (lightinfo_t *l, byte *styles)
 		bool nudged;
 		int *wallflags_out;
 
+		sampled = l->lmcache[i];
+		normal_out = &l->lmcache_normal[i];
+		wallflags_out = &l->lmcache_wallflags[i];
+		if (pass == LM_APPLY)
+		{
+			// the two things the tail below needs that it cannot recompute
+			// without redoing the whole preparation
+			blocked = (lmflags[i] & 1) != 0;
+			nudged = (lmflags[i] & 2) != 0;
+		}
+
 		// prepare input parameter and output parameter
+		if (pass != LM_APPLY)
 		{
 			s = ((i % l->lmcachewidth) - l->lmcache_offset) / (vec_t)l->lmcache_density;
 			t = ((i / l->lmcachewidth) - l->lmcache_offset) / (vec_t)l->lmcache_density;
@@ -3486,6 +3518,7 @@ void CalcLightmap (lightinfo_t *l, byte *styles)
 			square[1][1] = l->texmins[1] * TEXTURE_STEP + floor (t + (l->lmcache_side + 0.5) / (vec_t)l->lmcache_density) * TEXTURE_STEP + TEXTURE_STEP;
 		}
 		// find world's position for the sample
+		if (pass != LM_APPLY)
 		{
 			{
 				blocked = false;
@@ -3539,6 +3572,7 @@ void CalcLightmap (lightinfo_t *l, byte *styles)
 			}
 		}
 		// calculate normal for the sample
+		if (pass != LM_APPLY)
 		{
 			GetPhongNormal (surface, surfpt, pointnormal);
 			if (l->translucent_b)
@@ -3548,6 +3582,7 @@ void CalcLightmap (lightinfo_t *l, byte *styles)
 			VectorCopy (pointnormal, *normal_out);
 		}
 		// calculate visibility for the sample
+		if (pass != LM_APPLY)
 		{
 			if (!g_visdatasize)
 			{
@@ -3600,17 +3635,28 @@ void CalcLightmap (lightinfo_t *l, byte *styles)
 					lastoffset2 = thisoffset2;
 				}
 			}
+			if (lmflags)
+			{
+				lmflags[i] = (unsigned char)((blocked? 1: 0) | (nudged? 2: 0));
+			}
 		}
 		// gather light
 		{
 			if (!blocked)
 			{
+				if (pass == LM_APPLY)
+				{
+					GpuGatherApply (sampled, styles);
+				}
+				else
+				{
 				GatherSampleLight(spot, pvs, pointnormal, sampled
 					, styles
 					, 0
 					, l->miptex
 					, surface
 					);
+				}
 			}
 			if (l->translucent_b)
 			{
@@ -3618,12 +3664,19 @@ void CalcLightmap (lightinfo_t *l, byte *styles)
 				memset (sampled2, 0, ALLSTYLES * sizeof (vec3_t));
 				if (!blocked)
 				{
+					if (pass == LM_APPLY)
+					{
+						GpuGatherApply (sampled2, styles);
+					}
+					else
+					{
 					GatherSampleLight(spot2, pvs2, pointnormal2, sampled2
 						, styles
 						, 0
 						, l->miptex
 						, surface
 						);
+					}
 				}
 				for (j = 0; j < ALLSTYLES && styles[j] != 255; j++)
 				{
@@ -3657,38 +3710,32 @@ void CalcLightmap (lightinfo_t *l, byte *styles)
 	}
 }
 
-void            BuildFacelights(const int facenum)
+// BuildFacelights is split in two so that the GPU path does not have to run it
+// twice. The first half is everything up to and including CalcLightmap, which
+// is where the sample positions, the phong normals and the gather calls come
+// from; the second half is the blur, the patch accumulation and the lightmap
+// write. With -gpu the first half runs for a chunk of faces, the chunk's
+// gather calls go to the device in one dispatch, and then the second half runs
+// - each face's state carried across in a facebuild_t rather than recomputed.
+//
+// Without -gpu the two run back to back and this is the same function it was.
+typedef struct
 {
-    PROF_SCOPE(PROF_BUILDFACELIGHTS);
-	if (g_gpu_phase)
-	{
-		// Which face's work items the intercept files this call under. It has
-		// to be the face being built, not the sample's own surface: near an
-		// edge a sample can belong to a neighbour another thread owns.
-		GpuGatherBeginFace (facenum);
-	}
-    dface_t*        f;
-	unsigned char	f_styles[ALLSTYLES];
-	sample_t		*fl_samples[ALLSTYLES];
-    lightinfo_t     l;
-    int             i;
-    int             j;
-    int             k;
-    sample_t*       s;
-    vec_t*          spot;
-    patch_t*        patch;
-    const dplane_t* plane;
-    byte            pvs[(MAX_MAP_LEAFS + 7) / 8];
-    int             thisoffset = -1, lastoffset = -1;
-    int             lightmapwidth;
-    int             lightmapheight;
-    int             size;
-	vec3_t			spot2, normal2;
-	vec3_t			delta;
-	byte			pvs2[(MAX_MAP_LEAFS + 7) / 8];
-	int				thisoffset2 = -1, lastoffset2 = -1;
+	lightinfo_t     l;
+	unsigned char   f_styles[ALLSTYLES];
+	unsigned char  *lmflags;                               // per lmcache point, LM_COLLECT only
+}
+facebuild_t;
 
-	int				*sample_wallflags;
+static bool     BuildFacelights_Begin(const int facenum, facebuild_t *fb, int pass)
+{
+    dface_t*        f;
+	unsigned char  *f_styles = fb->f_styles;
+    lightinfo_t    &l = fb->l;
+    int             j;
+    const dplane_t* plane;
+
+	fb->lmflags = NULL;
 
     f = &g_dfaces[facenum];
 
@@ -3707,7 +3754,7 @@ void            BuildFacelights(const int facenum)
 		{
 			f->styles[j] = 255;
 		}
-        return;                                            // non-lit texture
+        return false;                                      // non-lit texture
     }
 
 	f_styles[0] = 0;
@@ -3735,9 +3782,54 @@ void            BuildFacelights(const int facenum)
     CalcFaceVectors(&l);
     CalcFaceExtents(&l);
     CalcPoints(&l);
+	if (pass == LM_COLLECT)
+	{
+		fb->lmflags = (unsigned char *)calloc ((size_t)l.lmcachewidth * l.lmcacheheight, 1);
+		hlassume (fb->lmflags != NULL, assume_NoMemory);
+	}
 	CalcLightmap (&l
 		, f_styles
+		, pass
+		, fb->lmflags
 		);
+	return true;
+}
+
+static void     BuildFacelights_End(const int facenum, facebuild_t *fb, int pass)
+{
+    dface_t*        f = &g_dfaces[facenum];
+	unsigned char  *f_styles = fb->f_styles;
+    lightinfo_t    &l = fb->l;
+	sample_t		*fl_samples[ALLSTYLES];
+    int             i;
+    int             j;
+    int             k;
+    sample_t*       s;
+    vec_t*          spot;
+    patch_t*        patch;
+    const dplane_t* plane;
+    byte            pvs[(MAX_MAP_LEAFS + 7) / 8];
+    int             thisoffset = -1, lastoffset = -1;
+    int             lightmapwidth;
+    int             lightmapheight;
+    int             size;
+	vec3_t			spot2, normal2;
+	vec3_t			delta;
+	byte			pvs2[(MAX_MAP_LEAFS + 7) / 8];
+	int				thisoffset2 = -1, lastoffset2 = -1;
+
+	int				*sample_wallflags;
+
+	(void)plane;
+
+	if (pass == LM_APPLY)
+	{
+		// The device's answers land in l.lmcache exactly where the CPU gather
+		// would have written them; everything below is untouched CPU code.
+		CalcLightmap (&l, f_styles, LM_APPLY, fb->lmflags);
+		free (fb->lmflags);
+		fb->lmflags = NULL;
+	}
 
     lightmapwidth = l.texsize[0] + 1;
     lightmapheight = l.texsize[1] + 1;
@@ -4300,6 +4392,62 @@ void            BuildFacelights(const int facenum)
 	free (l.lmcache_wallflags);
 	free (l.surfpt_position);
 	free (l.surfpt_surface);
+}
+
+void            BuildFacelights(const int facenum)
+{
+    PROF_SCOPE(PROF_BUILDFACELIGHTS);
+	facebuild_t fb;
+	if (BuildFacelights_Begin (facenum, &fb, LM_NORMAL))
+	{
+		BuildFacelights_End (facenum, &fb, LM_NORMAL);
+	}
+}
+
+// The two halves, for the -gpu chunk loop. The state between them lives in the
+// caller's facebuild_t, so the expensive first half happens exactly once.
+bool            RadGpuFaceBegin(int facenum, void *state)
+{
+	facebuild_t *fb = (facebuild_t *)state;
+	// Which face's work items the intercept files this call under. It has to
+	// be the face being built, not the sample's own surface: near an edge a
+	// sample can belong to a neighbour another thread owns.
+	GpuGatherBeginFace (facenum);
+	return BuildFacelights_Begin (facenum, fb, LM_COLLECT);
+}
+
+void            RadGpuFaceEnd(int facenum, void *state)
+{
+	facebuild_t *fb = (facebuild_t *)state;
+	GpuGatherBeginFace (facenum);
+	BuildFacelights_End (facenum, fb, LM_APPLY);
+}
+
+void            RadGpuFaceAbandon(void *state)
+{
+	facebuild_t *fb = (facebuild_t *)state;
+	free (fb->lmflags);
+	fb->lmflags = NULL;
+	free (fb->l.lmcache);
+	free (fb->l.lmcache_normal);
+	free (fb->l.lmcache_wallflags);
+	free (fb->l.surfpt_position);
+	free (fb->l.surfpt_surface);
+}
+
+size_t          RadGpuFaceStateSize()
+{
+	return sizeof (facebuild_t);
+}
+
+// Roughly what one face's kept state costs, so the chunk loop can bound how
+// many it holds at once. The lmcache dominates: one vec3_t per light style per
+// lmcache point, which with -extra is megabytes on a large face.
+size_t          RadGpuFaceStateBytes(void *state)
+{
+	facebuild_t *fb = (facebuild_t *)state;
+	size_t points = (size_t)fb->l.lmcachewidth * fb->l.lmcacheheight;
+	return sizeof (facebuild_t) + points * (sizeof (vec3_t[ALLSTYLES]) + sizeof (vec3_t) + sizeof (int) + 1);
 }
 
 // =====================================================================================
@@ -4959,12 +5107,16 @@ void AddPatchLights (int facenum)
 	}
 
 	
+	long long		wb_scanned = 0;
+	long long		wb_used = 0;
+
 	for (item = g_dependentfacelights[facenum]; item != NULL; item = item->next)
 	{
 		f_other = &g_dfaces[item->facenum];
 		fl_other = &facelight[item->facenum];
 		for (k = 0; k < MAXLIGHTMAPS && f_other->styles[k] != 255; k++)
 		{
+			wb_scanned += fl_other->numsamples;
 			for (i = 0; i < fl_other->numsamples; i++)
 			{
 				samp = &fl_other->samples[k][i];
@@ -4972,6 +5124,7 @@ void AddPatchLights (int facenum)
 				{ // the sample is not in this surface
 					continue;
 				}
+				wb_used++;
 
 				{
 					vec3_t v;
@@ -5003,6 +5156,8 @@ void AddPatchLights (int facenum)
 		}
 	}
 
+	(void)wb_scanned;
+	(void)wb_used;
 }
 
 // =====================================================================================
