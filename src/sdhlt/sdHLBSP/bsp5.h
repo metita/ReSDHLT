@@ -291,6 +291,8 @@ extern bool     g_notjunc;
 extern bool		g_nobrink;
 extern bool		g_noclipnodemerge;
 extern bool		g_lmoptimize;
+extern bool		g_allleaks;
+extern void		PrintLeakSummary ();
 extern bool     g_watervis;
 extern bool     g_chart;
 extern bool     g_estimate;

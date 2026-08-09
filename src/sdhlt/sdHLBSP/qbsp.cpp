@@ -57,6 +57,7 @@ char			g_extentfilename[_MAX_PATH];
 // command line flags
 bool			g_noopt = DEFAULT_NOOPT;		// don't optimize BSP on write
 bool			g_lmoptimize = DEFAULT_LMOPTIMIZE;	// reorder faces to waste fewer lightmap atlas pages
+bool			g_allleaks = false;					// survey every hole, not just the first one found
 bool			g_noclipnodemerge = DEFAULT_NOCLIPNODEMERGE;
 bool            g_nofill = DEFAULT_NOFILL;      // dont fill "-nofill"
 bool			g_noinsidefill = DEFAULT_NOINSIDEFILL;
@@ -1391,6 +1392,7 @@ static void     Usage()
 	Log("    -noinsidefill  : Don't fill empty spaces\n");
 	Log("    -noopt         : Don't optimize planes on BSP write   (not for final runs)\n");
 	Log("    -lmoptimize    : Reorder faces to waste fewer lightmap atlas pages\n");
+	Log("    -allleaks      : On a leak, survey the map and mark every hole, not just one\n");
 	Log("    -noclipnodemerge: Don't optimize clipnodes\n");
     Log("    -texdata #     : Alter maximum texture memory limit (in kb)\n");
     Log("    -lightdata #   : Alter maximum lighting memory limit (in kb)\n");
@@ -1473,6 +1475,7 @@ static void     Settings()
 	Log("noopt               [ %7s ] [ %7s ]\n", g_noopt ? "on" : "off", DEFAULT_NOOPT ? "on" : "off");
 	Log("no clipnode merging [ %7s ] [ %7s ]\n", g_noclipnodemerge? "on": "off", DEFAULT_NOCLIPNODEMERGE? "on": "off");
 	Log("lightmap atlas opt. [ %7s ] [ %7s ]\n", g_lmoptimize? "on": "off", DEFAULT_LMOPTIMIZE? "on": "off");
+	Log("survey all leaks    [ %7s ] [ %7s ]\n", g_allleaks? "on": "off", "off");
     Log("null tex. stripping [ %7s ] [ %7s ]\n", g_bUseNullTex ? "on" : "off", DEFAULT_NULLTEX ? "on" : "off" );
     Log("notjunc             [ %7s ] [ %7s ]\n", g_notjunc ? "on" : "off", DEFAULT_NOTJUNC ? "on" : "off");
 	Log("nobrink             [ %7s ] [ %7s ]\n", g_nobrink? "on": "off", DEFAULT_NOBRINK? "on": "off");
@@ -1593,6 +1596,10 @@ static void     ProcessFile(const char* const filename)
     // process each model individually
     while (ProcessModel())
         ;
+
+    // every hull has been filled by now, so the leak - if there was one - can
+    // be reported once instead of per hull
+    PrintLeakSummary();
 
     // write the updated bsp file out
     FinishBSPFile();
@@ -1777,6 +1784,10 @@ int             main(const int argc, char** argv)
 		else if (!strcasecmp(argv[i], "-lmoptimize"))
 		{
 			g_lmoptimize = true;
+		}
+		else if (!strcasecmp(argv[i], "-allleaks"))
+		{
+			g_allleaks = true;
 		}
 		else if (!strcasecmp (argv[i], "-noclipnodemerge"))
 		{

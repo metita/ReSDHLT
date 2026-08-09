@@ -2,15 +2,22 @@
 
 #include "bsp5.h"
 
+#include <algorithm>
+#include <queue>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
 //  PointInLeaf
 //  PlaceOccupant
-//  MarkLeakTrail
+//  BuildShortestLeakTrail
 //  RecursiveFillOutside
 //  ClearOutFaces_r
 //  isClassnameAllowableOutside
 //  FreeAllowableOutsideList
 //  LoadAllowableOutsideList
 //  FillOutside
+//  PrintLeakSummary
 
 static int      outleafs;
 static int      valid;
@@ -58,47 +65,390 @@ static bool     PlaceOccupant(const int num, const vec3_t point, node_t* headnod
 }
 
 // =====================================================================================
-//  MarkLeakTrail
+//  Leak diagnostics
+//      The trail the classic pointfile drew was whatever order the outside
+//      flood fill happened to unwind in: it wanders through the map, doubles
+//      back, and the point where it actually leaves the map is nowhere marked.
+//      What a mapper needs is the hole.
+//
+//      So the trail is built separately, after the fill has proved there is a
+//      leak: a Dijkstra over the portal graph, weighted by the distance
+//      between consecutive portal centres, giving the geometrically shortest
+//      way from the leaked entity to the void. Its far end is the shell portal
+//      the leak escapes through, and the point just before it is the
+//      constriction - the hole - which gets its coordinates printed and a
+//      dense marker star written into the pointfile.
 // =====================================================================================
-static portal_t* prevleaknode;
-static FILE*    pointfile;
-static FILE*    linefile;
-
-static void     MarkLeakTrail(portal_t* n2)
+typedef struct
 {
-    int             i;
-    vec3_t          p1, p2, dir;
-    float           len;
-    portal_t*       n1;
+	vec3_t			p;
+	vec_t			area;    // of the portal this point centres; unset for the entity
+	bool			outside; // does this portal lead into the void?
+}
+trailpoint_t;
 
-    n1 = prevleaknode;
-    prevleaknode = n2;
+typedef struct
+{
+	char			classname[64];
+	vec3_t			origin;
+	vec3_t			hole;
+}
+leaksite_t;
 
-    if (!n1)
-    {
-        return;
-    }
+static std::vector< trailpoint_t > g_leaktrail;
+static node_t*  g_leakleaf;                                // leaf of the entity that leaked
+static bool     g_haveleaktrail;
+static vec3_t   g_leakexit;
 
-    n1->winding->getCenter(p1);
-    n2->winding->getCenter(p2);
+// Consolidated across every hull, printed once by PrintLeakSummary.
+static bool     g_leak_any = false;
+static int      g_leak_hulls = 0;                          // bitmask
+static char     g_leak_entclass[64] = "";
+static vec3_t   g_leak_entorigin;
+static vec3_t   g_leak_hole;
+static bool     g_leak_hashole = false;
+static std::vector< leaksite_t > g_leaksites;
+static std::vector< node_t * > g_leakfrontier;
 
-    // Linefile
-    fprintf(linefile, "%f %f %f - %f %f %f\n", p1[0], p1[1], p1[2], p2[0], p2[1], p2[2]);
+static void     WindingCenter (const portal_t *p, trailpoint_t &out)
+{
+	p->winding->getCenter (out.p);
+	out.area = p->winding->getArea ();
+}
 
-    // Pointfile
-    fprintf(pointfile, "%f %f %f\n", p1[0], p1[1], p1[2]);
+// =====================================================================================
+//  MarkOutsideLeafs
+//      Floods the void with entities treated as walls rather than as a
+//      stopping condition. What it marks is exactly the region that is
+//      unambiguously outside the map, and where it stops is one frontier leaf
+//      per hole - which is both what tells the trail builder where the map
+//      ends, and what -allleaks needs to find every hole instead of the first.
+// =====================================================================================
+static int      g_outsidemark = 0;
 
-    VectorSubtract(p2, p1, dir);
-    len = VectorLength(dir);
-    VectorNormalize(dir);
+static void     MarkOutsideLeafs_r (node_t *l)
+{
+	if (l->contents == CONTENTS_SOLID || l->contents == CONTENTS_SKY)
+	{
+		return;
+	}
+	if (l->valid == valid)
+	{
+		return;
+	}
+	l->valid = valid;
 
-    while (len > 2)
-    {
-        fprintf(pointfile, "%f %f %f\n", p1[0], p1[1], p1[2]);
-        for (i = 0; i < 3; i++)
-            p1[i] += dir[i] * 2;
-        len -= 2;
-    }
+	if (l->occupied)
+	{
+		g_leakfrontier.push_back (l);
+		return; // a barrier, so the flood stays outside
+	}
+
+	portal_t *p;
+	for (p = l->portals; p;)
+	{
+		int s = (p->nodes[0] == l);
+		MarkOutsideLeafs_r (p->nodes[s]);
+		p = p->next[!s];
+	}
+}
+
+static void     MarkOutsideLeafs ()
+{
+	g_leakfrontier.clear ();
+	valid++;
+	g_outsidemark = valid;
+	int s = !(g_outside_node.portals->nodes[1] == &g_outside_node);
+	MarkOutsideLeafs_r (g_outside_node.portals->nodes[s]);
+}
+
+static bool     LeafIsOutside (const node_t *l)
+{
+	return l != &g_outside_node && l->valid == g_outsidemark && !l->occupied;
+}
+
+// The hole is where the escape route leaves the map: the first portal on the
+// path whose far side is a leaf the outside flood reached. Everything past it
+// is void, and the void's own portals - the BSP splits it as finely as it
+// splits anything - are why "the point before the last one" lands in odd
+// places. Falls back to the narrowest portal on the path if nothing was
+// marked, which is the same idea by a weaker measure.
+static int      FindHoleIndex ()
+{
+	int n = (int)g_leaktrail.size ();
+	if (n < 2)
+	{
+		return 0;
+	}
+	int i;
+	for (i = 1; i < n; i++)
+	{
+		if (g_leaktrail[i].outside)
+		{
+			return i;
+		}
+	}
+	int best = 1;
+	for (i = 1; i < n - 1; i++)
+	{
+		if (g_leaktrail[i].area < g_leaktrail[best].area)
+		{
+			best = i;
+		}
+	}
+	return best;
+}
+
+// perpendicular distance from p to the segment a-b
+static vec_t    PointSegDistance (const vec3_t p, const vec3_t a, const vec3_t b)
+{
+	vec3_t ab, ap, proj;
+	VectorSubtract (b, a, ab);
+	VectorSubtract (p, a, ap);
+	vec_t ab2 = DotProduct (ab, ab);
+	vec_t t = ab2 > 0? DotProduct (ap, ab) / ab2: 0;
+	if (t < 0) t = 0;
+	if (t > 1) t = 1;
+	VectorMA (a, t, ab, proj);
+	VectorSubtract (p, proj, proj);
+	return VectorLength (proj);
+}
+
+// Douglas-Peucker: keep the vertices the simplified polyline needs to stay
+// within tol of the original, so the .lin file is a handful of clean segments
+// instead of one per portal crossed.
+static void     SimplifyTrail_r (int i0, int i1, vec_t tol, std::vector< char > &keep)
+{
+	vec_t dmax = 0;
+	int idx = -1;
+	int i;
+	for (i = i0 + 1; i < i1; i++)
+	{
+		vec_t d = PointSegDistance (g_leaktrail[i].p, g_leaktrail[i0].p, g_leaktrail[i1].p);
+		if (d > dmax)
+		{
+			dmax = d;
+			idx = i;
+		}
+	}
+	if (dmax > tol && idx > 0)
+	{
+		keep[idx] = 1;
+		SimplifyTrail_r (i0, idx, tol, keep);
+		SimplifyTrail_r (idx, i1, tol, keep);
+	}
+}
+
+// A dense 3D star, so the hole is an unmistakable blob among the trail dots.
+static void     WriteLeakMarker (FILE *f, const vec3_t pos)
+{
+	const vec_t radius = 48.0;
+	static const int dirs[13][3] = {
+		{1,0,0}, {0,1,0}, {0,0,1},
+		{1,1,0}, {1,-1,0}, {1,0,1}, {1,0,-1}, {0,1,1}, {0,1,-1},
+		{1,1,1}, {1,1,-1}, {1,-1,1}, {1,-1,-1},
+	};
+	int k;
+	for (k = 0; k < 13; k++)
+	{
+		vec_t d;
+		for (d = -radius; d <= radius; d += 2.0)
+		{
+			fprintf (f, "%f %f %f\n", pos[0] + dirs[k][0] * d, pos[1] + dirs[k][1] * d, pos[2] + dirs[k][2] * d);
+		}
+	}
+}
+
+static bool     BuildShortestLeakTrail (node_t *occupied, const vec3_t startpos)
+{
+	g_leaktrail.clear ();
+	if (!occupied)
+	{
+		return false;
+	}
+
+	std::unordered_map< node_t *, portal_t * > parentportal;
+	std::unordered_map< node_t *, node_t * > parentnode;
+	std::unordered_map< node_t *, double > dist;
+	std::unordered_map< node_t *, trailpoint_t > arrival; // portal centre used to reach a leaf
+	typedef std::pair< double, node_t * > queueentry_t;
+	std::priority_queue< queueentry_t, std::vector< queueentry_t >, std::greater< queueentry_t > > pq;
+
+	trailpoint_t start;
+	VectorCopy (startpos, start.p);
+	start.area = 0; // never a candidate hole: FindHoleIndex skips both ends
+	dist[occupied] = 0;
+	arrival[occupied] = start;
+	parentportal[occupied] = NULL;
+	parentnode[occupied] = NULL;
+	pq.push (queueentry_t (0.0, occupied));
+
+	node_t *exitleaf = NULL;
+	portal_t *exitportal = NULL;
+	double exitcost = 0;
+
+	while (!pq.empty ())
+	{
+		double d = pq.top ().first;
+		node_t *l = pq.top ().second;
+		pq.pop ();
+		if (d > dist[l])
+		{
+			continue; // stale queue entry
+		}
+		if (exitleaf && d >= exitcost)
+		{
+			break; // the best exit is already settled
+		}
+
+		portal_t *p;
+		for (p = l->portals; p;)
+		{
+			int side = (p->nodes[0] == l);
+			node_t *nb = p->nodes[side];
+			trailpoint_t cp;
+			WindingCenter (p, cp);
+			vec3_t seg;
+			VectorSubtract (cp.p, arrival[l].p, seg);
+			double nd = d + VectorLength (seg);
+
+			if (nb == &g_outside_node)
+			{
+				if (!exitleaf || nd < exitcost)
+				{
+					exitleaf = l;
+					exitportal = p;
+					exitcost = nd;
+				}
+			}
+			else if (nb->contents != CONTENTS_SOLID && nb->contents != CONTENTS_SKY)
+			{
+				std::unordered_map< node_t *, double >::iterator it = dist.find (nb);
+				if (it == dist.end () || nd < it->second)
+				{
+					dist[nb] = nd;
+					arrival[nb] = cp;
+					parentportal[nb] = p;
+					parentnode[nb] = l;
+					pq.push (queueentry_t (nd, nb));
+				}
+			}
+			p = p->next[!side];
+		}
+	}
+	if (!exitleaf)
+	{
+		return false;
+	}
+
+	// backtrace exit -> entity, then reverse
+	std::vector< trailpoint_t > path;
+	node_t *cur;
+	for (cur = exitleaf; cur && parentportal[cur]; cur = parentnode[cur])
+	{
+		trailpoint_t tp;
+		WindingCenter (parentportal[cur], tp);
+		tp.outside = LeafIsOutside (cur); // this portal leads into cur
+		path.push_back (tp);
+	}
+	std::reverse (path.begin (), path.end ());
+	// start the trail at the entity itself, which is what the summary names
+	start.outside = false;
+	g_leaktrail.push_back (start);
+	g_leaktrail.insert (g_leaktrail.end (), path.begin (), path.end ());
+	// and end it at the shell portal: the way out
+	trailpoint_t exitcentre;
+	WindingCenter (exitportal, exitcentre);
+	exitcentre.outside = true;
+	g_leaktrail.push_back (exitcentre);
+	return true;
+}
+
+// Emits the trail that has already been built into open pts/lin files and
+// reports the hole it pierces. Shared by the single leak and the -allleaks
+// survey, which concatenates several trails into the same pair of files.
+static bool     EmitLeakTrail (FILE *pts, FILE *lin, vec3_t hole_out)
+{
+	int n = (int)g_leaktrail.size ();
+	if (n < 1)
+	{
+		return false;
+	}
+
+	VectorCopy (g_leaktrail[FindHoleIndex ()].p, hole_out);
+
+	std::vector< char > keep ((size_t)n, 0);
+	keep[0] = keep[n - 1] = 1;
+	if (n >= 2)
+	{
+		SimplifyTrail_r (0, n - 1, 16.0, keep);
+	}
+	std::vector< int > idx;
+	int i;
+	for (i = 0; i < n; i++)
+	{
+		if (keep[i])
+		{
+			idx.push_back (i);
+		}
+	}
+
+	size_t s;
+	for (s = 0; s + 1 < idx.size (); s++)
+	{
+		const vec_t *a = g_leaktrail[idx[s]].p;
+		const vec_t *b = g_leaktrail[idx[s + 1]].p;
+		// lin: one clean segment per simplified edge
+		fprintf (lin, "%f %f %f - %f %f %f\n", a[0], a[1], a[2], b[0], b[1], b[2]);
+		// pts: densified, for editors that only render dots
+		vec3_t p, dir;
+		VectorCopy (a, p);
+		VectorSubtract (b, a, dir);
+		vec_t len = VectorNormalize (dir);
+		while (len > 8)
+		{
+			fprintf (pts, "%f %f %f\n", p[0], p[1], p[2]);
+			VectorMA (p, 8, dir, p);
+			len -= 8;
+		}
+	}
+	const vec_t *last = g_leaktrail[idx.back ()].p;
+	fprintf (pts, "%f %f %f\n", last[0], last[1], last[2]);
+	WriteLeakMarker (pts, hole_out);
+	return true;
+}
+
+static void     OpenLeakFiles (FILE *&pts, FILE *&lin)
+{
+	pts = fopen (g_pointfilename, "w");
+	lin = fopen (g_linefilename, "w");
+	if (!pts || !lin)
+	{
+		if (pts) fclose (pts);
+		if (lin) fclose (lin);
+		Error ("Couldn't open leak file %s / %s\n", g_pointfilename, g_linefilename);
+	}
+}
+
+static bool     WriteLeakFiles ()
+{
+	if (g_leaktrail.empty ())
+	{
+		return false;
+	}
+	FILE *pts = NULL;
+	FILE *lin = NULL;
+	OpenLeakFiles (pts, lin);
+	vec3_t hole;
+	bool ok = EmitLeakTrail (pts, lin, hole);
+	fclose (lin);
+	fclose (pts);
+	if (ok)
+	{
+		VectorCopy (hole, g_leakexit);
+		g_haveleaktrail = true;
+	}
+	return ok;
 }
 
 // =====================================================================================
@@ -149,7 +499,6 @@ static void FillLeaf (node_t *l)
 	l->planenum = -1;
 }
 static int      hit_occupied;
-static int      backdraw;
 static bool     RecursiveFillOutside(node_t* l, const bool fill)
 {
     portal_t*       p;
@@ -172,7 +521,7 @@ static bool     RecursiveFillOutside(node_t* l, const bool fill)
     if (l->occupied)
     {
         hit_occupied = l->occupied;
-        backdraw = 1000;
+        g_leakleaf = l;                                    // where the trail starts
         return true;
     }
 
@@ -191,10 +540,6 @@ static bool     RecursiveFillOutside(node_t* l, const bool fill)
 
         if (RecursiveFillOutside(p->nodes[s], fill))
         {                                                  // leaked, so stop filling
-            if (backdraw-- > 0)
-            {
-                MarkLeakTrail(p);
-            }
             return true;
         }
         p = p->next[!s];
@@ -430,6 +775,147 @@ void            LoadAllowableOutsideList(const char* const filename)
 // =====================================================================================
 //  FillOutside
 // =====================================================================================
+// =====================================================================================
+//  SurveyLeaks
+//      The normal flood stops at the first entity it can see, so one compile
+//      reports one hole no matter how many there are. MarkOutsideLeafs has
+//      already left one frontier leaf at every hole; each of those gets its
+//      own shortest path, and paths that come out of the same gap are merged.
+// =====================================================================================
+static void     SurveyLeaks ()
+{
+	const vec_t samehole = 128.0;                          // holes closer than this are one
+	const size_t maxsites = 256;                           // bound the per-frontier Dijkstra
+
+	if (g_leakfrontier.empty ())
+	{
+		return;
+	}
+
+	// one representative leaf per entity: an entity can own several leafs
+	// along the same opening
+	std::vector< int > seen;
+	std::vector< node_t * > reps;
+	size_t k;
+	for (k = 0; k < g_leakfrontier.size (); k++)
+	{
+		node_t *l = g_leakfrontier[k];
+		if (std::find (seen.begin (), seen.end (), l->occupied) != seen.end ())
+		{
+			continue;
+		}
+		seen.push_back (l->occupied);
+		reps.push_back (l);
+	}
+
+	FILE *pts = NULL;
+	FILE *lin = NULL;
+	OpenLeakFiles (pts, lin);
+
+	for (k = 0; k < reps.size () && g_leaksites.size () < maxsites; k++)
+	{
+		node_t *l = reps[k];
+		vec3_t startpos;
+		GetVectorForKey (&g_entities[l->occupied], "origin", startpos);
+		if (!BuildShortestLeakTrail (l, startpos))
+		{
+			continue;
+		}
+
+		const vec_t *hole = g_leaktrail[FindHoleIndex ()].p;
+		bool duplicate = false;
+		size_t j;
+		for (j = 0; j < g_leaksites.size (); j++)
+		{
+			vec3_t d;
+			VectorSubtract (g_leaksites[j].hole, hole, d);
+			if (VectorLength (d) < samehole)
+			{
+				duplicate = true;
+				break;
+			}
+		}
+		if (duplicate)
+		{
+			continue;
+		}
+
+		leaksite_t site;
+		if (!EmitLeakTrail (pts, lin, site.hole))
+		{
+			continue;
+		}
+		safe_strncpy (site.classname, ValueForKey (&g_entities[l->occupied], "classname"), sizeof (site.classname));
+		VectorCopy (startpos, site.origin);
+		g_leaksites.push_back (site);
+	}
+
+	fclose (lin);
+	fclose (pts);
+}
+
+// =====================================================================================
+//  PrintLeakSummary
+//      One block after every hull has been filled, instead of one warning per
+//      leaking hull saying the same thing four times.
+// =====================================================================================
+void            PrintLeakSummary ()
+{
+	if (!g_leak_any)
+	{
+		return;
+	}
+
+	char hulls[64];
+	hulls[0] = '\0';
+	int count = 0;
+	int h;
+	for (h = 0; h < NUM_HULLS; h++)
+	{
+		if (g_leak_hulls & (1 << h))
+		{
+			char tmp[16];
+			safe_snprintf (tmp, sizeof (tmp), "%s%d", count? ", ": "", h);
+			safe_strncpy (hulls + strlen (hulls), tmp, sizeof (hulls) - strlen (hulls));
+			count++;
+		}
+	}
+
+	Log ("\n  !!! LEAK - map is not sealed (hull%s %s)\n", count == 1? "": "s", hulls);
+
+	if (g_leaksites.size () > 1)
+	{
+		Log ("    found   %d holes; every one of their paths is in the pointfile\n", (int)g_leaksites.size ());
+		size_t i;
+		for (i = 0; i < g_leaksites.size (); i++)
+		{
+			const leaksite_t &site = g_leaksites[i];
+			Log ("\n    hole %-3d (%.0f, %.0f, %.0f)\n", (int)(i + 1), site.hole[0], site.hole[1], site.hole[2]);
+			Log ("      from  %s @ (%.0f, %.0f, %.0f)\n", site.classname, site.origin[0], site.origin[1], site.origin[2]);
+		}
+		Log ("\n    action  load the pointfile and seal every marked hole\n");
+	}
+	else
+	{
+		Log ("    entity  %s @ (%.0f, %.0f, %.0f)\n", g_leak_entclass, g_leak_entorigin[0], g_leak_entorigin[1], g_leak_entorigin[2]);
+		if (g_leak_hashole)
+		{
+			Log ("    hole    (%.0f, %.0f, %.0f)   marked in the pointfile\n", g_leak_hole[0], g_leak_hole[1], g_leak_hole[2]);
+		}
+		Log ("    action  load the pointfile in your editor and seal the marked hole\n");
+		if (!g_leaksites.empty ())
+		{
+			Log ("    note    -allleaks surveyed the map and found only this one\n");
+		}
+	}
+
+	Log ("\n  A LEAK is a hole in the map where the inside is exposed to the outside void.\n"
+		 "  The listed entity is where the leak trace starts; follow the pointfile from it to\n"
+		 "  the marked hole and seal the gap. Unless the entity is accidentally outside the map,\n"
+		 "  do not delete it. Some rotating-object entities need their origin outside the map;\n"
+		 "  enclose such an origin brush in a solid world brush.\n\n");
+}
+
 node_t*         FillOutside(node_t* node, const bool leakfile, const unsigned hullnum)
 {
     int             s;
@@ -515,63 +1001,60 @@ node_t*         FillOutside(node_t* node, const bool leakfile, const unsigned hu
     outleafs = 0;
     valid++;
 
-    prevleaknode = NULL;
-
-    if (leakfile)
-    {
-        pointfile = fopen(g_pointfilename, "w");
-        if (!pointfile)
-        {
-            Error("Couldn't open pointfile %s\n", g_pointfilename);
-        }
-
-        linefile = fopen(g_linefilename, "w");
-        if (!linefile)
-        {
-            Error("Couldn't open linefile %s\n", g_linefilename);
-        }
-    }
+    g_leakleaf = NULL;
+    g_haveleaktrail = false;
+    g_leaktrail.clear();
 
     ret = RecursiveFillOutside(g_outside_node.portals->nodes[s], false);
 
-    if (leakfile)
+    if (leakfile && ret)
     {
-        fclose(pointfile);
-        fclose(linefile);
+        // Only now, with the leak proved, is the trail worth building - and it
+        // is built as the shortest way out rather than the flood's own path.
+        GetVectorForKey(&g_entities[hit_occupied], "origin", origin);
+        // Learn where the map ends first: the trail needs it to tell the hole
+        // apart from the BSP's own subdivision of the void beyond it.
+        MarkOutsideLeafs();
+        BuildShortestLeakTrail(g_leakleaf, origin);
+        WriteLeakFiles();
+        // The survey rewrites the same two files with a path for every hole,
+        // so it runs after the single trail and simply supersedes it.
+        if (g_allleaks)
+        {
+            SurveyLeaks();
+        }
     }
 
     if (ret)
     {
         GetVectorForKey(&g_entities[hit_occupied], "origin", origin);
 
-
+        // Collect; PrintLeakSummary shows one block once every hull is done.
+        // The first hull to leak owns the pointfile, so it owns the details.
+        if (!g_leak_any)
         {
-            Warning("=== LEAK in hull %i ===\nEntity %s @ (%4.0f,%4.0f,%4.0f)",
-                 hullnum, ValueForKey(&g_entities[hit_occupied], "classname"), origin[0], origin[1], origin[2]);
-            PrintOnce(
-                "\n  A LEAK is a hole in the map, where the inside of it is exposed to the\n"
-                "(unwanted) outside region.  The entity listed in the error is just a helpful\n"
-                "indication of where the beginning of the leak pointfile starts, so the\n"
-                "beginning of the line can be quickly found and traced to until reaching the\n"
-                "outside. Unless this entity is accidentally on the outside of the map, it\n"
-                "probably should not be deleted.  Some complex rotating objects entities need\n"
-                "their origins outside the map.  To deal with these, just enclose the origin\n"
-                "brush with a solid world brush\n");
+            safe_strncpy(g_leak_entclass, ValueForKey(&g_entities[hit_occupied], "classname"), sizeof(g_leak_entclass));
+            VectorCopy(origin, g_leak_entorigin);
+            if (g_haveleaktrail)
+            {
+                VectorCopy(g_leakexit, g_leak_hole);
+                g_leak_hashole = true;
+            }
         }
-
-        if (!g_bLeaked)
+        g_leak_any = true;
+        if (hullnum < NUM_HULLS)
         {
-            // First leak spits this out
-            Log("Leak pointfile generated\n\n");
+            g_leak_hulls |= (1 << hullnum);
         }
 
         if (g_bLeakOnly)
         {
+            PrintLeakSummary();
             Error("Stopped by leak.");
         }
 
         g_bLeaked = true;
-            
+
         return node;
     }
 	if (leakfile && !ret)

@@ -103,6 +103,20 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
   texture scale and lightmap resolution are untouched. Off by default: the
   default build still writes byte-identical .bsp files
 
+- BSP: leak diagnostics point at the hole. The pointfile used to be whatever
+  path the outside flood fill unwound through - it wanders, doubles back, and
+  never says where the map actually opens. The trail is now built after the
+  leak is proved, as a Dijkstra over the portal graph: the geometrically
+  shortest way from the leaked entity to the void, simplified with
+  Douglas-Peucker so the `.lin` file is a few clean segments. The hole itself -
+  the first portal on that path leading into the void - gets its coordinates
+  printed and a dense marker star written into the `.pts`, so it is
+  unmistakable in the editor. Every hull that leaks is consolidated into one
+  report instead of one warning per hull
+- BSP: `-allleaks` surveys the map and reports every hole, not just the first
+  one found, so a leaky map can be sealed in one pass through the editor
+  instead of one hole per compile
+
 ### Tried and rejected
 - Sampling the sky once per lightmap pixel instead of once per `-extra`
   subsample (`-fastsky`): measured **slower** than not doing it (12.0% vs 13.6%
