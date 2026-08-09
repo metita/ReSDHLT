@@ -985,7 +985,7 @@ bool CheckAllocBlockBudget (int *pages_out)
 	{
 		Log ("\n!!! ERROR: LIGHTMAP ATLAS OVERFLOW - map exceeds the engine's %d page limit\n", maxblocks);
 		Log ("    usage    %d / %d pages (%.0f%%)\n", numblocks, maxblocks, usagepct);
-		Log ("    cause    too many lightmapped luxels; the engine aborts with \"AllocBlock: full\"\n");
+		Log ("    cause    too many lightmapped luxels, so the engine aborts with \"AllocBlock: full\"\n");
 		Log ("    action   raise the texture scale on the biggest consumers below, or make them smaller\n");
 	}
 	else

@@ -1,59 +1,242 @@
 ![Banner](media/banner.png)
 
-<sub>Half-Life engine map compile tools, based on Vluzacn's ZHLT v34 with code contributions from various contributors. Based on Valve's version, modified with permission.</sub>
+# ReSDHLT
 
----
+Map compile tools for GoldSrc, aimed squarely at Counter-Strike 1.6.
 
-## About this fork (ReSDHLT)
+This is a fork of [seedee/SDHLT](https://github.com/seedee/SDHLT), which is itself
+descended from Vluzacn's ZHLT and from Valve's original tools. The goal here is
+narrow. Compiles should be faster, the output should be reproducible, and when a
+map is broken the compiler should say what is broken and where, instead of
+leaving a pointfile and a shrug.
 
-**ReSDHLT** is a fork of [seedee/SDHLT](https://github.com/seedee/SDHLT) aimed at
-compile performance, correctness and map FPS for **Counter-Strike 1.6**.
+Everything claimed below was measured on real maps. The numbers, including the
+ones that came out negative, live in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
-Fixes so far target the threading layer and the build configuration, where the
-upstream defaults left significant performance on the table:
+## Installing
 
-| Fix | Effect |
-|---|---|
-| Linux thread autodetection | Linux builds used 1 thread unless `-threads` was passed; the autodetect branch was dead code |
-| Win32 >32 processor fallback | CPUs with more than 32 logical processors ran single-threaded |
-| `-threads` bounds check | `-threads 5000` crashed with a stack buffer overflow |
-| CMake `-O` level | Release builds were silently downgraded from `-O3` to `-O2` |
-| CMake build type | Unset `CMAKE_BUILD_TYPE` produced unoptimised binaries |
-| Reproducible output | Two compiles of one map produced different BSPs; CSG numbered planes and ordered faces by thread timing |
-| Skylight sampling | ~96% of RAD's rays came from the skylight loop at a needlessly fine level; `-skylevel` now exposes it and defaults to 6, **~1.65x faster RAD** |
+Download the latest Windows package from
+[Releases](https://github.com/metita/ReSDHLT/releases) and unzip it anywhere.
+Inside you get `resdhlt-gui.exe` and a `tools/` folder.
 
-### GUI
+If you use the GUI, that is the whole installation. Open it, point it at your
+`.map`, press compile.
 
-`gui/` is a dark-theme map compiler front-end in Rust (egui): pick a map, pick a
-preset, hit compile, watch the log. Every option carries a tooltip explaining
-what it does and what to use, and a "what to always do" tab summarising the
-measured recommendations.
+If you compile from an editor such as J.A.C.K. or Hammer, open its compile
+configuration and set the four tool paths to `sdHLCSG.exe`, `sdHLBSP.exe`,
+`sdHLVIS.exe` and `sdHLRAD.exe` from `tools/`. Then add `tools/sdhlt.wad` to your
+WAD list, which is required for the tool textures to work, and `tools/sdhlt.fgd`
+to your FGD list.
 
-```sh
-cd gui && cargo run --release
+## What this fork changes
+
+### Compiles are faster
+
+RAD is over 95% of a compile, so that is where the work went.
+
+The default sky sampling level dropped from 7 to 6. That alone is about **1.65x
+faster RAD** for a worst case difference of 1/255 on a single luxel. Pass
+`-skylevel 7` to get upstream lighting back exactly.
+
+On top of that, a series of changes to the lighting inner loops takes another
+5 to 13% off RAD's CPU time depending on the map. Samples whose PVS cannot reach
+any sky brush now skip the sky loop instead of casting thousands of rays that
+were always going to be occluded. The BSP walk in `TestLine_r` iterates instead
+of recursing on its tail positions, which matters because it is entered around
+1.85 billion times per map. Ray tests against opaque entities check one bounding
+box for the whole list before walking it. The sample interpolation works out a
+phong normal once per sample rather than once per candidate patch, and reuses its
+scratch buffers per thread rather than allocating about 1.2 million times per
+map. Every one of those was verified to produce a byte identical `.bsp`.
+
+RAD is also built with AVX2 by default, worth another 4 to 5%. Read the warning
+under [Building](#building-from-source) before you hand those binaries to someone
+whose CPU you do not know.
+
+Threading was broken in ways that cost far more than any of the above. Linux
+builds ran single threaded unless you passed `-threads` explicitly. Windows
+machines with more than 32 logical processors fell back to one thread. Passing
+`-threads 5000` overflowed a stack buffer and crashed. All three are fixed, and
+`koth_sandy` went from 2.88s to 1.71s purely by using the cores that were already
+there.
+
+### The same map gives the same file
+
+Two compiles of one map used to produce different BSP files, because CSG numbered
+planes and ordered faces by whichever thread finished first. Compiles are now
+reproducible by default, which is what makes "verified byte identical" a
+meaningful statement anywhere in this repository. Pass `-nodeterministic` to CSG
+if you want the old behaviour back.
+
+### Broken maps say what is broken
+
+**Leaks point at the hole.** The classic pointfile was a side effect of the
+outside flood fill. It recorded whatever order the recursion happened to unwind
+in, so it wanders across the map, doubles back, and never marks the place where
+the inside actually opens onto the void. ReSDHLT builds the trail separately once
+the leak is proved: a shortest path over the portal graph from the leaked entity
+to the outside, simplified so the `.lin` file is a handful of clean segments. The
+hole itself gets its coordinates printed and a dense marker star written into the
+`.pts`, so it cannot be missed in the editor. Every hull that leaks is reported
+once at the end instead of repeating the same warning four times. `-allleaks`
+surveys the map and marks every hole, so a leaky map can be sealed in one pass
+through the editor rather than one hole per compile.
+
+**Lightmap atlas overflow is caught before the lighting runs.** GoldSrc packs
+every lit face into 64 pages of 128x128 luxels and aborts the map load with
+`AllocBlock: full` when they do not fit. That used to be discovered after a full
+compile, or in game. RAD now runs the engine's own allocator up front. Past 95%
+of the budget it prints a breakdown by texture ranked by lightmap footprint, so
+the textures worth rescaling are named:
+
+```
+!!! ERROR: LIGHTMAP ATLAS OVERFLOW - map exceeds the engine's 64 page limit
+    usage    71 / 64 pages (111%)
+    cause    too many lightmapped luxels, so the engine aborts with "AllocBlock: full"
+    action   raise the texture scale on the biggest consumers below, or make them smaller
+
+    Lightmap atlas budget by texture (top consumers):
+      texture                  faces       luxels  % budget
+      --------------------------------------------------------------
+      dev_r3_cs2y2             2,258      242,850     72.0%
+      dev_c3_dhmsl0            1,702      119,917     36.6%
 ```
 
-Note: the GUI is much less tested than the rest of this repository - it builds,
-but has not been exercised on a real compile. See `gui/README.md`.
+`-lmoptimize` in BSP goes one step further and reorders faces so the allocator
+wastes fewer pages. It measures three legal orders against the engine's own
+packer and keeps the best, so it can never come out worse than before. It is off
+by default, which keeps the default output byte identical to previous versions.
 
-### Documentation
+**`-texchart` in CSG reports what each texture costs the BSP.** Useful when you
+are hunting for the thing that blew up your texture data or your face count.
 
-- `docs/FPS_Y_TOOL_TEXTURES.md` - how to actually lower `wpoly` and raise FPS. Start
-  here if you make maps: the compiler cannot do this for you, and this is the
-  largest lever that exists.
-- `docs/MERGE_DE_ENTIDADES.md` - `-mergeentities`, which folds equivalent static
-  brush entities into one so a field of identical `func_illusionary` bushes stops
-  costing one BSP model each.
-- `docs/PERFILAR_RAD.md` - how to profile RAD on your own machine (it is >95% of
-  compile time), what is already ruled out, and where a real win would come from.
-- `docs/BENCHMARKS.md` - every measurement taken, including the negative results
-  (`-O3` and LTO show no measurable gain; RAD profiling was inconclusive; face
-  merging has 0.7% headroom and was left alone).
-- `ANALISIS_MEJORAS.md` - full technical analysis and remaining roadmap.
+### Optional GPU lighting
 
-### Measuring your own changes
+`-gpu` runs RAD's direct light gathering as Vulkan compute. Whether it helps
+depends entirely on how many direct lights the map has, because that is the
+dimension a GPU parallelises over. Same room, same settings, only the light count
+changing, on a GTX 1060 against six CPU threads with `-extra`:
 
-`scripts/compilebench.py` times a full CSG/BSP/VIS/RAD compile and fingerprints
+| lights | CPU | `-gpu` | speedup |
+|---:|---:|---:|---|
+| 1 | 0.66s | 1.32s | 0.50x, slower |
+| 256 | 1.59s | 1.29s | 1.23x |
+| 512 | 2.27s | 1.31s | 1.73x |
+| 1024 | 3.91s | 1.72s | 2.27x |
+
+CPU time grows linearly with the light count, because every sample walks the
+lights its PVS can see one at a time. Time on the device barely moves across a
+1024x increase. The crossover sits around 150 to 200 lights, so a heavily lit map
+gains and a map with a single `light_environment` loses.
+
+The output is byte identical to the CPU path on almost everything measured. The
+one exception differed by a single byte in 95,982, by one step out of 255,
+because the kernel normalises in float. It declines and hands the work back to
+the CPU, saying why, when the map has opaque entities, studio model shadows, more
+light styles than the kernel has slots, a BSP deeper than its traversal stack, or
+when no Vulkan driver is present.
+
+It is off by default. Building it needs nothing extra, since the Khronos headers
+and the compiled SPIR-V are both in the tree and the Vulkan loader is opened by
+name at runtime.
+
+### A front end that explains itself
+
+`gui/` is a dark theme compiler front end written in Rust with egui. Pick a map,
+pick a preset, press compile, watch the log. Every option carries a tooltip
+saying what it does and when to use it, and there is a tab summarising the
+recommendations that the benchmarks actually support.
+
+It updates itself from GitHub Releases. The check runs on launch, installs what
+it finds without asking, and never runs while a compile is in progress. The menu
+has a switch to turn all of that off.
+
+```sh
+cd gui
+cargo run --release
+```
+
+### Other fixes worth knowing about
+
+`BEVELHINT` never did anything. The brush parser tested for it in a place it
+could not reach, so a texture people had been using for years was silently inert.
+It works now, and `sdhlt.fgd` documents it along with `SOLIDHINT`.
+
+`zhlt_embedlightmap` used to break every surface GoldSrc identifies by texture
+name. Baking renames the texture, so water stopped waving, conveyors stopped
+scrolling, and transparent surfaces stopped being transparent. The baked names
+now preserve the prefix the engine looks for. The same feature also produces 24
+to 34% less texture data than it used to.
+
+CSG accepts 512 WAD paths instead of 128. The old ceiling is easy to hit with a
+large texture library, and CSG aborted rather than ignoring the excess.
+
+## Flags this fork adds
+
+| Tool | Flag | What it does |
+|---|---|---|
+| CSG | `-texchart` | Report what each texture costs the BSP |
+| CSG | `-mergeentities` | Fold equivalent static brush entities into one |
+| CSG | `-nodeterministic` | Restore the old thread ordered, irreproducible output |
+| BSP | `-lmoptimize` | Reorder faces to waste fewer lightmap atlas pages |
+| BSP | `-allleaks` | Mark every hole, not just the first one found |
+| RAD | `-skylevel N` | Sky sampling fineness, 4 to 8, default 6 |
+| RAD | `-gpu` | Gather direct lighting with Vulkan compute |
+| RAD | `-gpuadapter N` | Pick the Vulkan device by index |
+| RAD | `-noallocblockcheck` | Compile even when the map overflows the lightmap atlas |
+| RAD | `-profile` | Report where RAD spends its time, no external profiler needed |
+
+## Building from source
+
+```sh
+cmake -B build -S .
+cmake --build build -j
+```
+
+Binaries land in `tools/`. The build defaults to Release, because an unset
+`CMAKE_BUILD_TYPE` used to produce unoptimised tools that were several times
+slower for no visible reason.
+
+| Option | Default | What it is for |
+|---|---|---|
+| `SDHLT_ARCH` | `avx2` | Instruction set for RAD. Set it empty for a portable build |
+| `SDHLT_ARCH_ALL` | `OFF` | Apply the above to CSG, BSP and VIS as well. Read below first |
+| `SDHLT_GPU` | `ON` | Build the Vulkan backend behind `-gpu` |
+| `SDHLT_LTO` | `OFF` | Link time optimisation |
+| `SDHLT_PROFILE` | `OFF` | Counters inside the ray casting functions |
+
+Two warnings about `SDHLT_ARCH`. An AVX2 build will not start at all on a CPU
+older than roughly 2013, and the failure is a silent crash rather than a message,
+so build with `-DSDHLT_ARCH=` for binaries you hand to strangers. And
+`SDHLT_ARCH_ALL` is off for a reason: building CSG, BSP and VIS with AVX2 changes
+their floating point results, which on `koth_sandy` produced a `.bsp` whose vis
+data made RAD abort. RAD only writes light data, so it is the safe one to
+vectorise.
+
+Editing a compute shader under `src/sdhlt/sdHLRAD/gpu/shaders/` means
+regenerating the embedded SPIR-V with `python scripts/gen_spirv.py`, which needs
+`glslc` or `glslang` on the PATH. Nobody else needs either.
+
+## Documentation
+
+- [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) is the important one. Every
+  measurement taken, including the ideas that were tried and abandoned, with
+  enough detail to reproduce them.
+- [`docs/FPS_Y_TOOL_TEXTURES.md`](docs/FPS_Y_TOOL_TEXTURES.md) covers how to
+  actually lower `wpoly` and raise in game FPS. Start here if you make maps,
+  because the compiler cannot do this part for you and it is the largest lever
+  there is.
+- [`docs/PERFILAR_RAD.md`](docs/PERFILAR_RAD.md) explains how to profile RAD on
+  your own hardware and what is already ruled out.
+- [`docs/MERGE_DE_ENTIDADES.md`](docs/MERGE_DE_ENTIDADES.md) covers
+  `-mergeentities`.
+- [`CHANGELOG.md`](CHANGELOG.md) has the full history.
+
+Some documents are in Spanish. That is what the people who use this fork read.
+
+## Measuring your own changes
+
+`scripts/compilebench.py` times a full CSG, BSP, VIS and RAD run and fingerprints
 every BSP lump, so a change can be shown not to alter the output:
 
 ```sh
@@ -61,88 +244,42 @@ python3 scripts/compilebench.py --tools tools --map yourmap.map --runs 3
 python3 scripts/compilebench.py --compare before.json after.json
 ```
 
-`scripts/bspcheck.py` validates the geometry of a compiled BSP - planarity,
-convexity, degenerate faces, surface area, and how many face pairs could still
-be merged:
+`scripts/bspcheck.py` validates a compiled BSP for planarity, convexity,
+degenerate faces and surface area:
 
 ```sh
 python3 scripts/bspcheck.py yourmap.bsp
 ```
 
-**One deliberate difference from upstream:** RAD defaults to `-skylevel 6`
-instead of 7. That is ~1.65x faster for a maximum per-luxel difference of
-1/255. `-skylevel 7` reproduces upstream's lighting exactly.
+## Credits
 
-RAD carries its own profiler, so no external tooling is needed:
+This fork exists because other people did the hard part first.
 
-```sh
-sdHLRAD -profile -threads 1 yourmap          # phase-level timing
-cmake -B build -S . -DSDHLT_PROFILE=ON       # adds inner ray-casting counters
-```
+**[seedee](https://github.com/seedee)** maintains
+[SDHLT](https://github.com/seedee/SDHLT), which is what ReSDHLT forked from and
+what most of this codebase still is. Studio model shadows, `BEVELHINT`,
+`SPLITFACE`, `info_portal`, the `%` minlight flag, `-worldextent` and the portal
+file handling for J.A.C.K. are all his work. Thanks for the base and for keeping
+these tools alive.
 
-Compiles are reproducible by default, so two runs on the same map yield an
-identical BSP. Pass `-nodeterministic` to CSG for the old behaviour.
+**[speedrun16dev](https://github.com/speedrun-16)** wrote
+[hltools](https://github.com/speedrun-16/hltools), a modern GoldSrc toolchain
+written from scratch. The Vulkan compute backend behind `-gpu`, the leak
+diagnostics rework and the lightmap atlas budget check in this fork were all
+ported from there, with the design intact. hltools is GPL-2.0 like this project,
+and the port is documented in
+[`src/sdhlt/sdHLRAD/gpu/THIRD_PARTY.md`](src/sdhlt/sdHLRAD/gpu/THIRD_PARTY.md).
+If you are starting fresh rather than maintaining an old pipeline, go look at
+hltools first.
 
-### Building
+Further back stand **Vluzacn**, whose ZHLT v34 is the ancestor of every tool in
+this family, **Sean "Zoner" Cavanaugh**, and **Valve**, whose original compile
+tools were released with permission.
 
-```sh
-cmake -B build -S .          # defaults to Release
-cmake --build build -j
-# optional: link time optimisation
-cmake -B build -S . -DSDHLT_LTO=ON
-```
+## License
 
-Binaries land in `tools/`.
+GPL-2.0, inherited from ZHLT and SDHLT. See [`LICENSE.md`](LICENSE.md).
 
----
-
-
-New features include shadows from studiomodels, new entities, additional tool textures, ability to extend world size limits, portal file optimisation for J.A.C.K. map editor and minor algorithm optimization.
-
-## How to install
-
-1. Open the configuration dialog of your map editor or batch compiler.
-2. Set CSG, BSP, VIS, RAD tool paths to *sdHLCSG.exe*, *sdHLBSP.exe*, *sdHLVIS.exe*, *sdHLRAD.exe*, use the *_x64.exe* editions if running on 64-bit.  
-3. Add *sdhlt.wad* into your wad list. This is required to compile maps.
-4. Add *sdhlt.fgd* into your fgd list.
-
-The main benefit of the 64-bit version is no memory allocation failures, because the 64-bit tools have access to more than 2GB of system memory.
-
-## Features
-
-### Studiomodel shadows
-
-Entities with a `model` keyvalue, such as *env_sprite* or *cycler_sprite*, support the use of `zhlt_studioshadow 1` to flag the studiomodel as opaque to lighting. Additionally, `zhlt_shadowmode n` is used to control the shadow tracing mode.  
-The default `1` will trace for each triangle and supports transparent textures.  
-Setting `2` doesn't support transparency, but it traces the planes bbox for each triangle, the slowest but usually higher quality for some models.  
-Setting `0` disables tracing and uses the mesh bbox instead.
-
-To implement these into your own fgd file for SmartEdit, use the template at the top of *sdhlt.fgd*. If the new shadow covers the origin and makes it too dark, set a custom `light_origin` on the entity or move the mesh origin point externally.
-
-### Entities
-
-- *info_portal* and *info_leaf* ared used to create a portal from the leaf the *info_portal* is inside, to the selected leaf the *info_leaf* is inside. Forces target leaf to be visible from the current one, making all entities visible.
-- *info_minlights* used to set minlights for textures, works on world geometry too. Works similarly to `_minlight` but per-texture.
-
-### Textures
-
-- Support for `%` texture flag, sets the minlight for this texture. **%texname** alone is equivalent to `_minlight 1.0`, while **%`#`texname** where **`#`** is an integer in a range of `0-255`.
-- **BEVELHINT** texture, which acts like **SOLIDHINT** and **BEVEL**. Eliminates unnecessary face subdivision and bevels clipnodes at the same time. Useful on complex shapes such as terrain, spiral staircase clipping, etc.
-- **SPLITFACE** texture. Brushes with this texture will subdivide faces they touch along their edges, similarly to `zhlt_chopdown`.
-- **cur_tool** textures, which act like **CONTENTWATER** and *func_pushable* with a speed of `2048 units/s` in -Y. This texture is always fullbright.
-
-### Compile parameters
-
-- `-pre25` RAD parameter overrides light clipping threshold limiter to `188`. Use this when creating maps for the legacy pre-25th anniversary engine without worrying about other parameters.
-- `-extra` RAD parameter now sets `-bounce 12` for a higher quality of lighting simulation.
-- `-worldextent n` CSG parameter. Extends map geometry limits beyond `+/-32768`.
-- Portal file reformatting for J.A.C.K. map editor, allows for importing the prt file into the editor directly after VIS. Use `-nofixprt` VIS parameter to disable.
-- `-nowadautodetect` CSG parameter. Wadautodetect is now true by default regardless of settings.
-- `-nostudioshadow` RAD parameter to ignore `zhlt_studioshadow` on studiomodels.
-
-## Planned
-- **BLOCKLIGHT** texture, cast shadows without generating faces or cliphulls.
-- Optimization for `BuildFacelights` and `LeafThread`
-- Res file creation for servers
-- Split concerns into their own libraries instead of repeating infrastructure and util code
-- Full tool texture documentation
+The Vulkan headers vendored under `src/sdhlt/sdHLRAD/gpu/vulkan/` and
+`src/sdhlt/sdHLRAD/gpu/vk_video/` are unmodified Khronos headers under
+Apache-2.0 or MIT.
