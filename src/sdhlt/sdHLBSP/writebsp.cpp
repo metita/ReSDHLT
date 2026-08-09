@@ -10,7 +10,9 @@
 //  BeginBSPFile
 //  FinishBSPFile
 
+#include <algorithm>
 #include <map>
+#include <vector>
 
 typedef std::map< int, int > PlaneMap;
 static PlaneMap gPlaneMap;
@@ -582,6 +584,338 @@ void            BeginBSPFile()
 }
 
 // =====================================================================================
+//  OptimizeFaceOrder
+//      The engine packs face lightmaps into its 64 atlas pages in face order,
+//      first fit, and never backtracks. That makes the order the faces happen
+//      to be written in worth a few pages on a full map: feeding the allocator
+//      the big rectangles first leaves less unusable space behind the small
+//      ones.
+//
+//      Only the order changes. Geometry, texture scale and lightmap resolution
+//      are untouched, and faces stay inside the node range that owns them, so
+//      the tree is still valid; node->firstface and the marksurface table are
+//      remapped to follow. Three legal orders are tried against the engine's
+//      own allocator and the one needing the fewest pages wins, so this can
+//      never make a map worse than it already was.
+//
+//      Off by default (-lmoptimize): the default build stays byte-identical to
+//      what previous versions produced.
+// =====================================================================================
+typedef struct
+{
+	bool			lightmapped;
+	long long		area;
+	int				longest;
+	int				shortest;
+	int				width;
+	int				height;
+}
+faceatlassize_t;
+
+static int CountAtlasPages (const std::vector< int > &order, const std::vector< faceatlassize_t > &sizes)
+{
+	// The engine's allocator, exactly: a skyline per page, first fit, lowest
+	// resulting height wins. The "< BLOCK_WIDTH - width" bound is Quake's own
+	// off-by-one and is deliberately reproduced.
+	const int BLOCK_WIDTH = 128;
+	const int BLOCK_HEIGHT = 128;
+	std::vector< std::vector< int > > pages;
+	size_t k;
+	for (k = 0; k < order.size (); k++)
+	{
+		const faceatlassize_t &size = sizes[order[k]];
+		if (!size.lightmapped)
+		{
+			continue;
+		}
+		if (size.width < 1 || size.height < 1 || size.width >= BLOCK_WIDTH || size.height > BLOCK_HEIGHT)
+		{
+			continue; // CountBlocks warns about these; they never reach the atlas
+		}
+		bool placed = false;
+		size_t p;
+		for (p = 0; p < pages.size () && !placed; p++)
+		{
+			std::vector< int > &page = pages[p];
+			int best = BLOCK_HEIGHT;
+			int bestx = 0;
+			int i, j;
+			for (i = 0; i < BLOCK_WIDTH - size.width; i++)
+			{
+				int height = 0;
+				for (j = 0; j < size.width; j++)
+				{
+					if (page[i + j] >= best)
+						break;
+					if (page[i + j] > height)
+						height = page[i + j];
+				}
+				if (j == size.width)
+				{
+					bestx = i;
+					best = height;
+				}
+			}
+			if (best + size.height > BLOCK_HEIGHT)
+			{
+				continue;
+			}
+			for (i = 0; i < size.width; i++)
+			{
+				page[bestx + i] = best + size.height;
+			}
+			placed = true;
+		}
+		if (!placed)
+		{
+			pages.push_back (std::vector< int > (BLOCK_WIDTH, 0));
+			std::vector< int > &page = pages.back ();
+			int i;
+			for (i = 0; i < size.width; i++)
+			{
+				page[i] = size.height;
+			}
+		}
+	}
+	return (int)pages.size ();
+}
+
+static void OptimizeFaceOrder ()
+{
+	if (g_numfaces < 2)
+	{
+		return;
+	}
+	if (g_numfaces > 65535)
+	{
+		// node->firstface is an unsigned short; rewriting it would truncate.
+		return;
+	}
+
+	std::vector< faceatlassize_t > sizes ((size_t)g_numfaces);
+	int i;
+	for (i = 0; i < g_numfaces; i++)
+	{
+		dface_t *f = &g_dfaces[i];
+		int texinfo = ParseTexinfoForFace (f);
+		if (texinfo < 0 || texinfo >= g_numtexinfo)
+		{
+			return; // not something we understand; leave the order alone
+		}
+		const char *name = GetTextureByNumber (texinfo);
+		faceatlassize_t &size = sizes[i];
+		size.lightmapped = strncmp (name, "sky", 3)
+			&& name[0] != '!'
+			&& strncasecmp (name, "water", 5)
+			&& strncasecmp (name, "laser", 5)
+			&& !(g_texinfo[texinfo].flags & TEX_SPECIAL);
+		int mins[2];
+		int maxs[2];
+		GetFaceExtents (i, mins, maxs);
+		size.width = maxs[0] - mins[0] + 1;
+		size.height = maxs[1] - mins[1] + 1;
+		size.area = (long long)size.width * size.height;
+		size.longest = qmax (size.width, size.height);
+		size.shortest = qmin (size.width, size.height);
+	}
+
+	// Candidate 1: what we would have written anyway.
+	std::vector< int > original ((size_t)g_numfaces);
+	for (i = 0; i < g_numfaces; i++)
+	{
+		original[i] = i;
+	}
+
+	// Candidate 2: biggest first inside each node's own face range.
+	std::vector< int > sorted = original;
+	for (i = 0; i < g_numnodes; i++)
+	{
+		size_t first = g_dnodes[i].firstface;
+		size_t count = g_dnodes[i].numfaces;
+		if (count < 2)
+		{
+			continue;
+		}
+		if (first > (size_t)g_numfaces || count > (size_t)g_numfaces - first)
+		{
+			return;
+		}
+		std::stable_sort (sorted.begin () + first, sorted.begin () + first + count,
+			[&sizes](int a, int b)
+			{
+				const faceatlassize_t &l = sizes[a];
+				const faceatlassize_t &r = sizes[b];
+				if (l.lightmapped != r.lightmapped) return l.lightmapped > r.lightmapped;
+				if (l.area != r.area) return l.area > r.area;
+				if (l.longest != r.longest) return l.longest > r.longest;
+				return l.shortest > r.shortest;
+			});
+	}
+
+	// Candidate 3: candidate 2, plus the node blocks themselves reordered
+	// biggest-first inside each model. This one moves node->firstface, so the
+	// original values are kept to put back if it loses.
+	std::vector< int > grouped = sorted;
+	std::vector< unsigned short > firstfaces ((size_t)g_numnodes);
+	for (i = 0; i < g_numnodes; i++)
+	{
+		firstfaces[i] = g_dnodes[i].firstface;
+	}
+	bool groupedvalid = true;
+	{
+		typedef struct { int node; size_t first; size_t count; long long area; } nodegroup_t;
+		int m;
+		for (m = 0; m < g_nummodels && groupedvalid; m++)
+		{
+			const dmodel_t *model = &g_dmodels[m];
+			if (model->firstface < 0 || model->numfaces < 1)
+			{
+				continue;
+			}
+			size_t modelfirst = (size_t)model->firstface;
+			size_t modelcount = (size_t)model->numfaces;
+			if (modelfirst > (size_t)g_numfaces || modelcount > (size_t)g_numfaces - modelfirst)
+			{
+				groupedvalid = false;
+				break;
+			}
+			if (modelcount < 2)
+			{
+				continue;
+			}
+			std::vector< unsigned char > covered (modelcount, 0);
+			std::vector< nodegroup_t > groups;
+			for (i = 0; i < g_numnodes; i++)
+			{
+				size_t first = g_dnodes[i].firstface;
+				size_t count = g_dnodes[i].numfaces;
+				if (!count || first < modelfirst || first >= modelfirst + modelcount)
+				{
+					continue;
+				}
+				if (count > modelfirst + modelcount - first)
+				{
+					groupedvalid = false; // a node straddling two models
+					break;
+				}
+				nodegroup_t group;
+				group.node = i;
+				group.first = first;
+				group.count = count;
+				group.area = 0;
+				size_t k;
+				for (k = first; k < first + count; k++)
+				{
+					if (covered[k - modelfirst])
+					{
+						groupedvalid = false; // two nodes claim the same face
+						break;
+					}
+					covered[k - modelfirst] = 1;
+					group.area += sizes[grouped[k]].area;
+				}
+				if (!groupedvalid)
+				{
+					break;
+				}
+				groups.push_back (group);
+			}
+			if (!groupedvalid)
+			{
+				break;
+			}
+			size_t k;
+			for (k = 0; k < modelcount; k++)
+			{
+				if (!covered[k])
+				{
+					groupedvalid = false; // a face no node owns: not ours to move
+					break;
+				}
+			}
+			if (!groupedvalid)
+			{
+				break;
+			}
+			std::stable_sort (groups.begin (), groups.end (),
+				[](const nodegroup_t &l, const nodegroup_t &r) { return l.area > r.area; });
+			std::vector< int > reordered;
+			reordered.reserve (modelcount);
+			size_t next = modelfirst;
+			for (k = 0; k < groups.size (); k++)
+			{
+				g_dnodes[groups[k].node].firstface = (unsigned short)next;
+				reordered.insert (reordered.end (), grouped.begin () + groups[k].first,
+					grouped.begin () + groups[k].first + groups[k].count);
+				next += groups[k].count;
+			}
+			if (reordered.size () != modelcount)
+			{
+				groupedvalid = false;
+				break;
+			}
+			std::copy (reordered.begin (), reordered.end (), grouped.begin () + modelfirst);
+		}
+	}
+
+	const std::vector< int > *best = &original;
+	int bestpages = CountAtlasPages (original, sizes);
+	const int originalpages = bestpages;
+	int pages = CountAtlasPages (sorted, sizes);
+	if (pages < bestpages)
+	{
+		bestpages = pages;
+		best = &sorted;
+	}
+	if (groupedvalid)
+	{
+		pages = CountAtlasPages (grouped, sizes);
+		if (pages < bestpages)
+		{
+			bestpages = pages;
+			best = &grouped;
+		}
+	}
+	if (best != &grouped)
+	{
+		for (i = 0; i < g_numnodes; i++) // undo candidate 3's firstface writes
+		{
+			g_dnodes[i].firstface = firstfaces[i];
+		}
+	}
+	if (best == &original)
+	{
+		Log ("Lightmap atlas order: %d pages, already the best of the orders tried\n", originalpages);
+		return;
+	}
+
+	for (i = 0; i < g_nummarksurfaces; i++)
+	{
+		if (g_dmarksurfaces[i] >= (unsigned short)g_numfaces)
+		{
+			return; // bogus reference: check before anything is rewritten
+		}
+	}
+	std::vector< int > newforold ((size_t)g_numfaces);
+	std::vector< dface_t > reordered ((size_t)g_numfaces);
+	for (i = 0; i < g_numfaces; i++)
+	{
+		int old = (*best)[i];
+		reordered[i] = g_dfaces[old];
+		newforold[old] = i;
+	}
+	for (i = 0; i < g_nummarksurfaces; i++)
+	{
+		g_dmarksurfaces[i] = (unsigned short)newforold[g_dmarksurfaces[i]];
+	}
+	for (i = 0; i < g_numfaces; i++)
+	{
+		g_dfaces[i] = reordered[i];
+	}
+	Log ("Lightmap atlas order: %d pages, down from %d\n", bestpages, originalpages);
+}
+
+// =====================================================================================
 //  FinishBSPFile
 // =====================================================================================
 void            FinishBSPFile()
@@ -831,6 +1165,11 @@ void            FinishBSPFile()
 		free (clipnodes);
 	}
 	
+	if (g_lmoptimize)
+	{
+		OptimizeFaceOrder ();
+	}
+
 #ifdef PLATFORM_CAN_CALC_EXTENT
 	WriteExtentFile (g_extentfilename);
 #else

@@ -86,6 +86,23 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
   (`_setmaxstdio`) on Windows to keep the handles available. Verified with a
   201-WAD compile
 
+### Added
+- RAD: the lightmap atlas budget is checked before any lighting work. GoldSrc
+  packs every lit face into 64 pages of 128x128 luxels and aborts the map load
+  with "AllocBlock: full" if they do not fit, which used to be discovered after
+  a full compile - or in game. RAD now runs the engine's own allocator up front,
+  and past 95% of the budget it prints a breakdown by texture ranked by lightmap
+  footprint, so the textures worth rescaling are named. Over the limit it is an
+  error; `-noallocblockcheck` compiles anyway
+- BSP: `-lmoptimize` reorders faces to waste fewer atlas pages. The engine packs
+  in face order, first fit, and never backtracks, so feeding it the big
+  rectangles first leaves less unusable space behind the small ones. Three legal
+  orders are measured against the engine's allocator and the best one is kept,
+  so it can never come out worse. Faces stay inside the node that owns them;
+  `node->firstface` and the marksurface table are remapped to follow. Geometry,
+  texture scale and lightmap resolution are untouched. Off by default: the
+  default build still writes byte-identical .bsp files
+
 ### Tried and rejected
 - Sampling the sky once per lightmap pixel instead of once per `-extra`
   subsample (`-fastsky`): measured **slower** than not doing it (12.0% vs 13.6%

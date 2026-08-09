@@ -368,6 +368,22 @@ extern int		ParseImplicitTexinfoFromTexture (int miptex);
 extern int		ParseTexinfoForFace (const dface_t *f);
 extern void		DeleteEmbeddedLightmaps ();
 
+// The engine's lightmap atlas: MAX_ALLOCBLOCK_PAGES pages, each one
+// BLOCK_WIDTH x BLOCK_HEIGHT luxels. Running out is fatal at map load
+// ("AllocBlock: full"), so the compile has to catch it instead.
+#define MAX_ALLOCBLOCK_PAGES 64
+
+typedef struct
+{
+	char			name[16];
+	int				faces;
+	long long		luxels;
+}
+texlmusage_t;
+
+extern int		CountBlocks ();
+extern bool		CheckAllocBlockBudget (int *pages_out);
+
 //
 // Entity Related Stuff
 //

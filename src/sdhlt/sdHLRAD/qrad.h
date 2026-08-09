@@ -469,6 +469,7 @@ extern vec3_t	g_jitter_hack;
 	extern int  g_skylevel;
 	extern int g_blockopaque;
 	extern bool g_drawpatch;
+	extern bool g_noallocblockcheck;
 	extern bool g_drawsample;
 	extern vec3_t g_drawsample_origin;
 	extern vec_t g_drawsample_radius;

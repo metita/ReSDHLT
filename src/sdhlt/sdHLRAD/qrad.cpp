@@ -111,6 +111,7 @@ vec_t g_texreflectgamma = DEFAULT_TEXREFLECTGAMMA;
 vec_t g_texreflectscale = DEFAULT_TEXREFLECTSCALE;
 bool g_bleedfix = DEFAULT_BLEEDFIX;
 bool g_drawpatch = false;
+bool g_noallocblockcheck = false;
 bool g_drawsample = false;
 vec3_t g_drawsample_origin = {0,0,0};
 vec_t g_drawsample_radius = 0;
@@ -2561,6 +2562,21 @@ static void     RadWorld()
     unsigned        i;
     unsigned        j;
 
+	// Before anything expensive: a map that overflows the engine's lightmap
+	// atlas will not load no matter how good the lighting is, and finding that
+	// out after a 40 minute RAD helps nobody. Costs milliseconds.
+	if (!g_noallocblockcheck)
+	{
+		int pages = 0;
+		if (CheckAllocBlockBudget (&pages))
+		{
+			Error ("Lightmap atlas overflow: %d of %d pages used.\n"
+				   "The engine would abort this map with \"AllocBlock: full\".\n"
+				   "Fix the textures listed above, or pass -noallocblockcheck to compile anyway.",
+				   pages, MAX_ALLOCBLOCK_PAGES);
+		}
+	}
+
     MakeBackplanes();
     MakeParents(0, -1);
     MakeTnodes(&g_dmodels[0]);
@@ -2732,6 +2748,7 @@ static void     Usage()
 	Log("    -nospread       : Disable sunlight spread angles for this compile\n");
     Log("    -nopaque        : Disable the opaque zhlt_lightflags for this compile\n\n");
 	Log("    -nostudioshadow : Disable opaque studiomodels, ignore zhlt_studioshadow for this compile\n\n");
+	Log("    -noallocblockcheck: Compile even when the map overflows the engine's lightmap atlas\n");
     Log("    -smooth #       : Set smoothing threshold for blending (in degrees)\n");
 	Log("    -smooth2 #      : Set smoothing threshold between different textures\n");
     Log("    -chop #         : Set radiosity patch size for normal textures\n");
@@ -3803,6 +3820,10 @@ int             main(const int argc, char** argv)
 		else if (!strcasecmp(argv[i], "-drawpatch"))
 		{
 			g_drawpatch = true;
+		}
+		else if (!strcasecmp(argv[i], "-noallocblockcheck"))
+		{
+			g_noallocblockcheck = true;
 		}
 		else if (!strcasecmp(argv[i], "-drawsample"))
 		{

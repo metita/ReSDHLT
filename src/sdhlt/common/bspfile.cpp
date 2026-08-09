@@ -8,6 +8,11 @@
 #include "scriplib.h"
 #include "blockmem.h"
 
+#include <algorithm>
+#include <map>
+#include <string>
+#include <vector>
+
 //=============================================================================
 
 int             g_max_map_miptex = DEFAULT_MAX_MAP_MIPTEX;
@@ -847,11 +852,16 @@ void DoAllocBlock (lightmapblock_t *blocks, int w, int h)
 		}
 	}
 }
-int CountBlocks ()
+// Walks the faces the same way the engine's atlas allocator does, and -- when
+// asked -- records how many luxels each texture is responsible for. The
+// breakdown is what turns "AllocBlock: full" from a dead end into an
+// actionable list of textures to rescale.
+static int CountBlocks_r (std::vector<texlmusage_t> *breakdown, long long *totalluxels)
 {
 #if !defined (PLATFORM_CAN_CALC_EXTENT) && !defined (SDHLRAD)
 	return -1; // otherwise GetFaceExtents will error
 #endif
+	std::map<std::string, size_t> texindex;
 	lightmapblock_t *blocks;
 	blocks = (lightmapblock_t *)malloc (sizeof (lightmapblock_t));
 	hlassume (blocks != NULL, assume_NoMemory);
@@ -894,7 +904,30 @@ int CountBlocks ()
 			Warning ("Bad surface extents %d/%d at position (%.0f,%.0f,%.0f)", extents[0], extents[1], point[0], point[1], point[2]);
 			continue;
 		}
-		DoAllocBlock (blocks, (extents[0] / TEXTURE_STEP) + 1, (extents[1] / TEXTURE_STEP) + 1);
+		int w = (extents[0] / TEXTURE_STEP) + 1;
+		int h = (extents[1] / TEXTURE_STEP) + 1;
+		DoAllocBlock (blocks, w, h);
+		if (breakdown)
+		{
+			std::string key (texname);
+			std::map<std::string, size_t>::iterator it = texindex.find (key);
+			if (it == texindex.end ())
+			{
+				texlmusage_t entry;
+				safe_strncpy (entry.name, texname, sizeof (entry.name));
+				entry.faces = 0;
+				entry.luxels = 0;
+				it = texindex.insert (std::make_pair (key, breakdown->size ())).first;
+				breakdown->push_back (entry);
+			}
+			texlmusage_t &usage = (*breakdown)[it->second];
+			usage.faces++;
+			usage.luxels += (long long)w * h;
+			if (totalluxels)
+			{
+				*totalluxels += (long long)w * h;
+			}
+		}
 	}
 	int count = 0;
 	lightmapblock_t *next;
@@ -908,6 +941,103 @@ int CountBlocks ()
 		free (blocks);
 	}
 	return count;
+}
+
+int CountBlocks ()
+{
+	return CountBlocks_r (NULL, NULL);
+}
+
+// =====================================================================================
+//  CheckAllocBlockBudget
+//      GoldSrc packs every lit face into MAX_ALLOCBLOCK_PAGES pages of
+//      BLOCK_WIDTH x BLOCK_HEIGHT luxels. Overflow is not a warning at runtime:
+//      the engine aborts the map load with "AllocBlock: full". Counting the
+//      pages up front costs milliseconds and saves the mapper the whole RAD
+//      run, so RAD calls this before it creates a single direct light.
+//      Returns true when the map is over the limit.
+// =====================================================================================
+bool CheckAllocBlockBudget (int *pages_out)
+{
+	std::vector<texlmusage_t> breakdown;
+	long long totalluxels = 0;
+	int numblocks = CountBlocks_r (&breakdown, &totalluxels);
+	if (pages_out)
+	{
+		*pages_out = numblocks;
+	}
+	if (numblocks <= 0)
+	{
+		return false; // nothing lit, or the extents are not available here
+	}
+
+	const int maxblocks = MAX_ALLOCBLOCK_PAGES;
+	const int warnblocks = (maxblocks * 95) / 100;
+	const bool overflow = numblocks > maxblocks;
+	if (numblocks <= warnblocks)
+	{
+		return false;
+	}
+
+	const long long budgetluxels = (long long)maxblocks * BLOCK_WIDTH * BLOCK_HEIGHT;
+	const double usagepct = numblocks * 100.0 / maxblocks;
+	if (overflow)
+	{
+		Log ("\n!!! ERROR: LIGHTMAP ATLAS OVERFLOW - map exceeds the engine's %d page limit\n", maxblocks);
+		Log ("    usage    %d / %d pages (%.0f%%)\n", numblocks, maxblocks, usagepct);
+		Log ("    cause    too many lightmapped luxels; the engine aborts with \"AllocBlock: full\"\n");
+		Log ("    action   raise the texture scale on the biggest consumers below, or make them smaller\n");
+	}
+	else
+	{
+		Warning ("lightmap atlas %.0f%% full (%d / %d pages) - approaching the engine limit", usagepct, numblocks, maxblocks);
+	}
+
+	// Biggest luxel footprint first: that is the list a mapper works down.
+	std::sort (breakdown.begin (), breakdown.end (),
+		[](const texlmusage_t &a, const texlmusage_t &b) { return a.luxels > b.luxels; });
+
+	const size_t show = 12;
+	int totalfaces = 0;
+	size_t i;
+	for (i = 0; i < breakdown.size (); i++)
+	{
+		totalfaces += breakdown[i].faces;
+	}
+	Log ("\n    Lightmap atlas budget by texture (top consumers):\n");
+	Log ("      %-20s %9s %12s  %8s\n", "texture", "faces", "luxels", "% budget");
+	Log ("      --------------------------------------------------------------\n");
+	for (i = 0; i < breakdown.size () && i < show; i++)
+	{
+		double pct = budgetluxels? breakdown[i].luxels * 100.0 / budgetluxels: 0.0;
+		Log ("      %-20s %9d %12lld   %6.1f%%\n", breakdown[i].name, breakdown[i].faces, breakdown[i].luxels, pct);
+	}
+	if (breakdown.size () > show)
+	{
+		long long restluxels = 0;
+		int restfaces = 0;
+		for (i = show; i < breakdown.size (); i++)
+		{
+			restluxels += breakdown[i].luxels;
+			restfaces += breakdown[i].faces;
+		}
+		double pct = budgetluxels? restluxels * 100.0 / budgetluxels: 0.0;
+		char label[32];
+		safe_snprintf (label, sizeof (label), "(%d others)", (int)(breakdown.size () - show));
+		Log ("      %-20s %9d %12lld   %6.1f%%\n", label, restfaces, restluxels, pct);
+	}
+	Log ("      --------------------------------------------------------------\n");
+	{
+		double pct = budgetluxels? totalluxels * 100.0 / budgetluxels: 0.0;
+		Log ("      %-20s %9d %12lld   %6.1f%%\n", "total", totalfaces, totalluxels, pct);
+	}
+	Log ("\n    Page usage can exceed the luxel share: the allocator leaves gaps between rectangles.\n\n");
+	// The caller aborts the compile right after an overflow, and Error() does
+	// not come back through here. Without this the whole report is still
+	// sitting in the stdout buffer when the process dies, so it reaches the
+	// log file and never the console the mapper is looking at.
+	fflush (stdout);
+	return overflow;
 }
 bool NoWadTextures ()
 {
@@ -1033,7 +1163,7 @@ void            PrintBSPFileSizes()
     int             numtextures = g_texdatasize ? ((dmiptexlump_t*)g_dtexdata)->nummiptex : 0;
     int             totalmemory = 0;
 	int numallocblocks = CountBlocks ();
-	int maxallocblocks = 64;
+	int maxallocblocks = MAX_ALLOCBLOCK_PAGES;
 	bool nowadtextures = NoWadTextures (); // We don't have this check at hlcsg, because only legacy compile tools don't empty "wad" value in "-nowadtextures" compiles.
 	char *wadvalue = FindWadValue ();
 
