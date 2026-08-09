@@ -205,6 +205,7 @@ set(RAD_SOURCES
 	${RAD_DIR}/meshtrace.cpp
     ${RAD_DIR}/nomatrix.cpp
     ${RAD_DIR}/progmesh.cpp
+    ${RAD_DIR}/gpu_gather.cpp
     ${RAD_DIR}/qrad.cpp
     ${RAD_DIR}/qradutil.cpp
     ${RAD_DIR}/sparse.cpp
@@ -224,6 +225,7 @@ set(RAD_HEADERS
 	${RAD_DIR}/list.h
 	${RAD_DIR}/meshdesc.h
 	${RAD_DIR}/meshtrace.h
+    ${RAD_DIR}/gpu_gather.h
     ${RAD_DIR}/qrad.h
 )
 
@@ -342,6 +344,24 @@ if (SDHLT_ARCH_FLAGS)
         target_compile_options(VIS PRIVATE ${SDHLT_ARCH_FLAGS})
         target_compile_options(RIPENT PRIVATE ${SDHLT_ARCH_FLAGS})
         message(WARNING "${CMAKE_PROJECT_NAME} > SDHLT_ARCH_ALL is on: CSG/BSP/VIS change their floating-point results, which has produced unusable .bsp files")
+    endif()
+endif()
+
+# RAD's -gpu: a Vulkan compute backend for the direct lighting gather.
+#
+# It costs nothing to build in and nothing to ship: the Vulkan loader is opened
+# by name at runtime, so a machine with no Vulkan driver simply gets the CPU
+# path and a warning. The Khronos headers and the compiled SPIR-V kernels are
+# both in the tree, so no Vulkan SDK is needed to build - only to regenerate a
+# kernel after editing its .comp (scripts/gen_spirv.py).
+option(SDHLT_GPU "Build the Vulkan compute backend for RAD's -gpu." ON)
+
+if (SDHLT_GPU)
+    target_sources(RAD PRIVATE ${RAD_DIR}/gpu/gpu.cpp)
+    target_compile_definitions(RAD PRIVATE SDHLT_GPU)
+    target_include_directories(RAD PRIVATE ${RAD_DIR}/gpu)
+    if (UNIX)
+        target_link_libraries(RAD PRIVATE ${CMAKE_DL_LIBS})
     endif()
 endif()
 

@@ -1,0 +1,68 @@
+// batched test_line kernel with traversal shared through trace_libglsl
+// this wrapper provides the buffers used by rad_gpu_trace_check
+// buffer structs use only scalar members on
+// purpose: std430 would align vec3/ivec2 members to 16/8 bytes and silently
+// break the tightly packed host side layouts in gpuh
+
+#version 450
+
+layout(local_size_x = 64) in;
+
+#extension GL_GOOGLE_include_directive : require
+#define TRACE_TNODE_BINDING 0
+#include "trace_lib.glsl"
+
+struct Segment
+{
+    float startX;
+    float startY;
+    float startZ;
+    float stopX;
+    float stopY;
+    float stopZ;
+};
+
+struct Result
+{
+    int contents;
+    int flags;
+    float skyhitX;
+    float skyhitY;
+    float skyhitZ;
+    int pad;
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer SegmentBuffer
+{
+    Segment segments[];
+};
+
+layout(std430, set = 0, binding = 2) writeonly buffer ResultBuffer
+{
+    Result results[];
+};
+
+layout(push_constant) uniform Params
+{
+    uint numSegments;
+};
+
+void main()
+{
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= numSegments)
+        return;
+
+    int flags = 0;
+    float hx, hy, hz;
+    int contents = traceLine(segments[idx].startX, segments[idx].startY, segments[idx].startZ,
+                             segments[idx].stopX, segments[idx].stopY, segments[idx].stopZ,
+                             hx, hy, hz, flags);
+
+    results[idx].contents = contents;
+    results[idx].flags = flags;
+    results[idx].skyhitX = hx;
+    results[idx].skyhitY = hy;
+    results[idx].skyhitZ = hz;
+    results[idx].pad = 0;
+}

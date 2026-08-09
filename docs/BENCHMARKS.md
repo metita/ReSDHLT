@@ -244,6 +244,10 @@ tarda **9.31 s**; los 13.3M de rayos de cielo a 7.47 Mrays/s son **1.79 s**, o s
 desventajas extra: el mismo techo del 19%, más transferencias, más dependencia de drivers, un fallback
 CPU obligatorio de por vida, y adiós al `.bsp` byte-idéntico que es como se valida todo en este fork.
 
+> La GPU se implementó igual después, para tener el número medido en vez del estimado. Ver §4.8: el
+> `.bsp` byte-idéntico sí se pudo conservar, la velocidad no. La estimación de acá era optimista por el
+> lado equivocado — el problema no resultó ser el techo del trazado sino el costo de la pasada extra.
+
 Lo que el número sí dice es dónde mirar: el **80% restante de RAD** no es trazado de rayos. Es el resto
 de `GatherSampleLight` (recorrido de la lista de luces, estilos, opacos), los transfers y el rebote.
 
@@ -253,6 +257,52 @@ serlo — `TestLine` resuelve `contents` por leaf (incluidas transiciones de agu
 lados de un plano casi coplanar vía `ON_EPSILON`, cosas que un BVH no tiene. Para medir **velocidad**
 sirve igual: el trabajo de traversal es el mismo orden. Si el resultado hubiese sido 10×, el paso
 siguiente habría sido resolver esa parte; con 1.06× no hace falta.
+
+### 4.8 GPU: implementado igual, y medido ⚠️
+
+§4.7 descartó la GPU por cálculo. Después se implementó de todas formas, portando el backend Vulkan de
+[speedrun-16/hltools](https://github.com/speedrun-16/hltools) (GPL-2.0), para tener el número real en vez
+de la estimación. Está en el árbol como `-gpu`, apagado por defecto.
+
+**Cómo funciona.** `BuildFacelights` corre dos veces. La primera (*collect*) intercepta cada llamada a
+`GatherSampleLight`, la anota como work item y tira el resto del trabajo de la cara. Después el kernel de
+cómputo evalúa todos los items juntos. La segunda pasada (*consume*) recorre exactamente el mismo camino
+de código y cada llamada lee su resultado guardado en vez de trazar. Todo lo que no es el gather —
+posición de muestras, blur del lmcache, rebotes, mezcla final — es el código CPU intacto.
+
+**Corrección: `.bsp` byte-idéntico.** Ese era el requisito, y se cumple. `ba_dust_island` y `ar_pokemon`,
+con y sin `-extra`, dan el mismo SHA-256 en CPU y en GPU. El kernel replica el orden de acumulación de la
+CPU (leaf ascendente, después la lista de cada leaf) y las ramas que no puede hacer bien — el *near
+branch* de los texlights, que necesita el winding del emisor y una integración de área — vuelven a la CPU
+y se resuelven con el código de referencia.
+
+**Velocidad: pierde.** GTX 1060 3GB contra Ryzen de 6 núcleos, 6 hilos, `ba_dust_island`, `-extra`:
+
+| | RAD total | de eso, en el device |
+|---|---|---|
+| CPU | **2.78 s** | — |
+| `-gpu` | 5.57 s | 1.9 s (1.054.380 muestras, 23 dispatches) |
+
+El problema es estructural, no de tuning. La pasada *collect* vuelve a hacer todo `BuildFacelights` menos
+el trazado, o sea ~1.8 s, y la *consume* otros ~1.8 s. Aunque el kernel tardara **cero**, el total serían
+~3.6 s contra los 2.78 s de la CPU. Y el kernel no tarda cero: tarda 1.9 s, más que el gather completo de
+la CPU.
+
+La razón por la que a hltools sí le rinde (3× en su mapa) es que su gather de CPU es más lento: este fork
+ya tiene el atajo de PVS de cielo (§4.5 y `SampleMayReachSky`), la caja única contra la lista de opacos, y
+AVX2. Con el gather de CPU ya barato, duplicar el resto de la fase cuesta más de lo que la GPU ahorra. El
+atajo de cielo se le pasó también al kernel — está en el work item — y no cambió el resultado en un mapa
+al aire libre, donde casi toda muestra ve cielo.
+
+**Qué haría falta para que gane.** Que la pasada *collect* no repita el trabajo caro: hoy corre
+`CalcPoints`, `CalcLightmap` y el blur por muestra sólo para generar la secuencia de llamadas. Separar la
+generación de llamadas del resto es un refactor grande de `BuildFacelights` y no está hecho.
+
+**Se deja igual.** Es opcional (`-gpu`), correcto, y cae al camino CPU con un aviso claro cuando el mapa
+tiene entidades opacas, sombras de modelos, más estilos de luz de los que el kernel maneja, un árbol BSP
+más profundo que su stack de traversal, o simplemente cuando no hay driver Vulkan. En hardware distinto —
+GPU más rápida contra CPU más lenta — el balance puede darse vuelta, y el número está acá para medirlo sin
+volver a escribirlo.
 
 ## 5. Fusión de caras: sin margen real (investigado a fondo)
 

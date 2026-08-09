@@ -1,5 +1,6 @@
 #include "qrad.h"
 #include "profiling.h"
+#include "gpu_gather.h"
 
 edgeshare_t     g_edgeshare[MAX_MAP_EDGES];
 vec3_t          g_face_centroids[MAX_MAP_EDGES]; // BUG: should this be [MAX_MAP_FACES]?
@@ -1605,6 +1606,44 @@ static directlight_t* directlights[MAX_MAP_LEAFS];
 static facelight_t facelight[MAX_MAP_FACES];
 static int      numdlights;
 
+// The GPU gather lives in its own file but needs three things that only exist
+// here. Handing them over is cheaper than moving the state or making it
+// public: the arrays stay static, and RAD without -gpu never calls any of it.
+directlight_t*  RadGpuDirectLights(int leafnum)
+{
+	return directlights[leafnum];
+}
+
+// Undoes what a collect-pass BuildFacelights allocated and accumulated, so the
+// consume pass can do it again for real.
+void            RadGpuResetFace(int facenum)
+{
+	facelight_t *fl = &facelight[facenum];
+	for (int k = 0; k < MAXLIGHTMAPS; k++)
+	{
+		if (fl->samples[k])
+		{
+			free (fl->samples[k]);
+			fl->samples[k] = NULL;
+		}
+	}
+	fl->numsamples = 0;
+	for (patch_t *patch = g_face_patches[facenum]; patch; patch = patch->next)
+	{
+		free (patch->totalstyle_all);
+		patch->totalstyle_all = NULL;
+		free (patch->samplelight_all);
+		patch->samplelight_all = NULL;
+		free (patch->totallight_all);
+		patch->totallight_all = NULL;
+		free (patch->directlight_all);
+		patch->directlight_all = NULL;
+		// AddSamplesToPatches accumulates the covered sample area straight onto
+		// the patch, and the consume run adds it again.
+		patch->samples = 0.0;
+	}
+}
+
 
 // =====================================================================================
 //  CreateDirectLights
@@ -2515,6 +2554,13 @@ static bool     SampleMayReachSky(const byte* const pvs)
 	return false;
 }
 
+bool            RadGpuSampleMayReachSky(const byte* const pvs)
+{
+	return SampleMayReachSky (pvs);
+}
+
+void            RadGpuTexToWorld(int surfacenum, vec3_t textoworld[2]);
+
 static void     CalcTexToWorld(int surfacenum, vec3_t textoworld[2])
 {
 	dface_t *f = &g_dfaces[surfacenum];
@@ -2536,6 +2582,11 @@ static void     CalcTexToWorld(int surfacenum, vec3_t textoworld[2])
 	}
 }
 
+void            RadGpuTexToWorld(int surfacenum, vec3_t textoworld[2])
+{
+	CalcTexToWorld (surfacenum, textoworld);
+}
+
 static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const vec3_t normal, vec3_t* sample
 								  , byte* styles
 								  , int step
@@ -2544,6 +2595,14 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 								  )
 {
     PROF_SCOPE(PROF_GATHERSAMPLELIGHT);
+	if (g_gpu_phase)
+	{
+		// -gpu: record the call, or replay its result. Same arguments, same
+		// place in the same loop - the CPU body below is what the kernel
+		// implements, so nothing here runs twice.
+		GpuGatherIntercept (pos, pvs, normal, sample, styles, step, miptex, texlightgap_surfacenum);
+		return;
+	}
     int             i;
     directlight_t*  l;
     vec3_t          delta;
@@ -3601,6 +3660,13 @@ void CalcLightmap (lightinfo_t *l, byte *styles)
 void            BuildFacelights(const int facenum)
 {
     PROF_SCOPE(PROF_BUILDFACELIGHTS);
+	if (g_gpu_phase)
+	{
+		// Which face's work items the intercept files this call under. It has
+		// to be the face being built, not the sample's own surface: near an
+		// edge a sample can belong to a neighbour another thread owns.
+		GpuGatherBeginFace (facenum);
+	}
     dface_t*        f;
 	unsigned char	f_styles[ALLSTYLES];
 	sample_t		*fl_samples[ALLSTYLES];

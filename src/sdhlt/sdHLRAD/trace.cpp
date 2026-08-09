@@ -5,6 +5,7 @@
 #include "winding.h"
 #include "qrad.h"
 #include "profiling.h"
+#include "gpu_gather.h"
 
 // #define      ON_EPSILON      0.001
 
@@ -305,6 +306,36 @@ void            MakeTnodes(dmodel_t* /*bm*/)
 #if 0 //debug. vluzacn
 	ViewTNode ();
 #endif
+}
+
+// The GPU gather traces the same tree the CPU does, so it needs the same
+// tnodes. They live here and nowhere else; this hands out a copy in the flat
+// layout the kernel's Tnode struct expects, rather than exposing the array.
+int             ExportTnodes(gputnode_t* out, int max)
+{
+    int count = (int)(tnode_p - tnodes);
+    if (!out)
+    {
+        return count;
+    }
+    if (count > max)
+    {
+        return -1;
+    }
+    for (int i = 0; i < count; i++)
+    {
+        const tnode_t* t = &tnodes[i];
+        gputnode_t* o = &out[i];
+        o->normal[0] = (float)t->normal[0];
+        o->normal[1] = (float)t->normal[1];
+        o->normal[2] = (float)t->normal[2];
+        o->dist = (float)t->dist;
+        o->type = (int)t->type;
+        o->children[0] = t->children[0];
+        o->children[1] = t->children[1];
+        o->pad = 0;
+    }
+    return count;
 }
 
 //==========================================================

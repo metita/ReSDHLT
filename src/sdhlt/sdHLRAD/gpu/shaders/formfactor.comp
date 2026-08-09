@@ -1,0 +1,197 @@
+// formfactorcomp - patch to patch transfer factors for the bounce stage
+// one thread = one
+// visible (receiver, emitter) pair from make_scales_item in
+// src/rad/transferscpp; the math mirrors that loop body exactly for the
+// no translucent / no customshadow case (the host guards those), including
+// the ray free calc_sight_area for pairs within the emitter range
+// vectornormalize parity needs shaderfloat64, like the gather kernel
+// pairs whose emitter winding exceeds max_wind come back as nan and the
+// host recomputes them with the reference code
+
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+
+layout(local_size_x = 64) in;
+
+const float ON_EPSILON = 0.04;
+const float NORMAL_EPSILON = 0.00001;
+const float MINIMUM_PATCH_DISTANCE = ON_EPSILON;
+const float PATCH_HUNT_OFFSET = 0.5;
+const float PI = 3.14159265358979323846;
+const int MAX_WIND = 32;
+
+struct PatchData
+{
+    float ox, oy, oz; // origin
+    float nx, ny, nz; // face plane normal
+    float area;
+    float emitterRange;
+    float exposure;
+    float conePower; // receiver side lightingconeinfo
+    float coneScale;
+    float pad0;
+    int skylevel; // emitter_skylevel
+    int windOfs;  // into windingbuffer, 3 floats per vertex
+    int windCount;
+    int pad1;
+};
+
+struct Pair
+{
+    int receiver;
+    int emitter;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer PatchBuffer { PatchData patches[]; };
+layout(std430, set = 0, binding = 1) readonly buffer WindingBuffer { float windings[]; };
+layout(std430, set = 0, binding = 2) readonly buffer SkyNormalBuffer { float skyNormals[]; }; // 4 floats per normal
+layout(std430, set = 0, binding = 3) readonly buffer SkyLevelBuffer { int skyLevels[]; }; // ofs,count per level
+layout(std430, set = 0, binding = 4) readonly buffer PairBuffer { Pair pairs[]; };
+layout(std430, set = 0, binding = 5) writeonly buffer OutBuffer { float outTrans[]; };
+
+layout(push_constant) uniform Params
+{
+    uint numPairs;
+};
+
+float normalizeExact(inout float dx, inout float dy, inout float dz)
+{
+    double len = double(dx * dx + dy * dy + dz * dz);
+    len = sqrt(len);
+    if (len < double(NORMAL_EPSILON))
+    {
+        dx = 0.0;
+        dy = 0.0;
+        dz = 0.0;
+        return 0.0;
+    }
+    dx = float(double(dx) / len);
+    dy = float(double(dy) / len);
+    dz = float(double(dz) / len);
+    return float(len);
+}
+
+// mirror of calc_sight_area (src/rad/utilcpp): the weighted solid angle of
+// the emitter winding over the sky normal set of its level pure math
+float calcSightArea(float rx, float ry, float rz, float rnx, float rny, float rnz,
+                    int windOfs, int windCount, int skylevel, float power, float scale)
+{
+    float area = 0.0;
+    float edgeX[MAX_WIND];
+    float edgeY[MAX_WIND];
+    float edgeZ[MAX_WIND];
+    bool error = false;
+    for (int x = 0; x < windCount; x++)
+    {
+        int x2 = (x + 1) % windCount;
+        float v1x = windings[(windOfs + x) * 3 + 0] - rx;
+        float v1y = windings[(windOfs + x) * 3 + 1] - ry;
+        float v1z = windings[(windOfs + x) * 3 + 2] - rz;
+        float v2x = windings[(windOfs + x2) * 3 + 0] - rx;
+        float v2y = windings[(windOfs + x2) * 3 + 1] - ry;
+        float v2z = windings[(windOfs + x2) * 3 + 2] - rz;
+        float nxv = v1y * v2z - v1z * v2y; // pointing inward
+        float nyv = v1z * v2x - v1x * v2z;
+        float nzv = v1x * v2y - v1y * v2x;
+        if (normalizeExact(nxv, nyv, nzv) == 0.0)
+            error = true;
+        edgeX[x] = nxv;
+        edgeY[x] = nyv;
+        edgeZ[x] = nzv;
+    }
+    if (!error)
+    {
+        int ofs = skyLevels[skylevel * 2 + 0];
+        int count = skyLevels[skylevel * 2 + 1];
+        for (int i = 0; i < count; i++)
+        {
+            float snx = skyNormals[(ofs + i) * 4 + 0];
+            float sny = skyNormals[(ofs + i) * 4 + 1];
+            float snz = skyNormals[(ofs + i) * 4 + 2];
+            float weight = skyNormals[(ofs + i) * 4 + 3];
+            float dot1 = snx * rnx + sny * rny + snz * rnz;
+            if (dot1 <= 0.0)
+                continue;
+            int j;
+            bool outside = false;
+            for (j = 0; j < windCount; j++)
+            {
+                if (snx * edgeX[j] + sny * edgeY[j] + snz * edgeZ[j] <= 0.0)
+                {
+                    outside = true;
+                    break;
+                }
+            }
+            if (outside)
+                continue;
+            if (power != 1.0)
+                dot1 = pow(dot1, power);
+            area += dot1 * weight;
+        }
+        area = area * 4.0 * PI; // convert to absolute sphere area
+    }
+    area *= scale;
+    return area;
+}
+
+void main()
+{
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= numPairs)
+        return;
+
+    PatchData R = patches[pairs[idx].receiver];
+    PatchData E = patches[pairs[idx].emitter];
+    bool diversify = (R.conePower != 1.0 || R.coneScale != 1.0);
+
+    float dx = E.ox - R.ox;
+    float dy = E.oy - R.oy;
+    float dz = E.oz - R.oz;
+    // move emitter back to its plane
+    dx += -PATCH_HUNT_OFFSET * E.nx;
+    dy += -PATCH_HUNT_OFFSET * E.ny;
+    dz += -PATCH_HUNT_OFFSET * E.nz;
+
+    float dist = normalizeExact(dx, dy, dz);
+    float dot1 = dx * R.nx + dy * R.ny + dz * R.nz;
+    float dot2 = -(dx * E.nx + dy * E.ny + dz * E.nz);
+    bool lightBehind = (dot1 <= NORMAL_EPSILON);
+    if (dot2 * dist <= MINIMUM_PATCH_DISTANCE)
+    {
+        outTrans[idx] = 0.0;
+        return;
+    }
+    if (diversify && !lightBehind)
+        dot1 = R.coneScale * pow(dot1, R.conePower);
+
+    float trans = (dot1 * dot2) / (dist * dist);
+    if (trans * E.area > 0.8)
+        trans = 0.8 / E.area;
+    if (dist < E.emitterRange - ON_EPSILON)
+    {
+        if (E.windCount > MAX_WIND)
+        {
+            outTrans[idx] = uintBitsToFloat(0x7fc00000u); // nan: host recomputes
+            return;
+        }
+        if (lightBehind)
+            trans = 0.0;
+        float sightarea = calcSightArea(R.ox, R.oy, R.oz, R.nx, R.ny, R.nz,
+                                        E.windOfs, E.windCount, E.skylevel,
+                                        R.conePower, R.coneScale);
+        float frac = dist / E.emitterRange;
+        frac = (frac - 0.5) * 2.0;
+        frac = clamp(frac, 0.0, 1.0);
+        trans = frac * trans + (1.0 - frac) * (sightarea / E.area);
+    }
+    else if (lightBehind)
+    {
+        outTrans[idx] = 0.0;
+        return;
+    }
+
+    trans *= E.exposure;
+    // transparency is exactly (1,1,1)/3 = 1 under the host guards
+    trans = trans * E.area;
+    outTrans[idx] = trans;
+}

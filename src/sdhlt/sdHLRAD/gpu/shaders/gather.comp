@@ -1,0 +1,430 @@
+// gathercomp - the direct lighting gather kernel for the gpu bsp provider
+//
+// one thread = one work item (a sample position + step, ie one cpu call to
+// gather_sample_light in src/rad/lightmapcpp:2416) the thread walks the
+// per leaf light array serially in the cpu's order, so per item accumulation
+// order matches the cpu and output is deterministic light styles arrive
+// pre compacted (lightcompactstyle, host assigned) so the per thread adds
+// array stays small
+//
+// the host builds an ascending list of visible lit leaves for each unique pvs
+// row including the leaf 0 sky lighting fix rule the thread walks only that
+// list in cpu order which preserves results and avoids divergent pvs checks
+//
+// supports point lights spotlights distant surface lights skylight sun and
+// diffuse sky light surface lights inside their emitter range use sight area
+// blending and alternate origins and are sent to the cpu near pair resolver
+// opaque entities and studio shadows cause the host to use the cpu path
+// vector normalization uses a float dot with double square root and division
+// which requires shaderfloat64 the lighting cone power path remains float
+//
+// float normalization is the default and uses float square root and division
+// which avoids the shaderfloat64 requirement and improves kernel speed
+// validation against the fp64 variant found matching lightmap results
+// the fp64 variant remains available for comparison
+
+#version 450
+#ifndef FLOAT_NORMALIZE
+#extension GL_ARB_gpu_shader_fp64 : require
+#endif
+
+layout(local_size_x = 64) in;
+
+#extension GL_GOOGLE_include_directive : require
+#define TRACE_TNODE_BINDING 0
+#include "trace_lib.glsl"
+
+const float BOGUS_RANGE = 131072.0;
+const float PATCH_HUNT_OFFSET = 0.5;
+const float MINIMUM_PATCH_DISTANCE = ON_EPSILON;
+const float EQUAL_EPSILON = 0.004;
+
+const int EMIT_SURFACE = 0;
+const int EMIT_POINT = 1;
+const int EMIT_SPOTLIGHT = 2;
+const int EMIT_SKYLIGHT = 3;
+
+const int MAX_COMPACT_STYLES = 16;
+
+struct LightLeaf
+{
+    int leafnum;
+    int firstlight;
+    int numlights;
+    int pad;
+};
+
+struct Light
+{
+    int type;
+    int compactStyle;
+    int topatch;
+    int sunOfs;   // into sunnormalbuffer, 4 floats per normal (xyz + weight)
+    int sunCount;
+    int pad0;
+    float ox, oy, oz;    // origin
+    float ix, iy, iz;    // intensity
+    float nx, ny, nz;    // normal (surfaces, spotlights, sky direction)
+    float stopdot;
+    float stopdot2;
+    float fade;
+    float texlightgap;
+    float patchArea;
+    float patchEmitterRange;
+    float dix, diy, diz;    // diffuse_intensity
+    float di2x, di2y, di2z; // diffuse_intensity2
+    float pad1;
+};
+
+struct WorkItem
+{
+    float px, py, pz; // sample position
+    float nx, ny, nz; // sample normal
+    float conePower;  // lightingconeinfo[miptex]
+    float coneScale;
+    int pvsRow;
+    int step;
+    int face;     // index into facegapbuffer (texlightgap axes)
+    int skyReach; // 0 when this sample's pvs sees no sky leaf: skip both sky loops
+};
+
+struct GatherResult
+{
+    float adds[3 * MAX_COMPACT_STYLES]; // x0 y0 z0 x1 y1 z1
+    uint touched;
+    uint pad0, pad1, pad2;
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer LightLeafBuffer { LightLeaf lightleafs[]; };
+layout(std430, set = 0, binding = 2) readonly buffer LightBuffer { Light lights[]; };
+layout(std430, set = 0, binding = 3) readonly buffer SunNormalBuffer { float sunNormals[]; };
+layout(std430, set = 0, binding = 4) readonly buffer SkyNormalBuffer { float skyNormals[]; }; // 4 floats per normal
+// per pvs row: the ascending lit leaf indices visible from that row
+layout(std430, set = 0, binding = 5) readonly buffer VisLeafListBuffer { uint visLeafList[]; };
+layout(std430, set = 0, binding = 6) readonly buffer FaceGapBuffer { float faceGap[]; }; // 6 floats per face
+layout(std430, set = 0, binding = 7) readonly buffer WorkItemBuffer { WorkItem items[]; };
+layout(std430, set = 0, binding = 8) writeonly buffer ResultBuffer { GatherResult results[]; };
+layout(std430, set = 0, binding = 9) buffer NearBuffer
+{
+    uint nearCount;
+    uint nearPad0, nearPad1, nearPad2;
+    uint nearPairs[]; // (item, light) index pairs
+};
+// (offset, count) into visleaflistbuffer, two uints per pvs row
+layout(std430, set = 0, binding = 10) readonly buffer VisLeafRangeBuffer { uint visLeafRange[]; };
+
+layout(push_constant) uniform Params
+{
+    uint numItems;
+    uint numLightLeafs;  // unused and kept for layout stability
+    uint skyLightingFix; // optionssky_lighting_fix
+    int skyStepMatch;    // 1 when softsky or fastmode, else 0
+    float indirectSun;   // optionsindirect_sun
+    uint maxNearPairs;
+    uint pvsStrideWords; // unused and kept for layout stability
+    uint numSkyNormals;  // of the active sky level
+};
+
+#ifdef FLOAT_NORMALIZE
+// float normalization using float square root and division
+float normalizeExact(inout float dx, inout float dy, inout float dz)
+{
+    float len = sqrt(dx * dx + dy * dy + dz * dz);
+    if (len < NORMAL_EPSILON)
+    {
+        dx = 0.0;
+        dy = 0.0;
+        dz = 0.0;
+        return 0.0;
+    }
+    dx /= len;
+    dy /= len;
+    dz /= len;
+    return len;
+}
+#else
+// vectornormalize: float dot, double sqrt, double divide, narrow back
+float normalizeExact(inout float dx, inout float dy, inout float dz)
+{
+    double len = double(dx * dx + dy * dy + dz * dz);
+    len = sqrt(len);
+    if (len < double(NORMAL_EPSILON))
+    {
+        dx = 0.0;
+        dy = 0.0;
+        dz = 0.0;
+        return 0.0;
+    }
+    dx = float(double(dx) / len);
+    dy = float(double(dy) / len);
+    dz = float(double(dz) / len);
+    return float(len);
+}
+#endif
+
+void main()
+{
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= numItems)
+        return;
+
+    WorkItem item = items[idx];
+    bool diversify = (item.conePower != 1.0 || item.coneScale != 1.0);
+    bool skyUsed = false;
+
+    float addsX[MAX_COMPACT_STYLES];
+    float addsY[MAX_COMPACT_STYLES];
+    float addsZ[MAX_COMPACT_STYLES];
+    uint touched = 0u;
+    for (int s = 0; s < MAX_COMPACT_STYLES; s++)
+    {
+        addsX[s] = 0.0;
+        addsY[s] = 0.0;
+        addsZ[s] = 0.0;
+    }
+
+    int discard1;
+    float sink1, sink2, sink3;
+
+    uint visOfs = visLeafRange[uint(item.pvsRow) * 2u];
+    uint visCnt = visLeafRange[uint(item.pvsRow) * 2u + 1u];
+    for (uint vi = 0u; vi < visCnt; vi++)
+    {
+        LightLeaf leaf = lightleafs[visLeafList[visOfs + vi]];
+
+        for (int li = leaf.firstlight; li < leaf.firstlight + leaf.numlights; li++)
+        {
+            Light L = lights[li];
+
+            if (L.type == EMIT_SKYLIGHT)
+            {
+                // nothing this sample can see is sky, so every ray below would
+                // come back occluded; the cpu gather takes the same shortcut
+                if (item.skyReach == 0)
+                    continue;
+                if (skyLightingFix == 0u)
+                {
+                    if (skyUsed)
+                        continue;
+                    skyUsed = true;
+                }
+                // sun
+                if (item.step == L.topatch
+                    && (L.ix != 0.0 || L.iy != 0.0 || L.iz != 0.0))
+                {
+                    for (int j = 0; j < L.sunCount; j++)
+                    {
+                        float snx = sunNormals[(L.sunOfs + j) * 4 + 0];
+                        float sny = sunNormals[(L.sunOfs + j) * 4 + 1];
+                        float snz = sunNormals[(L.sunOfs + j) * 4 + 2];
+                        float weight = sunNormals[(L.sunOfs + j) * 4 + 3];
+                        float dot1 = -(item.nx * snx + item.ny * sny + item.nz * snz);
+                        if (dot1 <= NORMAL_EPSILON)
+                            continue;
+                        float dxr = item.px + snx * -BOGUS_RANGE;
+                        float dyr = item.py + sny * -BOGUS_RANGE;
+                        float dzr = item.pz + snz * -BOGUS_RANGE;
+                        int tf = 0;
+                        if (traceLine(item.px, item.py, item.pz, dxr, dyr, dzr,
+                                      sink1, sink2, sink3, tf) != CONTENTS_SKY)
+                            continue;
+                        if (diversify)
+                            dot1 = item.coneScale * pow(dot1, item.conePower);
+                        float scale = dot1 * weight;
+                        int s = L.compactStyle;
+                        addsX[s] += L.ix * scale;
+                        addsY[s] += L.iy * scale;
+                        addsZ[s] += L.iz * scale;
+                        touched |= 1u << uint(s);
+                    }
+                }
+                // sky diffuse
+                if (item.step == skyStepMatch && indirectSun > 0.0
+                    && !(abs(L.dix) <= EQUAL_EPSILON && abs(L.diy) <= EQUAL_EPSILON
+                         && abs(L.diz) <= EQUAL_EPSILON
+                         && abs(L.di2x) <= EQUAL_EPSILON && abs(L.di2y) <= EQUAL_EPSILON
+                         && abs(L.di2z) <= EQUAL_EPSILON))
+                {
+                    for (uint j = 0u; j < numSkyNormals; j++)
+                    {
+                        float snx = skyNormals[j * 4u + 0u];
+                        float sny = skyNormals[j * 4u + 1u];
+                        float snz = skyNormals[j * 4u + 2u];
+                        float weight = skyNormals[j * 4u + 3u];
+                        float dot1 = -(item.nx * snx + item.ny * sny + item.nz * snz);
+                        if (dot1 <= NORMAL_EPSILON)
+                            continue;
+                        float dxr = item.px + snx * -BOGUS_RANGE;
+                        float dyr = item.py + sny * -BOGUS_RANGE;
+                        float dzr = item.pz + snz * -BOGUS_RANGE;
+                        int tf = 0;
+                        if (traceLine(item.px, item.py, item.pz, dxr, dyr, dzr,
+                                      sink1, sink2, sink3, tf) != CONTENTS_SKY)
+                            continue;
+                        float x = (1.0 - (L.nx * snx + L.ny * sny + L.nz * snz)) / 2.0;
+                        float factor = clamp(x, 0.0, 1.0);
+                        float six = L.dix * (1.0 - factor) + factor * L.di2x;
+                        float siy = L.diy * (1.0 - factor) + factor * L.di2y;
+                        float siz = L.diz * (1.0 - factor) + factor * L.di2z;
+                        float s2 = weight * indirectSun / 2.0;
+                        six *= s2;
+                        siy *= s2;
+                        siz *= s2;
+                        if (diversify)
+                            dot1 = item.coneScale * pow(dot1, item.conePower);
+                        int s = L.compactStyle;
+                        addsX[s] += six * dot1;
+                        addsY[s] += siy * dot1;
+                        addsZ[s] += siz * dot1;
+                        touched |= 1u << uint(s);
+                    }
+                }
+                continue;
+            }
+
+            // point / spotlight / surface
+            if (item.step != L.topatch)
+                continue;
+            if (L.ix == 0.0 && L.iy == 0.0 && L.iz == 0.0)
+                continue;
+
+            float dx = L.ox - item.px;
+            float dy = L.oy - item.py;
+            float dz = L.oz - item.pz;
+            if (L.type == EMIT_SURFACE)
+            {
+                // move emitter back to its plane
+                dx += -PATCH_HUNT_OFFSET * L.nx;
+                dy += -PATCH_HUNT_OFFSET * L.ny;
+                dz += -PATCH_HUNT_OFFSET * L.nz;
+            }
+            float dist = normalizeExact(dx, dy, dz);
+            float dot1 = dx * item.nx + dy * item.ny + dz * item.nz;
+            if (dist < 1.0)
+                dist = 1.0;
+
+            float addX, addY, addZ;
+            if (L.type == EMIT_POINT)
+            {
+                if (dot1 <= NORMAL_EPSILON)
+                    continue;
+                float denominator = dist * dist * L.fade;
+                if (diversify)
+                    dot1 = item.coneScale * pow(dot1, item.conePower);
+                float ratio = dot1 / denominator;
+                addX = L.ix * ratio;
+                addY = L.iy * ratio;
+                addZ = L.iz * ratio;
+            }
+            else if (L.type == EMIT_SURFACE)
+            {
+                bool lightBehind = (dot1 <= NORMAL_EPSILON);
+                if (diversify && !lightBehind)
+                    dot1 = item.coneScale * pow(dot1, item.conePower);
+                float dot2 = -(dx * L.nx + dy * L.ny + dz * L.nz);
+                if (L.texlightgap > 0.0)
+                {
+                    float g0x = faceGap[item.face * 6 + 0];
+                    float g0y = faceGap[item.face * 6 + 1];
+                    float g0z = faceGap[item.face * 6 + 2];
+                    float g1x = faceGap[item.face * 6 + 3];
+                    float g1y = faceGap[item.face * 6 + 4];
+                    float g1z = faceGap[item.face * 6 + 5];
+                    float test = dot2 * dist;
+                    test -= L.texlightgap * abs(L.nx * g0x + L.ny * g0y + L.nz * g0z);
+                    test -= L.texlightgap * abs(L.nx * g1x + L.ny * g1y + L.nz * g1z);
+                    if (test < -ON_EPSILON)
+                        continue;
+                }
+                if (dot2 * dist <= MINIMUM_PATCH_DISTANCE)
+                    continue;
+                float range = L.patchEmitterRange;
+                float ratio;
+                if (L.stopdot > 0.0)
+                {
+                    float rangeScale = 1.0 - L.stopdot2 * L.stopdot2;
+                    rangeScale = 1.0 / sqrt(max(NORMAL_EPSILON, rangeScale));
+                    rangeScale = min(rangeScale, 2.0);
+                    range *= rangeScale;
+                    if (dot2 <= L.stopdot2 + NORMAL_EPSILON)
+                    {
+                        if (dist >= range)
+                            continue;
+                        ratio = 0.0;
+                    }
+                    else if (dot2 <= L.stopdot)
+                    {
+                        ratio = dot1 * dot2 * (dot2 - L.stopdot2)
+                            / (dist * dist * (L.stopdot - L.stopdot2));
+                    }
+                    else
+                    {
+                        ratio = dot1 * dot2 / (dist * dist);
+                    }
+                }
+                else
+                {
+                    ratio = dot1 * dot2 / (dist * dist);
+                }
+                if (ratio * L.patchArea > 0.4)
+                    ratio = 0.4 / L.patchArea;
+                if (dist < range - ON_EPSILON)
+                {
+                    // near branch: sight area blend + alternate origin; the
+                    // cpu resolves these pairs with the reference code
+                    uint slot = atomicAdd(nearCount, 1u);
+                    if (slot < maxNearPairs)
+                    {
+                        nearPairs[slot * 2u] = idx;
+                        nearPairs[slot * 2u + 1u] = uint(li);
+                    }
+                    continue;
+                }
+                if (lightBehind)
+                    continue;
+                addX = L.ix * ratio;
+                addY = L.iy * ratio;
+                addZ = L.iz * ratio;
+            }
+            else // emit_spotlight
+            {
+                if (dot1 <= NORMAL_EPSILON)
+                    continue;
+                float dot2 = -(dx * L.nx + dy * L.ny + dz * L.nz);
+                if (dot2 <= L.stopdot2)
+                    continue;
+                float denominator = dist * L.fade * dist;
+                if (diversify)
+                    dot1 = item.coneScale * pow(dot1, item.conePower);
+                float ratio = dot1 * dot2 / denominator;
+                if (dot2 <= L.stopdot)
+                    ratio *= (dot2 - L.stopdot2) / (L.stopdot - L.stopdot2);
+                addX = L.ix * ratio;
+                addY = L.iy * ratio;
+                addZ = L.iz * ratio;
+            }
+
+            int tf = 0;
+            if (traceLine(item.px, item.py, item.pz, L.ox, L.oy, L.oz,
+                          sink1, sink2, sink3, tf) != CONTENTS_EMPTY)
+                continue;
+
+            int s = L.compactStyle;
+            addsX[s] += addX;
+            addsY[s] += addY;
+            addsZ[s] += addZ;
+            touched |= 1u << uint(s);
+        }
+    }
+
+    for (int s = 0; s < MAX_COMPACT_STYLES; s++)
+    {
+        results[idx].adds[s * 3 + 0] = addsX[s];
+        results[idx].adds[s * 3 + 1] = addsY[s];
+        results[idx].adds[s * 3 + 2] = addsZ[s];
+    }
+    results[idx].touched = touched;
+    results[idx].pad0 = 0u;
+    results[idx].pad1 = 0u;
+    results[idx].pad2 = 0u;
+}

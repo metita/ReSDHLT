@@ -21,6 +21,7 @@
 
 #include "qrad.h"
 #include "profiling.h"
+#include "gpu_gather.h"
 
 
 /*
@@ -2662,7 +2663,23 @@ static void     RadWorld()
 	NamedRunThreadsOnIndividual(g_numfaces, g_estimate, FindFacePositions);
 
     // build initial facelights
+	//
+	// -gpu runs BuildFacelights twice: GpuGatherRun() does a collect pass that
+	// records every gather call and throws the rest away, dispatches them all
+	// to the device, and leaves the results indexed by call. The run below is
+	// then the real one, and each gather call reads its stored result instead
+	// of tracing. If anything about the map is outside what the kernel
+	// implements it declines, and this is just the ordinary CPU pass.
+	bool gpu_active = false;
+	if (g_gpu)
+	{
+		gpu_active = GpuGatherRun();
+	}
     NamedRunThreadsOnIndividual(g_numfaces, g_estimate, BuildFacelights);
+	if (gpu_active)
+	{
+		GpuGatherFinish();
+	}
 
 	FreePositionMaps ();
 
@@ -2749,6 +2766,8 @@ static void     Usage()
     Log("    -nopaque        : Disable the opaque zhlt_lightflags for this compile\n\n");
 	Log("    -nostudioshadow : Disable opaque studiomodels, ignore zhlt_studioshadow for this compile\n\n");
 	Log("    -noallocblockcheck: Compile even when the map overflows the engine's lightmap atlas\n");
+	Log("    -gpu            : Gather direct lighting with Vulkan compute (falls back to the CPU)\n");
+	Log("    -gpuadapter #   : Pick the Vulkan device by index instead of automatically\n");
     Log("    -smooth #       : Set smoothing threshold for blending (in degrees)\n");
 	Log("    -smooth2 #      : Set smoothing threshold between different textures\n");
     Log("    -chop #         : Set radiosity patch size for normal textures\n");
@@ -2886,6 +2905,11 @@ static void     Settings()
     Log("\n");
 
 	Log("fast rad             [ %17s ] [ %17s ]\n", g_fastmode? "on": "off", DEFAULT_FASTMODE? "on": "off");
+	if (g_gpu)
+	{
+		Log("gpu gather           [ %17s ] [ %17s ]\n", "on", "off");
+		Log("gpu device           [ %17s ] [ %17s ]\n", GpuDeviceDescription (), "CPU");
+	}
 	Log("vismatrix algorithm  [ %17s ] [ %17s ]\n",
 		g_method == eMethodVismatrix? "Original": g_method == eMethodSparseVismatrix? "Sparse": g_method == eMethodNoVismatrix? "NoMatrix": "Unknown",
 		DEFAULT_METHOD == eMethodVismatrix? "Original": DEFAULT_METHOD == eMethodSparseVismatrix? "Sparse": DEFAULT_METHOD == eMethodNoVismatrix? "NoMatrix": "Unknown"
@@ -3824,6 +3848,21 @@ int             main(const int argc, char** argv)
 		else if (!strcasecmp(argv[i], "-noallocblockcheck"))
 		{
 			g_noallocblockcheck = true;
+		}
+		else if (!strcasecmp(argv[i], "-gpu"))
+		{
+			g_gpu = true;
+		}
+		else if (!strcasecmp(argv[i], "-gpuadapter"))
+		{
+			if (i + 1 < argc)
+			{
+				g_gpu_adapter = atoi (argv[++i]);
+			}
+			else
+			{
+				Usage ();
+			}
 		}
 		else if (!strcasecmp(argv[i], "-drawsample"))
 		{

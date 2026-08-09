@@ -102,7 +102,6 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
   `node->firstface` and the marksurface table are remapped to follow. Geometry,
   texture scale and lightmap resolution are untouched. Off by default: the
   default build still writes byte-identical .bsp files
-
 - BSP: leak diagnostics point at the hole. The pointfile used to be whatever
   path the outside flood fill unwound through - it wanders, doubles back, and
   never says where the map actually opens. The trail is now built after the
@@ -116,6 +115,30 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
 - BSP: `-allleaks` surveys the map and reports every hole, not just the first
   one found, so a leaky map can be sealed in one pass through the editor
   instead of one hole per compile
+
+- RAD: `-gpu` gathers direct lighting with Vulkan compute. Ported from
+  speedrun-16/hltools. BuildFacelights runs twice: a collect pass records every
+  `GatherSampleLight()` call as a work item, the kernel evaluates all of them,
+  and the real pass replays the same code path reading the stored results.
+  Everything outside the gather is the untouched CPU code, and the parts the
+  kernel cannot do exactly - the texlight near branch, which needs the
+  emitter's winding and a sight-area integration - come back to the CPU and are
+  resolved with the reference functions. **The .bsp comes out byte-identical**
+  on `ba_dust_island` and `ar_pokemon`, with and without `-extra`. It declines
+  and leaves RAD on the CPU path, with a reason on the console, for opaque
+  entities, studio shadows, more distinct light styles than the kernel has
+  slots, a BSP deeper than its traversal stack, or no Vulkan driver.
+  `-gpuadapter #` picks the device by index.
+
+  **It is currently slower than the CPU path on the maps tested** - 5.6s vs
+  2.8s on `ba_dust_island -extra`, GTX 1060 against 6 threads - and it is off
+  by default for that reason. The cost is structural: the collect pass repeats
+  all of BuildFacelights except the tracing, so the extra pass alone costs more
+  than this fork's already-cheap CPU gather saves. Measured breakdown and what
+  would have to change in docs/BENCHMARKS.md §4.8
+- The Vulkan headers and the compiled SPIR-V kernels are in the tree, so
+  building needs no Vulkan SDK; `scripts/gen_spirv.py` regenerates them after a
+  shader edit. `-DSDHLT_GPU=OFF` leaves the backend out entirely
 
 ### Tried and rejected
 - Sampling the sky once per lightmap pixel instead of once per `-extra`
