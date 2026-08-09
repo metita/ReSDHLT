@@ -89,8 +89,29 @@ jobs:
           Get-ChildItem -Recurse $pkg -File | Select-Object FullName, Length
           Compress-Archive -Path "$pkg/*" -DestinationPath "ReSDHLT-Windows-x64.zip" -CompressionLevel Optimal
 
+      # A release page with nothing but a compare link tells a mapper nothing.
+      # Write the notes into docs/release-notes/<tag>.md and they become the
+      # body, with GitHub's generated commit list appended underneath. Without
+      # that file the release still publishes, just with the generated list on
+      # its own.
+      - name: Collect the release notes
+        id: notes
+        shell: pwsh
+        run: |
+          $file = "docs/release-notes/${{ github.ref_name }}.md"
+          if (Test-Path $file) {
+            Write-Host "usando $file"
+            "body<<RELEASE_NOTES_EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            Get-Content $file | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "RELEASE_NOTES_EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            Write-Host "no hay $file, se publica solo con las notas generadas"
+            "body=" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+
       - name: Publish the release
         uses: softprops/action-gh-release@v2
         with:
           files: ReSDHLT-Windows-x64.zip
+          body: ${{ steps.notes.outputs.body }}
           generate_release_notes: true
