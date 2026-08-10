@@ -2067,7 +2067,7 @@ dependencies = [
 
 [[package]]
 name = "resdhlt-gui"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "eframe",
  "egui",

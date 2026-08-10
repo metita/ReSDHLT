@@ -596,13 +596,20 @@ extern void     MakeScalesNoVismatrix();
 
 // transfers.c
 extern size_t   g_total_transfer;
+extern size_t   g_transfer_index_bytes;
+extern size_t   g_transfer_data_bytes;
 extern bool     readtransfers(const char* const transferfile, long numpatches);
 extern void     writetransfers(const char* const transferfile, long total_patches);
 
 // vismatrixutil.c (shared between vismatrix.c and sparse.c)
 extern void     MakeScales(int threadnum);
+extern void     StoreTransferScales(patch_t* patch, const transfer_raw_index_t* indices,
+                                    const float* values, unsigned count);
 extern void     DumpTransfersMemoryUsage();
 extern void     MakeRGBScales(int threadnum);
+
+// sparse.c
+extern bool     MakeScalesSparseGpu();
 
 // transparency.c (transparency array functions - shared between vismatrix.c and sparse.c)
 extern void	GetTransparency(const unsigned p1, const unsigned p2, vec3_t &trans, unsigned int &next_index);

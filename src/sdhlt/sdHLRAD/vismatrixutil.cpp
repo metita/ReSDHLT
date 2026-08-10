@@ -76,14 +76,14 @@ static unsigned GetLengthOfRun(const transfer_raw_index_t* raw, const transfer_r
     return run_size;
 }
 
-static transfer_index_t* CompressTransferIndicies(transfer_raw_index_t* tRaw, const unsigned rawSize, unsigned* iSize)
+static transfer_index_t* CompressTransferIndicies(const transfer_raw_index_t* tRaw, const unsigned rawSize, unsigned* iSize)
 {
     unsigned        x;
     unsigned        size = rawSize;
     unsigned        compressed_count = 0;
 
-    transfer_raw_index_t* raw = tRaw;
-    transfer_raw_index_t* end = tRaw + rawSize - 1;        // -1 since we are comparing current with next and get errors when bumping into the 'end'
+    const transfer_raw_index_t* raw = tRaw;
+    const transfer_raw_index_t* end = tRaw + rawSize - 1;  // -1 since we compare current with next
 
     unsigned        compressed_count_1 = 0;
 
@@ -160,6 +160,46 @@ static transfer_index_t* CompressTransferIndicies(const transfer_raw_index_t* tR
 }
 #endif /*COMPRESSED_TRANSFERS*/
 
+// =====================================================================================
+//  StoreTransferScales
+//      Shared final packing for the CPU and GPU MakeScales paths. The input is
+//      receiver-major and sorted by emitter, which is also what the compressed
+//      transfer index format expects.
+// =====================================================================================
+void StoreTransferScales(patch_t* patch, const transfer_raw_index_t* indices,
+                         const float* values, unsigned count)
+{
+    patch->iIndex = 0;
+    patch->iData = count;
+    patch->tIndex = NULL;
+    patch->tData = NULL;
+
+    if (!count)
+    {
+        return;
+    }
+
+    const unsigned data_size = count * float_size[g_transfer_compress_type] + unused_size;
+    patch->tData = (transfer_data_t*)AllocBlock(data_size);
+    patch->tIndex = CompressTransferIndicies(indices, count, &patch->iIndex);
+
+    hlassume(patch->tData != NULL, assume_NoMemory);
+    hlassume(patch->tIndex != NULL, assume_NoMemory);
+
+    ThreadLock();
+    g_transfer_data_bytes += data_size;
+    ThreadUnlock();
+
+    const float total = 1.0f / Q_PI;
+    transfer_data_t* out = patch->tData;
+    for (unsigned x = 0; x < count;
+         x++, out += float_size[g_transfer_compress_type])
+    {
+        float value = values[x] * total;
+        float_compress(g_transfer_compress_type, out, &value);
+    }
+}
+
 /*
  * =============
  * MakeScales
@@ -189,8 +229,6 @@ void            MakeScales(const int threadnum)
     const vec_t*    normal2;
 
     unsigned int    fastfind_index = 0;
-
-    vec_t           total;
 
     transfer_raw_index_t* tIndex;
     float* tData;
@@ -373,35 +411,7 @@ void            MakeScales(const int threadnum)
             count++;
         }
 
-        // copy the transfers out
-        if (patch->iData)
-        {
-			unsigned	data_size = patch->iData * float_size[g_transfer_compress_type] + unused_size;
-
-            patch->tData = (transfer_data_t*)AllocBlock(data_size);
-            patch->tIndex = CompressTransferIndicies(tIndex_All, patch->iData, &patch->iIndex);
-
-            hlassume(patch->tData != NULL, assume_NoMemory);
-            hlassume(patch->tIndex != NULL, assume_NoMemory);
-
-            ThreadLock();
-            g_transfer_data_bytes += data_size;
-            ThreadUnlock();
-
-			total = 1 / Q_PI;
-            {
-                unsigned        x;
-                transfer_data_t* t1 = patch->tData;
-                float* t2 = tData_All;
-
-				float	f;
-				for (x = 0; x < patch->iData; x++, t1+=float_size[g_transfer_compress_type], t2++)
-				{
-					f = (*t2) * total;
-					float_compress (g_transfer_compress_type, t1, &f);
-				}
-            }
-        }
+        StoreTransferScales(patch, tIndex_All, tData_All, patch->iData);
     }
 
     FreeBlock(tIndex_All);

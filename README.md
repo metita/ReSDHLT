@@ -112,10 +112,11 @@ are hunting for the thing that blew up your texture data or your face count.
 
 ### Optional GPU lighting
 
-`-gpu` runs RAD's direct light gathering as Vulkan compute. Whether it helps
-depends entirely on how many direct lights the map has, because that is the
-dimension a GPU parallelises over. Same room, same settings, only the light count
-changing, on a GTX 1060 against six CPU threads with `-extra`:
+`-gpu` runs RAD's direct light gathering and Sparse transfer-factor construction
+as Vulkan compute. Direct-light speed depends on how many lights the map has;
+transfer-factor speed depends on how many visible patch pairs `MakeScales` has
+to evaluate. Same room, same settings, only the light count changing, on a GTX
+1060 against six CPU threads with `-extra`:
 
 | lights | CPU | `-gpu` | speedup |
 |---:|---:|---:|---|
@@ -135,6 +136,14 @@ because the kernel normalises in float. It declines and hands the work back to
 the CPU, saying why, when the map has opaque entities, studio model shadows, more
 light styles than the kernel has slots, a BSP deeper than its traversal stack, or
 when no Vulkan driver is present.
+
+The transfer kernel is used with `-vismatrix sparse`, the default. It walks the
+sparse visibility pairs directly instead of testing the full patches-squared
+matrix. It falls back to the CPU implementation for RGB transfers, translucent
+patches, and custom bounce shadows. The bounce accumulation itself remains on
+the CPU: it already consumes the packed transfer lists and is much smaller than
+constructing them (on `ze_cardinal`, 12 bounces totalled about 6 seconds while
+`MakeScales` alone took 58.43 seconds).
 
 It is off by default. Building it needs nothing extra, since the Khronos headers
 and the compiled SPIR-V are both in the tree and the Vulkan loader is opened by
@@ -181,10 +190,12 @@ large texture library, and CSG aborted rather than ignoring the excess.
 | BSP | `-lmoptimize` | Reorder faces to waste fewer lightmap atlas pages |
 | BSP | `-allleaks` | Mark every hole, not just the first one found |
 | RAD | `-skylevel N` | Sky sampling fineness, 4 to 8, default 6 |
-| RAD | `-gpu` | Gather direct lighting with Vulkan compute |
+| RAD | `-gpu` | Compute direct lighting and Sparse transfer factors with Vulkan |
 | RAD | `-gpuadapter N` | Pick the Vulkan device by index |
 | RAD | `-noallocblockcheck` | Compile even when the map overflows the lightmap atlas |
 | RAD | `-profile` | Report where RAD spends its time, no external profiler needed |
+| RAD | `-raybench` | Benchmark real sky rays through RAD's BSP tracer |
+| RAD | `-workbench` | Measure per-face work balance and scheduling overhead |
 
 ## Building from source
 

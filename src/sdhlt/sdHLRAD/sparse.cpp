@@ -1,5 +1,14 @@
 #include "qrad.h"
 #include "profiling.h"
+#include "gpu_gather.h"
+
+#ifdef SDHLT_GPU
+#include <cmath>
+#include <cstdint>
+#include <vector>
+
+#include "gpu/gpu.h"
+#endif
 
 
 
@@ -434,6 +443,255 @@ static void     DumpVismatrixInfo()
     Log("%-20s: %5.1f megs\n", "visibility matrix", total_vismatrix_memory / (1024 * 1024.0));
 }
 
+#ifdef SDHLT_GPU
+namespace
+{
+    // Four million pairs use 32 MB for the pair buffer and 16 MB for results,
+    // below Vulkan's guaranteed 128 MB storage-buffer range. It also dispatches
+    // 62,500 workgroups, below the guaranteed per-axis limit of 65,535.
+    const size_t GPU_TRANSFER_BATCH_PAIRS = 4000000;
+
+    template <typename Visitor>
+    void VisitSparsePairs(Visitor visit)
+    {
+        for (unsigned x = 0; x < g_num_patches; x++)
+        {
+            const sparse_column_t& column = s_vismatrix[x];
+            for (int r = 0; r < column.count; r++)
+            {
+                const sparse_row_t& row = column.row[r];
+                const unsigned base = row.offset * 8u;
+                unsigned bits = row.values;
+                while (bits)
+                {
+                    unsigned bit = 0;
+                    while ((bits & (1u << bit)) == 0)
+                    {
+                        bit++;
+                    }
+                    bits &= ~(1u << bit);
+                    const unsigned y = base + bit;
+                    if (y < g_num_patches && y > x)
+                    {
+                        visit(x, y);
+                    }
+                }
+            }
+        }
+    }
+
+    bool MarshalFormFactorScene(rad::gpu::formfactor_scene& scene)
+    {
+        scene.patches.resize(g_num_patches);
+        scene.sky_levels.resize((SKYLEVELMAX + 1) * 2);
+
+        for (int level = 0; level <= SKYLEVELMAX; level++)
+        {
+            scene.sky_levels[level * 2] = (int32_t)(scene.sky_normals.size() / 4);
+            scene.sky_levels[level * 2 + 1] = g_numskynormals[level];
+            for (int i = 0; i < g_numskynormals[level]; i++)
+            {
+                scene.sky_normals.push_back(g_skynormals[level][i][0]);
+                scene.sky_normals.push_back(g_skynormals[level][i][1]);
+                scene.sky_normals.push_back(g_skynormals[level][i][2]);
+                scene.sky_normals.push_back(g_skynormalsizes[level][i]);
+            }
+        }
+
+        for (unsigned i = 0; i < g_num_patches; i++)
+        {
+            const patch_t& patch = g_patches[i];
+            if (patch.translucent_b || !patch.winding || patch.winding->m_NumPoints > 32)
+            {
+                return false;
+            }
+
+            rad::gpu::patch_gpu& out = scene.patches[i];
+            const vec_t* normal = getPlaneFromFaceNumber(patch.faceNumber)->normal;
+            for (int axis = 0; axis < 3; axis++)
+            {
+                out.origin[axis] = patch.origin[axis];
+                out.normal[axis] = normal[axis];
+            }
+            out.area = patch.area;
+            out.emitter_range = patch.emitter_range;
+            out.exposure = patch.exposure;
+            const int miptex = g_texinfo[g_dfaces[patch.faceNumber].texinfo].miptex;
+            out.cone_power = g_lightingconeinfo[miptex][0];
+            out.cone_scale = g_lightingconeinfo[miptex][1];
+            out.skylevel = patch.emitter_skylevel;
+            out.wind_ofs = (int32_t)(scene.windings.size() / 3);
+            out.wind_count = (int32_t)patch.winding->m_NumPoints;
+            for (unsigned p = 0; p < patch.winding->m_NumPoints; p++)
+            {
+                scene.windings.push_back(patch.winding->m_Points[p][0]);
+                scene.windings.push_back(patch.winding->m_Points[p][1]);
+                scene.windings.push_back(patch.winding->m_Points[p][2]);
+            }
+        }
+        return true;
+    }
+
+    void RollbackGpuTransfers(size_t old_total, size_t old_index_bytes,
+                              size_t old_data_bytes)
+    {
+        for (unsigned i = 0; i < g_num_patches; i++)
+        {
+            patch_t& patch = g_patches[i];
+            if (patch.tIndex)
+            {
+                FreeBlock(patch.tIndex);
+            }
+            if (patch.tData)
+            {
+                FreeBlock(patch.tData);
+            }
+            patch.tIndex = NULL;
+            patch.tData = NULL;
+            patch.iIndex = 0;
+            patch.iData = 0;
+        }
+        g_total_transfer = old_total;
+        g_transfer_index_bytes = old_index_bytes;
+        g_transfer_data_bytes = old_data_bytes;
+    }
+}
+#endif
+
+bool MakeScalesSparseGpu()
+{
+#ifndef SDHLT_GPU
+    return false;
+#else
+    if (!g_gpu || g_rgb_transfers || g_customshadow_with_bouncelight)
+    {
+        return false;
+    }
+
+    // Fail before building the potentially large CSR pair list when Vulkan or
+    // the selected adapter is unavailable. The ordinary CPU path remains the
+    // fallback, just like it is for direct-light gathering.
+    if (!rad::gpu::available())
+    {
+        Warning("-gpu transfers: %s; using the CPU path",
+                rad::gpu::last_error().c_str());
+        return false;
+    }
+
+    rad::gpu::formfactor_scene scene;
+    if (!MarshalFormFactorScene(scene))
+    {
+        Warning("-gpu transfers: translucent or oversized patch winding; using the CPU path");
+        return false;
+    }
+
+    std::vector<uint32_t> degree(g_num_patches, 0);
+    size_t directed_pairs = 0;
+    VisitSparsePairs([&](unsigned x, unsigned y)
+    {
+        degree[x]++;
+        degree[y]++;
+        directed_pairs += 2;
+    });
+    if (!directed_pairs)
+    {
+        return true;
+    }
+
+    std::vector<size_t> offsets(g_num_patches + 1, 0);
+    for (unsigned i = 0; i < g_num_patches; i++)
+    {
+        offsets[i + 1] = offsets[i] + degree[i];
+    }
+    std::vector<uint32_t> emitters(directed_pairs);
+    std::vector<size_t> cursor(offsets.begin(), offsets.end() - 1);
+    VisitSparsePairs([&](unsigned x, unsigned y)
+    {
+        emitters[cursor[x]++] = y;
+        emitters[cursor[y]++] = x;
+    });
+
+    Log("MakeScales (GPU: %s, %.2fM visible pairs):\n",
+        rad::gpu::device_name().c_str(), directed_pairs / 1000000.0);
+    const double started = I_FloatTime();
+    const size_t old_total = g_total_transfer;
+    const size_t old_index_bytes = g_transfer_index_bytes;
+    const size_t old_data_bytes = g_transfer_data_bytes;
+
+    std::vector<rad::gpu::transfer_pair> pairs;
+    std::vector<float> results;
+    std::vector<transfer_raw_index_t> row_indices;
+    std::vector<float> row_values;
+    pairs.reserve(GPU_TRANSFER_BATCH_PAIRS);
+
+    unsigned receiver = 0;
+    size_t dispatches = 0;
+    while (receiver < g_num_patches)
+    {
+        const unsigned batch_first = receiver;
+        pairs.clear();
+        while (receiver < g_num_patches)
+        {
+            const size_t row_count = offsets[receiver + 1] - offsets[receiver];
+            if (!pairs.empty() && pairs.size() + row_count > GPU_TRANSFER_BATCH_PAIRS)
+            {
+                break;
+            }
+            for (size_t p = offsets[receiver]; p < offsets[receiver + 1]; p++)
+            {
+                rad::gpu::transfer_pair pair;
+                pair.receiver = (int32_t)receiver;
+                pair.emitter = (int32_t)emitters[p];
+                pairs.push_back(pair);
+            }
+            receiver++;
+        }
+
+        if (!rad::gpu::formfactor_batch(scene, pairs, results)
+            || results.size() != pairs.size())
+        {
+            Warning("-gpu transfers: %s; using the CPU path",
+                    rad::gpu::last_error().c_str());
+            RollbackGpuTransfers(old_total, old_index_bytes, old_data_bytes);
+            return false;
+        }
+        dispatches++;
+
+        size_t result_pos = 0;
+        for (unsigned row = batch_first; row < receiver; row++)
+        {
+            row_indices.clear();
+            row_values.clear();
+            const size_t row_count = offsets[row + 1] - offsets[row];
+            row_indices.reserve(row_count);
+            row_values.reserve(row_count);
+            for (size_t p = offsets[row]; p < offsets[row + 1]; p++, result_pos++)
+            {
+                const float value = results[result_pos];
+                if (!std::isfinite(value))
+                {
+                    Warning("-gpu transfers: non-finite result; using the CPU path");
+                    RollbackGpuTransfers(old_total, old_index_bytes, old_data_bytes);
+                    return false;
+                }
+                if (value > 0.0f)
+                {
+                    row_indices.push_back(emitters[p]);
+                    row_values.push_back(value);
+                }
+            }
+            StoreTransferScales(&g_patches[row], row_indices.data(), row_values.data(),
+                                (unsigned)row_indices.size());
+            g_total_transfer += row_indices.size();
+        }
+    }
+
+    Log("  %.2fM candidates, %zu dispatches (%.2f seconds)\n",
+        directed_pairs / 1000000.0, dispatches, I_FloatTime() - started);
+    return true;
+#endif
+}
+
 //
 // end old vismat.c
 ////////////////////////////
@@ -457,7 +715,7 @@ void            MakeScalesSparseVismatrix()
         
 	if(g_rgb_transfers)
 		{NamedRunThreadsOn(g_num_patches, g_estimate, MakeRGBScales);}
-	else
+	else if (!MakeScalesSparseGpu())
 		{NamedRunThreadsOn(g_num_patches, g_estimate, MakeScales);}
         FreeVisMatrix();
         FreeTransparencyArrays();
