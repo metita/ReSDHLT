@@ -1,5 +1,6 @@
 #include "qrad.h"
 #include "profiling.h"
+#include "raybench.h"
 #include "gpu_gather.h"
 
 edgeshare_t     g_edgeshare[MAX_MAP_EDGES];
@@ -2778,6 +2779,10 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 								VectorAdd(pos, delta, delta);
 								vec3_t skyhit;
 								VectorCopy (delta, skyhit);
+								if (g_raybench)
+								{
+									RayBenchCapture (pos, delta);
+								}
 								if (TestLine(pos, delta
 									, skyhit
 									) != CONTENTS_SKY)
@@ -4397,6 +4402,7 @@ static void     BuildFacelights_End(const int facenum, facebuild_t *fb, int pass
 void            BuildFacelights(const int facenum)
 {
     PROF_SCOPE(PROF_BUILDFACELIGHTS);
+    WorkBenchScope  workbench_scope(facenum);
 	facebuild_t fb;
 	if (BuildFacelights_Begin (facenum, &fb, LM_NORMAL))
 	{
@@ -5091,6 +5097,7 @@ void ScaleDirectLights ()
 // =====================================================================================
 void AddPatchLights (int facenum)
 {
+	WorkBenchScope	workbench_scope (facenum);
 	dface_t *f;
 	facelightlist_t *item;
 	dface_t *f_other;

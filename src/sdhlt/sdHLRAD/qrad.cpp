@@ -21,6 +21,7 @@
 
 #include "qrad.h"
 #include "profiling.h"
+#include "raybench.h"
 #include "gpu_gather.h"
 
 
@@ -2671,13 +2672,25 @@ static void     RadWorld()
 	// the answers in hand. No face's work happens twice. If anything about the
 	// map is outside what the kernel implements it declines, and this is the
 	// ordinary CPU pass.
+    if (g_workbench)
+    {
+        WorkBenchInit(g_numfaces);
+    }
 	if (!(g_gpu && GpuBuildFacelights()))
 	{
 		NamedRunThreadsOnIndividual(g_numfaces, g_estimate, BuildFacelights);
 	}
+    if (g_workbench)
+    {
+        WorkBenchReport("BuildFacelights");
+    }
 
     // Here and not later: the sky rays have all been cast by now, and the
     // tnodes they need are still alive.
+    if (g_raybench)
+    {
+        RayBenchRun();
+    }
 
 	FreePositionMaps ();
 
@@ -2719,7 +2732,15 @@ static void     RadWorld()
 
 		CreateFacelightDependencyList ();
 
+		if (g_workbench)
+		{
+			WorkBenchInit (g_numfaces);
+		}
 		NamedRunThreadsOnIndividual (g_numfaces, g_estimate, AddPatchLights);
+		if (g_workbench)
+		{
+			WorkBenchReport ("AddPatchLights");
+		}
 
 		FreeFacelightDependencyList ();
 	}
@@ -3536,6 +3557,15 @@ int             main(const int argc, char** argv)
         else if (!strcasecmp(argv[i], "-profile"))
         {
             g_profile = true;
+        }
+        else if (!strcasecmp(argv[i], "-raybench"))
+        {
+            g_raybench = true;
+            RayBenchInit();
+        }
+        else if (!strcasecmp(argv[i], "-workbench"))
+        {
+            g_workbench = true;
         }
         else if (!strcasecmp(argv[i], "-chart"))
         {

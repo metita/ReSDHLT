@@ -208,6 +208,7 @@ set(RAD_SOURCES
     ${RAD_DIR}/gpu_gather.cpp
     ${RAD_DIR}/qrad.cpp
     ${RAD_DIR}/qradutil.cpp
+    ${RAD_DIR}/raybench.cpp
     ${RAD_DIR}/sparse.cpp
 	${RAD_DIR}/stringlib.cpp
 	${RAD_DIR}/studio.cpp
@@ -227,6 +228,7 @@ set(RAD_HEADERS
 	${RAD_DIR}/meshtrace.h
     ${RAD_DIR}/gpu_gather.h
     ${RAD_DIR}/qrad.h
+    ${RAD_DIR}/raybench.h
 )
 
 #================
@@ -347,7 +349,24 @@ if (SDHLT_ARCH_FLAGS)
     endif()
 endif()
 
-# RAD's -gpu: a Vulkan compute backend for the direct lighting gather.
+# Optional second tracer for -raybench, so the ray casting rate of the BSP walk
+# can be compared against a production BVH on the same rays and the same map.
+# Investigation only: nothing in a normal build links against it.
+#
+#   cmake -B build -S . -DSDHLT_EMBREE=ON -DEMBREE_ROOT=<embree sdk dir>
+option(SDHLT_EMBREE "Build -raybench with an Embree comparison tracer." OFF)
+
+if (SDHLT_EMBREE)
+    if (NOT EMBREE_ROOT)
+        message(FATAL_ERROR "${CMAKE_PROJECT_NAME} > SDHLT_EMBREE needs -DEMBREE_ROOT=<dir with include/ and lib/>")
+    endif()
+    target_compile_definitions(RAD PRIVATE SDHLT_EMBREE)
+    target_include_directories(RAD PRIVATE ${EMBREE_ROOT}/include)
+    target_link_libraries(RAD PRIVATE ${EMBREE_ROOT}/lib/embree4.lib)
+    message("${CMAKE_PROJECT_NAME} > -raybench will include the Embree tracer (${EMBREE_ROOT})")
+endif()
+
+# RAD's -gpu: Vulkan compute for direct-light gathering and Sparse transfers.
 #
 # It costs nothing to build in and nothing to ship: the Vulkan loader is opened
 # by name at runtime, so a machine with no Vulkan driver simply gets the CPU
