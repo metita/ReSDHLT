@@ -64,7 +64,11 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           foreach ($variant in "portable", "avx2") {
-            cmake --preset $variant
+            # MSVC emits one compiler PDB per target. sccache can hold that
+            # PDB open while Ninja starts the next compiler, which produces
+            # C1041 on clean parallel release builds. CI keeps the cache for
+            # feedback speed; published Windows binaries must build reliably.
+            cmake --preset $variant -DSDHLT_COMPILER_CACHE=OFF
             if ($LASTEXITCODE) { throw "CMake configure failed for $variant" }
 
             cmake --build --preset $variant --parallel
