@@ -28,6 +28,19 @@ if (NOT SDHLT_IS_MULTI_CONFIG AND NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(SDHLT_LTO "Enable link time optimisation for Release builds." OFF)
+option(SDHLT_STRONG_WARNINGS "Enable strong compiler warnings (warnings are not errors)." ON)
+option(SDHLT_COMPILER_CACHE "Use sccache or ccache when one is available." ON)
+
+if (SDHLT_COMPILER_CACHE AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+    find_program(SDHLT_COMPILER_CACHE_PROGRAM NAMES sccache ccache)
+    if (SDHLT_COMPILER_CACHE_PROGRAM)
+        set(CMAKE_CXX_COMPILER_LAUNCHER "${SDHLT_COMPILER_CACHE_PROGRAM}"
+            CACHE FILEPATH "Compiler cache launcher." FORCE)
+        message("${CMAKE_PROJECT_NAME} > Compiler cache: ${SDHLT_COMPILER_CACHE_PROGRAM}")
+    else()
+        message("${CMAKE_PROJECT_NAME} > Compiler cache requested but sccache/ccache was not found; continuing without it")
+    endif()
+endif()
 
 # Instruction set, applied to RAD only. Measured on ba_dust_island with MSVC
 # 19.44, RAD single-threaded, CPU time, interleaved pairs: 4-5% faster, .bsp
@@ -42,9 +55,9 @@ option(SDHLT_LTO "Enable link time optimisation for Release builds." OFF)
 #
 # WARNING: an AVX2 build does not start at all on a CPU without AVX2 - anything
 # before Intel Haswell (2013) or AMD Excavator (2015) - and the failure is a
-# silent illegal-instruction crash, not a message. Set SDHLT_ARCH="" for
-# binaries you hand to people whose hardware you do not know.
-set(SDHLT_ARCH "avx2" CACHE STRING "Instruction set for RAD: empty (portable), avx2, or native.")
+# silent illegal-instruction crash, not a message. New build trees therefore
+# default to portable; existing configured build trees keep their cached value.
+set(SDHLT_ARCH "" CACHE STRING "Instruction set for RAD: empty (portable), avx2, or native.")
 set_property(CACHE SDHLT_ARCH PROPERTY STRINGS "" avx2 native)
 
 option(SDHLT_ARCH_ALL "Apply SDHLT_ARCH to CSG/BSP/VIS as well. See the warning above." OFF)
@@ -80,8 +93,18 @@ if (SDHLT_PROFILE)
     message("${CMAKE_PROJECT_NAME} > Inner-loop profiling counters enabled")
 endif()
 
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/tools)
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/tools)
+option(SDHLT_OUTPUT_IN_BUILD_TREE
+    "Keep executables inside this build tree (required for side-by-side variants)." OFF)
+if (SDHLT_OUTPUT_IN_BUILD_TREE)
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+else()
+    # Preserve the historical one-build workflow used by map editors and local
+    # development. Presets opt into isolated output so portable and AVX2 can
+    # never satisfy each other's Ninja timestamps.
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/tools")
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/tools")
+endif()
 
 #================
 # Configuration
@@ -284,7 +307,6 @@ if (${CMAKE_SYSTEM_NAME} MATCHES "Linux")
     # Release) and GCC honours the last -O on the command line, so a hardcoded
     # -O2 listed after it would silently downgrade every Release build.
     add_compile_options(
-        -Wall
         -fno-strict-aliasing
         -pthread
         -pipe
@@ -319,6 +341,17 @@ else()
     message("${CMAKE_PROJECT_NAME} > WARNING: Unknown system \"${CMAKE_SYSTEM_NAME}\"")
 endif()
 
+# Keep the legacy codebase observable without turning its existing warning
+# debt into an overnight build break.  CI compiles with these warnings on, but
+# deliberately does not use /WX or -Werror yet.
+if (SDHLT_STRONG_WARNINGS)
+    if (MSVC)
+        add_compile_options(/W4)
+    elseif (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+        add_compile_options(-Wall -Wextra -Wshadow)
+    endif()
+endif()
+
 #================
 # Targets
 #================
@@ -337,6 +370,27 @@ set_target_properties(RIPENT
     PROPERTIES
         PREFIX ${SDHLT_PREFIX}
 )
+
+# RelWithDebInfo releases publish linker PDBs separately from the runtime ZIP.
+# Keep them inside the build tree so portable and AVX2 builds cannot overwrite
+# one another.
+if (MSVC)
+    set_target_properties(BSP PROPERTIES
+        PDB_NAME "BSP"
+        PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols")
+    set_target_properties(CSG PROPERTIES
+        PDB_NAME "CSG"
+        PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols")
+    set_target_properties(RAD PROPERTIES
+        PDB_NAME "RAD"
+        PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols")
+    set_target_properties(VIS PROPERTIES
+        PDB_NAME "VIS"
+        PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols")
+    set_target_properties(RIPENT PROPERTIES
+        PDB_NAME "RIPENT"
+        PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols")
+endif()
 
 if (SDHLT_ARCH_FLAGS)
     target_compile_options(RAD PRIVATE ${SDHLT_ARCH_FLAGS})
@@ -418,6 +472,27 @@ install(FILES
         ${CMAKE_SOURCE_DIR}/LICENSE.md
     DESTINATION .
 )
+
+# Exercise the same install tree users receive, including settings.txt beside
+# all five executables. This catches packaging-only regressions that running a
+# binary directly from its build directory cannot see.
+include(CTest)
+if (BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if (Python3_Interpreter_FOUND)
+        add_test(NAME package-layout-smoke
+            COMMAND "${CMAKE_COMMAND}"
+                "-DSDHLT_BUILD_DIR=${CMAKE_BINARY_DIR}"
+                "-DSDHLT_INSTALL_DIR=${CMAKE_BINARY_DIR}/package-smoke"
+                "-DSDHLT_CONFIG=$<CONFIG>"
+                "-DSDHLT_PYTHON=${Python3_EXECUTABLE}"
+                "-DSDHLT_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+                -P "${CMAKE_SOURCE_DIR}/tests/package_smoke.cmake")
+        set_tests_properties(package-layout-smoke PROPERTIES TIMEOUT 120)
+    else()
+        message(WARNING "${CMAKE_PROJECT_NAME} > Python was not found; package-layout-smoke is disabled")
+    endif()
+endif()
 
 #================
 # Package

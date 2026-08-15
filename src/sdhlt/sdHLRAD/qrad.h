@@ -435,6 +435,7 @@ extern bool     g_estimate;
 extern char     g_source[_MAX_PATH];
 extern vec_t    g_fade;
 extern bool     g_incremental;
+extern int      RadVisMatrixMethodId();
 extern bool     g_circus;
 extern bool		g_allow_spread;
 extern bool     g_sky_lighting_fix;
@@ -655,6 +656,7 @@ extern void		GetAlternateOrigin (const vec3_t pos, const vec3_t normal, const pa
 extern void LoadStudioModels(void);
 extern void FreeStudioModels(void);
 extern bool TestSegmentAgainstStudioList(const vec_t* p1, const vec_t* p2);
+extern uint64_t StudioModelFingerprint(void);
 extern bool g_studioshadow;
 
 #endif //HLRAD_H__

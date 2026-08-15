@@ -836,6 +836,19 @@ namespace rad
             };
             gather_session gsess;
 
+            struct formfactor_session
+            {
+                bool active = false;
+                VkDescriptorPool pool = VK_NULL_HANDLE;
+                VkDescriptorSet set = VK_NULL_HANDLE;
+                gpu_buffer scene_bufs[4];
+                gpu_buffer pair_buf;
+                gpu_buffer result_buf;
+                gpu_buffer readback_buf;
+                uint32_t max_pairs = 0;
+            };
+            formfactor_session ffsess;
+
             int tnode_tree_depth(const std::vector<tnode_gpu> &tnodes)
             {
                 int max_depth = 0;
@@ -870,6 +883,20 @@ namespace rad
                 if (gsess.pool)
                     g.fn.DestroyDescriptorPool(g.device, gsess.pool, nullptr);
                 gsess = gather_session();
+            }
+
+            void formfactor_end_locked()
+            {
+                if (!ffsess.active && !ffsess.pool)
+                    return;
+                for (gpu_buffer &buffer : ffsess.scene_bufs)
+                    buffer.destroy();
+                ffsess.pair_buf.destroy();
+                ffsess.result_buf.destroy();
+                ffsess.readback_buf.destroy();
+                if (ffsess.pool)
+                    g.fn.DestroyDescriptorPool(g.device, ffsess.pool, nullptr);
+                ffsess = formfactor_session();
             }
         }
 
@@ -1164,89 +1191,119 @@ namespace rad
             return ok;
         }
 
-        bool formfactor_batch(const formfactor_scene &scene,
-                              const std::vector<transfer_pair> &pairs,
-                              std::vector<float> &trans)
+        bool formfactor_begin(const formfactor_scene &scene, uint32_t max_pairs)
         {
             std::lock_guard<std::mutex> lock(g_mutex);
-            trans.clear();
+            formfactor_end_locked();
             if (!ensure_device_locked() || !ensure_ff_pipeline_locked())
                 return false;
-            if (scene.patches.empty() || pairs.empty())
+            if (scene.patches.empty() || max_pairs == 0)
             {
-                g.error = "formfactor_batch: empty input";
+                g.error = "formfactor_begin: empty input";
                 return false;
             }
 
-            auto upload = [&](gpu_buffer &buf, const void *data, size_t size)
+            auto upload = [&](gpu_buffer &buffer, const void *data, size_t size)
             {
-                if (!create_host_buffer(buf, size ? size : 16))
+                if (!create_host_buffer(buffer, size ? size : 16))
                     return false;
                 if (size)
-                    std::memcpy(buf.mapped, data, size);
+                    std::memcpy(buffer.mapped, data, size);
                 return true;
             };
 
-            const VkDeviceSize out_size = pairs.size() * sizeof(float);
-            gpu_buffer bufs[5];
-            gpu_buffer result_buf, readback_buf;
-            auto destroy_all = [&]()
-            {
-                for (gpu_buffer &b : bufs)
-                    b.destroy();
-                result_buf.destroy();
-                readback_buf.destroy();
-            };
-
-            bool ok = upload(bufs[0], scene.patches.data(), scene.patches.size() * sizeof(patch_gpu))
-                && upload(bufs[1], scene.windings.data(), scene.windings.size() * sizeof(float))
-                && upload(bufs[2], scene.sky_normals.data(), scene.sky_normals.size() * sizeof(float))
-                && upload(bufs[3], scene.sky_levels.data(), scene.sky_levels.size() * sizeof(int32_t))
-                && upload(bufs[4], pairs.data(), pairs.size() * sizeof(transfer_pair))
-                && create_buffer(result_buf, out_size,
+            const VkDeviceSize pair_size = (VkDeviceSize)max_pairs * sizeof(transfer_pair);
+            const VkDeviceSize result_size = (VkDeviceSize)max_pairs * sizeof(float);
+            bool ok = upload(ffsess.scene_bufs[0], scene.patches.data(),
+                             scene.patches.size() * sizeof(patch_gpu))
+                && upload(ffsess.scene_bufs[1], scene.windings.data(),
+                          scene.windings.size() * sizeof(float))
+                && upload(ffsess.scene_bufs[2], scene.sky_normals.data(),
+                          scene.sky_normals.size() * sizeof(float))
+                && upload(ffsess.scene_bufs[3], scene.sky_levels.data(),
+                          scene.sky_levels.size() * sizeof(int32_t))
+                && create_host_buffer(ffsess.pair_buf, pair_size)
+                && create_buffer(ffsess.result_buf, result_size,
                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false)
-                && create_buffer(readback_buf, out_size,
+                && create_buffer(ffsess.readback_buf, result_size,
                                  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                  | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
             if (!ok)
             {
-                g.error = "formfactor_batch: buffer creation failed";
-                destroy_all();
+                g.error = "formfactor_begin: buffer creation failed";
+                formfactor_end_locked();
                 return false;
             }
 
-            g.fn.ResetDescriptorPool(g.device, g.descriptor_pool, 0);
+            VkDescriptorPoolSize pool_size = {};
+            pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            pool_size.descriptorCount = 6;
+            VkDescriptorPoolCreateInfo dpci = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+            dpci.maxSets = 1;
+            dpci.poolSizeCount = 1;
+            dpci.pPoolSizes = &pool_size;
+            if (g.fn.CreateDescriptorPool(g.device, &dpci, nullptr, &ffsess.pool) != VK_SUCCESS)
+            {
+                g.error = "formfactor_begin: descriptor pool creation failed";
+                formfactor_end_locked();
+                return false;
+            }
+
             VkDescriptorSetAllocateInfo dsai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-            dsai.descriptorPool = g.descriptor_pool;
+            dsai.descriptorPool = ffsess.pool;
             dsai.descriptorSetCount = 1;
             dsai.pSetLayouts = &g.ff_set_layout;
-            VkDescriptorSet set = VK_NULL_HANDLE;
-            if (g.fn.AllocateDescriptorSets(g.device, &dsai, &set) != VK_SUCCESS)
+            if (g.fn.AllocateDescriptorSets(g.device, &dsai, &ffsess.set) != VK_SUCCESS)
             {
-                g.error = "formfactor_batch: descriptor set allocation failed";
-                destroy_all();
+                g.error = "formfactor_begin: descriptor set allocation failed";
+                formfactor_end_locked();
                 return false;
             }
 
             VkDescriptorBufferInfo infos[6];
             VkBuffer bindings[6] = {
-                bufs[0].buffer, bufs[1].buffer, bufs[2].buffer,
-                bufs[3].buffer, bufs[4].buffer, result_buf.buffer,
+                ffsess.scene_bufs[0].buffer, ffsess.scene_bufs[1].buffer,
+                ffsess.scene_bufs[2].buffer, ffsess.scene_bufs[3].buffer,
+                ffsess.pair_buf.buffer, ffsess.result_buf.buffer,
             };
             VkWriteDescriptorSet writes[6] = {};
             for (uint32_t i = 0; i < 6; i++)
             {
                 infos[i] = {bindings[i], 0, VK_WHOLE_SIZE};
                 writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                writes[i].dstSet = set;
+                writes[i].dstSet = ffsess.set;
                 writes[i].dstBinding = i;
                 writes[i].descriptorCount = 1;
                 writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                 writes[i].pBufferInfo = &infos[i];
             }
             g.fn.UpdateDescriptorSets(g.device, 6, writes, 0, nullptr);
+            ffsess.max_pairs = max_pairs;
+            ffsess.active = true;
+            return true;
+        }
+
+        bool formfactor_batch(const transfer_pair *pairs, size_t pair_count,
+                              std::vector<float> &trans)
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            trans.clear();
+            if (!ffsess.active)
+            {
+                g.error = "formfactor_batch: no active form factor session";
+                return false;
+            }
+            if (!pairs || pair_count == 0 || pair_count > ffsess.max_pairs)
+            {
+                g.error = "formfactor_batch: bad pair count";
+                return false;
+            }
+
+            std::memcpy(ffsess.pair_buf.mapped, pairs, pair_count * sizeof(transfer_pair));
+            const uint32_t count = (uint32_t)pair_count;
+            const VkDeviceSize out_size = (VkDeviceSize)pair_count * sizeof(float);
 
             g.fn.ResetCommandPool(g.device, g.command_pool, 0);
             VkCommandBufferBeginInfo cbbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1254,8 +1311,7 @@ namespace rad
             g.fn.BeginCommandBuffer(g.command_buffer, &cbbi);
             g.fn.CmdBindPipeline(g.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, g.ff_pipeline);
             g.fn.CmdBindDescriptorSets(g.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                       g.ff_pipeline_layout, 0, 1, &set, 0, nullptr);
-            const uint32_t count = (uint32_t)pairs.size();
+                                       g.ff_pipeline_layout, 0, 1, &ffsess.set, 0, nullptr);
             g.fn.CmdPushConstants(g.command_buffer, g.ff_pipeline_layout,
                                   VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &count);
             g.fn.CmdDispatch(g.command_buffer, (count + 63) / 64, 1, 1);
@@ -1266,7 +1322,8 @@ namespace rad
             g.fn.CmdPipelineBarrier(g.command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &to_copy, 0, nullptr, 0, nullptr);
             VkBufferCopy region = {0, 0, out_size};
-            g.fn.CmdCopyBuffer(g.command_buffer, result_buf.buffer, readback_buf.buffer, 1, &region);
+            g.fn.CmdCopyBuffer(g.command_buffer, ffsess.result_buf.buffer,
+                               ffsess.readback_buf.buffer, 1, &region);
             VkMemoryBarrier to_host = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
             to_host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
@@ -1281,20 +1338,34 @@ namespace rad
             if (g.fn.QueueSubmit(g.queue, 1, &submit, g.fence) != VK_SUCCESS)
             {
                 g.error = "formfactor_batch: vkQueueSubmit failed";
-                destroy_all();
                 return false;
             }
             if (g.fn.WaitForFences(g.device, 1, &g.fence, VK_TRUE, ~0ull) != VK_SUCCESS)
             {
                 g.error = "formfactor_batch: vkWaitForFences failed (device lost?)";
-                destroy_all();
                 return false;
             }
 
-            trans.resize(pairs.size());
-            std::memcpy(trans.data(), readback_buf.mapped, (size_t)out_size);
-            destroy_all();
+            trans.resize(pair_count);
+            std::memcpy(trans.data(), ffsess.readback_buf.mapped, (size_t)out_size);
             return true;
+        }
+
+        void formfactor_end()
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            formfactor_end_locked();
+        }
+
+        bool formfactor_batch(const formfactor_scene &scene,
+                              const std::vector<transfer_pair> &pairs,
+                              std::vector<float> &trans)
+        {
+            if (!formfactor_begin(scene, (uint32_t)pairs.size()))
+                return false;
+            const bool ok = formfactor_batch(pairs.data(), pairs.size(), trans);
+            formfactor_end();
+            return ok;
         }
     }
 }

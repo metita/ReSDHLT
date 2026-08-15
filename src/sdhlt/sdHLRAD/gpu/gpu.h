@@ -205,8 +205,15 @@ namespace rad
             std::vector<int32_t> sky_levels;  // (offset, count) per level
         };
 
-        // computes one transfer factor per pair; nan marks pairs the host
-        // must recompute (emitter winding too large for the kernel)
+        // Uploads immutable patch/winding/sky data once and reuses the pair,
+        // result and readback buffers across all transfer batches.
+        bool formfactor_begin(const formfactor_scene &scene, uint32_t max_pairs);
+        bool formfactor_batch(const transfer_pair *pairs, size_t count,
+                              std::vector<float> &trans);
+        void formfactor_end();
+
+        // One-shot convenience used by parity tests. NaN marks pairs the host
+        // must recompute (emitter winding too large for the kernel).
         bool formfactor_batch(const formfactor_scene &scene,
                               const std::vector<transfer_pair> &pairs,
                               std::vector<float> &trans);

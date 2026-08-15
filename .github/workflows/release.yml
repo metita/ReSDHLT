@@ -6,6 +6,10 @@
 # change nothing for users: a release only exists when a tag says so.
 name: release
 
+env:
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+
 on:
   push:
     tags:
@@ -21,6 +25,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Enable compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: "v0.16.0"
 
       - name: Check that the tag matches the GUI version
         shell: pwsh
@@ -46,48 +59,146 @@ jobs:
             gui/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('gui/Cargo.lock') }}
 
-      - name: Build the compile tools
+      - name: Build and test portable and AVX2 tools
         shell: pwsh
         run: |
-          cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --config Release --parallel
+          $ErrorActionPreference = "Stop"
+          foreach ($variant in "portable", "avx2") {
+            cmake --preset $variant
+            if ($LASTEXITCODE) { throw "CMake configure failed for $variant" }
+
+            cmake --build --preset $variant --parallel
+            if ($LASTEXITCODE) { throw "CMake build failed for $variant" }
+
+            ctest --preset $variant
+            if ($LASTEXITCODE) { throw "CTest failed for $variant" }
+
+            $stage = "staging/$variant"
+            cmake --install "build/$variant" --prefix $stage
+            if ($LASTEXITCODE) { throw "CMake install failed for $variant" }
+
+            $symbolDir = "symbols/$variant/tools"
+            New-Item -ItemType Directory -Force $symbolDir | Out-Null
+            $pdbs = Get-ChildItem "build/$variant/symbols" -Recurse -File -Filter "*.pdb"
+            foreach ($pdb in $pdbs) { Copy-Item $pdb.FullName $symbolDir -Force }
+
+            $neededPdbs = "sdHLCSG.pdb", "sdHLBSP.pdb", "sdHLVIS.pdb", "sdHLRAD.pdb", "sdRIPENT.pdb"
+            $missingPdbs = $neededPdbs | Where-Object { -not (Test-Path (Join-Path $symbolDir $_)) }
+            if ($missingPdbs) { throw "$variant is missing PDBs: $($missingPdbs -join ', ')" }
+          }
 
       - name: Build the GUI
         working-directory: gui
-        run: cargo build --release
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: "1"
+        run: cargo build --locked --release
 
       - name: Test the GUI
         working-directory: gui
-        run: cargo test --release
+        run: cargo test --locked --release --all-targets
 
-      - name: Assemble the package
+      - name: Assemble portable and AVX2 packages
         shell: pwsh
         run: |
-          $pkg = "package/ReSDHLT-Windows-x64"
-          New-Item -ItemType Directory -Force "$pkg/tools" | Out-Null
-          Copy-Item gui/target/release/resdhlt-gui.exe $pkg/
+          $ErrorActionPreference = "Stop"
+          $toolNames = "sdHLCSG.exe", "sdHLBSP.exe", "sdHLVIS.exe", "sdHLRAD.exe", "sdRIPENT.exe"
+          $supportFiles = "sdhlt.wad", "sdhlt.fgd", "lights.rad", "settings.txt", "wad.cfg"
 
-          # Multi-config generators put the binaries in tools/Release, so the
-          # exes are collected wherever they landed instead of assumed.
-          $exes = Get-ChildItem -Path tools, build -Recurse -File -Include sdHL*.exe, sdRIPENT.exe
-          foreach ($e in $exes) { Copy-Item $e.FullName (Join-Path "$pkg/tools" $e.Name) -Force }
-          foreach ($d in "sdhlt.wad", "sdhlt.fgd", "lights.rad", "settings.txt", "wad.cfg") {
-            if (Test-Path "tools/$d") { Copy-Item "tools/$d" "$pkg/tools/" }
+          function New-RuntimePackage {
+            param(
+              [string]$PackageName,
+              [string]$InstallRoot,
+              [string]$ZipName,
+              [string]$Flavor
+            )
+
+            $pkg = "package/$PackageName"
+            New-Item -ItemType Directory -Force "$pkg/tools" | Out-Null
+            Copy-Item "gui/target/release/resdhlt-gui.exe" $pkg -Force
+
+            foreach ($tool in $toolNames) {
+              Copy-Item (Join-Path $InstallRoot $tool) "$pkg/tools/" -Force
+            }
+            foreach ($file in $supportFiles) {
+              Copy-Item "tools/$file" "$pkg/tools/" -Force
+            }
+            foreach ($file in "README.md", "CHANGELOG.md", "LICENSE.md") {
+              Copy-Item $file $pkg -Force
+            }
+            if (Test-Path "gui/LEEME.txt") { Copy-Item "gui/LEEME.txt" $pkg -Force }
+
+            [IO.File]::WriteAllText(
+              (Join-Path $pkg "BUILD_FLAVOR.txt"),
+              "$Flavor`r`nCommit: ${{ github.sha }}`r`n",
+              [Text.UTF8Encoding]::new($false))
+
+            $needed = @(
+              "resdhlt-gui.exe",
+              "tools/sdHLCSG.exe", "tools/sdHLBSP.exe", "tools/sdHLVIS.exe", "tools/sdHLRAD.exe",
+              "tools/sdRIPENT.exe", "tools/settings.txt", "tools/sdhlt.wad"
+            )
+            $missing = $needed | Where-Object { -not (Test-Path (Join-Path $pkg $_)) }
+            if ($missing) { throw "$PackageName is missing: $($missing -join ', ')" }
+
+            python -B tests/smoke_package.py --tools-dir "$pkg/tools"
+            if ($LASTEXITCODE) { throw "Package smoke failed for $PackageName" }
+
+            Get-ChildItem -Recurse $pkg -File | Select-Object FullName, Length
+            Compress-Archive -Path "$pkg/*" -DestinationPath $ZipName -CompressionLevel Optimal
           }
-          foreach ($f in "README.md", "CHANGELOG.md", "LICENSE.md") { Copy-Item $f $pkg/ }
-          if (Test-Path gui/LEEME.txt) { Copy-Item gui/LEEME.txt $pkg/ }
 
-          # A package missing any of these is useless to whoever downloads it.
-          $needed = @(
-            "resdhlt-gui.exe",
-            "tools/sdHLCSG.exe", "tools/sdHLBSP.exe", "tools/sdHLVIS.exe", "tools/sdHLRAD.exe",
-            "tools/sdhlt.wad"
+          New-RuntimePackage `
+            -PackageName "ReSDHLT-Windows-x64" `
+            -InstallRoot "staging/portable" `
+            -ZipName "ReSDHLT-Windows-x64.zip" `
+            -Flavor "Portable x64 build. No AVX2 CPU support is required."
+
+          New-RuntimePackage `
+            -PackageName "ReSDHLT-Windows-x64-avx2" `
+            -InstallRoot "staging/avx2" `
+            -ZipName "ReSDHLT-Windows-x64-avx2.zip" `
+            -Flavor "AVX2 x64 build. sdHLRAD requires an AVX2-capable CPU."
+
+      - name: Assemble debug symbols and SHA-256 manifests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $guiPdb = "gui/target/release/resdhlt_gui.pdb"
+          if (-not (Test-Path $guiPdb)) {
+            $guiPdb = "gui/target/release/resdhlt-gui.pdb"
+          }
+          if (-not (Test-Path $guiPdb)) { throw "Cargo did not produce a GUI PDB" }
+
+          foreach ($variant in "portable", "avx2") {
+            Copy-Item $guiPdb "symbols/$variant/" -Force
+            $flavor = if ($variant -eq "portable") {
+              "Symbols for ReSDHLT-Windows-x64.zip"
+            } else {
+              "Symbols for ReSDHLT-Windows-x64-avx2.zip"
+            }
+            [IO.File]::WriteAllText(
+              "symbols/$variant/BUILD_FLAVOR.txt",
+              "$flavor`r`nCommit: ${{ github.sha }}`r`n",
+              [Text.UTF8Encoding]::new($false))
+          }
+
+          Compress-Archive -Path "symbols/portable/*" -DestinationPath "ReSDHLT-Windows-x64-symbols.zip" -CompressionLevel Optimal
+          Compress-Archive -Path "symbols/avx2/*" -DestinationPath "ReSDHLT-Windows-x64-avx2-symbols.zip" -CompressionLevel Optimal
+
+          $assets = @(
+            "ReSDHLT-Windows-x64.zip",
+            "ReSDHLT-Windows-x64-avx2.zip",
+            "ReSDHLT-Windows-x64-symbols.zip",
+            "ReSDHLT-Windows-x64-avx2-symbols.zip"
           )
-          $missing = $needed | Where-Object { -not (Test-Path (Join-Path $pkg $_)) }
-          if ($missing) { throw "Al paquete le faltan: $($missing -join ', ')" }
-
-          Get-ChildItem -Recurse $pkg -File | Select-Object FullName, Length
-          Compress-Archive -Path "$pkg/*" -DestinationPath "ReSDHLT-Windows-x64.zip" -CompressionLevel Optimal
+          $manifest = foreach ($asset in $assets) {
+            $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+            $line = "$hash *$asset"
+            [IO.File]::WriteAllText("$asset.sha256", "$line`n", [Text.UTF8Encoding]::new($false))
+            $line
+          }
+          [IO.File]::WriteAllLines("SHA256SUMS.txt", $manifest, [Text.UTF8Encoding]::new($false))
+          Get-Content SHA256SUMS.txt
 
       # A release page with nothing but a compare link tells a mapper nothing.
       # Write the notes into docs/release-notes/<tag>.md and they become the
@@ -112,6 +223,15 @@ jobs:
       - name: Publish the release
         uses: softprops/action-gh-release@v2
         with:
-          files: ReSDHLT-Windows-x64.zip
+          files: |
+            ReSDHLT-Windows-x64.zip
+            ReSDHLT-Windows-x64-avx2.zip
+            ReSDHLT-Windows-x64-symbols.zip
+            ReSDHLT-Windows-x64-avx2-symbols.zip
+            ReSDHLT-Windows-x64.zip.sha256
+            ReSDHLT-Windows-x64-avx2.zip.sha256
+            ReSDHLT-Windows-x64-symbols.zip.sha256
+            ReSDHLT-Windows-x64-avx2-symbols.zip.sha256
+            SHA256SUMS.txt
           body: ${{ steps.notes.outputs.body }}
           generate_release_notes: true

@@ -119,7 +119,11 @@ fn find_rc() -> Option<PathBuf> {
         }
     }
 
-    let arch = if cfg!(target_arch = "x86") { "x86" } else { "x64" };
+    let arch = if cfg!(target_arch = "x86") {
+        "x86"
+    } else {
+        "x64"
+    };
     let mut roots: Vec<PathBuf> = Vec::new();
     for env in ["ProgramFiles(x86)", "ProgramFiles"] {
         if let Ok(pf) = std::env::var(env) {

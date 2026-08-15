@@ -2,10 +2,14 @@
 #include "profiling.h"
 #include "gpu_gather.h"
 
+#include <algorithm>
+#include <atomic>
+#include <vector>
+
 #ifdef SDHLT_GPU
 #include <cmath>
 #include <cstdint>
-#include <vector>
+#include <cstdlib>
 
 #include "gpu/gpu.h"
 #endif
@@ -27,6 +31,10 @@ typedef struct
 sparse_column_t;
 
 sparse_column_t* s_vismatrix;
+static std::vector< std::vector<unsigned> > s_patches_by_leaf;
+static std::atomic<uint64_t> s_sparse_source_patches(0);
+static std::atomic<uint64_t> s_sparse_candidate_faces(0);
+static std::atomic<uint64_t> s_sparse_visible_pairs(0);
 
 // Vismatrix protected
 static unsigned IsVisbitInArray(const unsigned x, const unsigned y)
@@ -70,77 +78,63 @@ static unsigned IsVisbitInArray(const unsigned x, const unsigned y)
     }
 }
 
-static void		SetVisColumn (int patchnum, bool uncompressedcolumn[MAX_SPARSE_VISMATRIX_PATCHES])
+static size_t SetVisColumn(int patchnum, std::vector<unsigned>& visible_patches)
 {
-	sparse_column_t *column;
-	int mbegin;
-	int m;
-	int i;
-	unsigned int bits;
-	
-	column = &s_vismatrix[patchnum];
+	sparse_column_t* column = &s_vismatrix[patchnum];
 	if (column->count || column->row)
 	{
 		Error ("SetVisColumn: column has been set");
 	}
 
-	for (mbegin = 0; mbegin < g_num_patches; mbegin += 8)
+	if (visible_patches.empty())
 	{
-		bits = 0;
-		for (m = mbegin; m < mbegin + 8; m++)
-		{
-			if (m >= g_num_patches)
-			{
-				break;
-			}
-			if (uncompressedcolumn[m]) // visible
-			{
-				if (m < patchnum)
-				{
-					Error ("SetVisColumn: invalid parameter: m < patchnum");
-				}
-				bits |= (1 << (m - mbegin));
-			}
-		}
-		if (bits)
+		return 0;
+	}
+
+	// TestPatchToFace normally emits indices in face/patch order, but sorting
+	// here makes the compact row byte-for-byte equivalent to the old full-array
+	// scan even if patch allocation order changes in the future.
+	std::sort(visible_patches.begin(), visible_patches.end());
+	visible_patches.erase(std::unique(visible_patches.begin(), visible_patches.end()),
+	                      visible_patches.end());
+
+	unsigned previous_byte = UINT_MAX;
+	for (size_t i = 0; i < visible_patches.size(); ++i)
+	{
+		const unsigned patch = visible_patches[i];
+		if (patch < (unsigned)patchnum || patch >= g_num_patches)
+			Error("SetVisColumn: invalid patch index");
+		const unsigned byte_offset = patch >> 3;
+		if (byte_offset != previous_byte)
 		{
 			column->count++;
+			previous_byte = byte_offset;
 		}
 	}
 
-	if (!column->count)
-	{
-		return;
-	}
-	column->row = (sparse_row_t *)malloc (column->count * sizeof (sparse_row_t));
+	column->row = (sparse_row_t*)malloc(column->count * sizeof(sparse_row_t));
 	hlassume (column->row != NULL, assume_NoMemory);
-	
-	i = 0;
-	for (mbegin = 0; mbegin < g_num_patches; mbegin += 8)
+
+	int row = -1;
+	previous_byte = UINT_MAX;
+	for (size_t i = 0; i < visible_patches.size(); ++i)
 	{
-		bits = 0;
-		for (m = mbegin; m < mbegin + 8; m++)
+		const unsigned patch = visible_patches[i];
+		const unsigned byte_offset = patch >> 3;
+		if (byte_offset != previous_byte)
 		{
-			if (m >= g_num_patches)
-			{
-				break;
-			}
-			if (uncompressedcolumn[m]) // visible
-			{
-				bits |= (1 << (m - mbegin));
-			}
+			++row;
+			column->row[row].offset = byte_offset;
+			column->row[row].values = 0;
+			previous_byte = byte_offset;
 		}
-		if (bits)
-		{
-			column->row[i].offset = mbegin / 8;
-			column->row[i].values = bits;
-			i++;
-		}
+		column->row[row].values |= 1u << (patch & 7u);
 	}
-	if (i != column->count)
+	if (row + 1 != column->count)
 	{
 		Error ("SetVisColumn: internal error");
 	}
+	return visible_patches.size();
 }
 
 // Vismatrix public
@@ -198,7 +192,9 @@ static bool     CheckVisBitSparse(unsigned x, unsigned y
  */
 static void     TestPatchToFace(const unsigned patchnum, const int facenum, const int head
 								, byte *pvs
-								, bool uncompressedcolumn[MAX_SPARSE_VISMATRIX_PATCHES]
+								, uint32_t* visible_generation
+								, uint32_t generation
+								, std::vector<unsigned>& visible_patches
 								)
 {
     patch_t*        patch = &g_patches[patchnum];
@@ -286,7 +282,11 @@ static void     TestPatchToFace(const unsigned patchnum, const int facenum, cons
                     {
                     	AddTransparencyToRawArray(patchnum, m, transparency);
                     }
-					uncompressedcolumn[m] = true;
+					if (visible_generation[m] != generation)
+					{
+						visible_generation[m] = generation;
+						visible_patches.push_back(m);
+					}
                 }
             }
         }
@@ -308,15 +308,16 @@ static void     TestPatchToFace(const unsigned patchnum, const int facenum, cons
 static void     BuildVisLeafs(int threadnum)
 {
     int             i;
-    int             lface, facenum, facenum2;
     byte            pvs[(MAX_MAP_LEAFS + 7) / 8];
     dleaf_t*        srcleaf;
-    dleaf_t*        leaf;
-    patch_t*        patch;
     int             head;
-    unsigned        patchnum;
-	bool *uncompressedcolumn = (bool *)malloc (MAX_SPARSE_VISMATRIX_PATCHES * sizeof (bool));
-	hlassume (uncompressedcolumn != NULL, assume_NoMemory);
+	std::vector<uint32_t> visible_generation(g_num_patches, 0);
+	std::vector<unsigned> visible_patches;
+	std::vector<int> candidate_faces;
+	uint32_t generation = 0;
+	uint64_t local_source_patches = 0;
+	uint64_t local_candidate_faces = 0;
+	uint64_t local_visible_pairs = 0;
 
     while (1)
     {
@@ -346,32 +347,50 @@ static void     BuildVisLeafs(int threadnum)
 		}
         head = 0;
 
-        //
-        // go through all the faces inside the
-        // leaf, and process the patches that
-        // actually have origins inside
-        //
-		for (facenum = 0; facenum < g_numfaces; facenum++)
+		// Build the PVS-compatible target face list once per source leaf. The old
+		// code rediscovered the same empty faces for every patch in this leaf.
+		candidate_faces.clear();
+		for (int facenum = 0; facenum < g_numfaces; ++facenum)
 		{
-			for (patch = g_face_patches[facenum]; patch; patch = patch->next)
+			for (patch_t* target = g_face_patches[facenum]; target; target = target->next)
 			{
-				if (patch->leafnum != i)
-					continue;
-				patchnum = patch - g_patches;
-				for (int m = 0; m < g_num_patches; m++)
+				if (target->leafnum != 0
+					&& (pvs[(target->leafnum - 1) >> 3]
+						& (1 << ((target->leafnum - 1) & 7))))
 				{
-					uncompressedcolumn[m] = false;
+					candidate_faces.push_back(facenum);
+					break;
 				}
-				for (facenum2 = facenum + 1; facenum2 < g_numfaces; facenum2++)
-					TestPatchToFace (patchnum, facenum2, head, pvs
-									, uncompressedcolumn
-									);
-				SetVisColumn (patchnum, uncompressedcolumn);
 			}
 		}
 
+		const std::vector<unsigned>& source_patches = s_patches_by_leaf[i];
+		for (size_t source = 0; source < source_patches.size(); ++source)
+		{
+			const unsigned patchnum = source_patches[source];
+			const int source_face = g_patches[patchnum].faceNumber;
+			if (++generation == 0)
+			{
+				std::fill(visible_generation.begin(), visible_generation.end(), 0);
+				generation = 1;
+			}
+			visible_patches.clear();
+			std::vector<int>::const_iterator target = std::upper_bound(
+				candidate_faces.begin(), candidate_faces.end(), source_face);
+			local_source_patches++;
+			local_candidate_faces += candidate_faces.end() - target;
+			for (; target != candidate_faces.end(); ++target)
+			{
+				TestPatchToFace(patchnum, *target, head, pvs,
+				                visible_generation.data(), generation, visible_patches);
+			}
+			local_visible_pairs += SetVisColumn((int)patchnum, visible_patches);
+		}
+
     }
-	free (uncompressedcolumn);
+	s_sparse_source_patches.fetch_add(local_source_patches, std::memory_order_relaxed);
+	s_sparse_candidate_faces.fetch_add(local_candidate_faces, std::memory_order_relaxed);
+	s_sparse_visible_pairs.fetch_add(local_visible_pairs, std::memory_order_relaxed);
 }
 
 #ifdef SYSTEM_WIN32
@@ -393,7 +412,27 @@ static void     BuildVisMatrix()
         hlassume(s_vismatrix != NULL, assume_NoMemory);
     }
 
+	s_patches_by_leaf.clear();
+	s_patches_by_leaf.resize((size_t)g_dmodels[0].visleafs + 1);
+	for (int facenum = 0; facenum < g_numfaces; ++facenum)
+	{
+		for (patch_t* patch = g_face_patches[facenum]; patch; patch = patch->next)
+		{
+			if (patch->leafnum > 0 && patch->leafnum <= g_dmodels[0].visleafs)
+				s_patches_by_leaf[patch->leafnum].push_back((unsigned)(patch - g_patches));
+		}
+	}
+	s_sparse_source_patches.store(0, std::memory_order_relaxed);
+	s_sparse_candidate_faces.store(0, std::memory_order_relaxed);
+	s_sparse_visible_pairs.store(0, std::memory_order_relaxed);
+	const double started = I_FloatTime();
     NamedRunThreadsOn(g_dmodels[0].visleafs, g_estimate, BuildVisLeafs);
+	Log("Sparse visibility: %llu source patches, %.2fM candidate faces, %.2fM visible pairs (%.2f seconds)\n",
+		(unsigned long long)s_sparse_source_patches.load(std::memory_order_relaxed),
+		s_sparse_candidate_faces.load(std::memory_order_relaxed) / 1000000.0,
+		s_sparse_visible_pairs.load(std::memory_order_relaxed) / 1000000.0,
+		I_FloatTime() - started);
+	std::vector< std::vector<unsigned> >().swap(s_patches_by_leaf);
 }
 
 static void     FreeVisMatrix()
@@ -450,6 +489,24 @@ namespace
     // below Vulkan's guaranteed 128 MB storage-buffer range. It also dispatches
     // 62,500 workgroups, below the guaranteed per-axis limit of 65,535.
     const size_t GPU_TRANSFER_BATCH_PAIRS = 4000000;
+    const size_t GPU_AUTO_TRANSFER_PAIRS = 1000000;
+
+    size_t GpuTransferBatchPairs(size_t largest_row)
+    {
+        size_t requested = GPU_TRANSFER_BATCH_PAIRS;
+        const char* value = std::getenv("SDHLT_GPU_TRANSFER_BATCH_PAIRS");
+        if (value && *value)
+        {
+            char* end = NULL;
+            const unsigned long long parsed = std::strtoull(value, &end, 10);
+            if (end != value && *end == '\0' && parsed > 0)
+            {
+                requested = (size_t)std::min(parsed,
+                    (unsigned long long)GPU_TRANSFER_BATCH_PAIRS);
+            }
+        }
+        return std::max(requested, largest_row);
+    }
 
     template <typename Visitor>
     void VisitSparsePairs(Visitor visit)
@@ -563,25 +620,9 @@ bool MakeScalesSparseGpu()
 #ifndef SDHLT_GPU
     return false;
 #else
-    if (!g_gpu || g_rgb_transfers || g_customshadow_with_bouncelight)
+    if (!g_gpu || !g_gpu_transfers || g_rgb_transfers
+        || g_customshadow_with_bouncelight)
     {
-        return false;
-    }
-
-    // Fail before building the potentially large CSR pair list when Vulkan or
-    // the selected adapter is unavailable. The ordinary CPU path remains the
-    // fallback, just like it is for direct-light gathering.
-    if (!rad::gpu::available())
-    {
-        Warning("-gpu transfers: %s; using the CPU path",
-                rad::gpu::last_error().c_str());
-        return false;
-    }
-
-    rad::gpu::formfactor_scene scene;
-    if (!MarshalFormFactorScene(scene))
-    {
-        Warning("-gpu transfers: translucent or oversized patch winding; using the CPU path");
         return false;
     }
 
@@ -597,6 +638,32 @@ bool MakeScalesSparseGpu()
     {
         return true;
     }
+    if (g_gpu_auto && directed_pairs < GPU_AUTO_TRANSFER_PAIRS)
+    {
+        Log("MakeScales: GPU auto chose CPU (%.2fM visible pairs; crossover starts near %.2fM)\n",
+            directed_pairs / 1000000.0, GPU_AUTO_TRANSFER_PAIRS / 1000000.0);
+        return false;
+    }
+
+    rad::gpu::set_adapter_override(g_gpu_adapter);
+    // Only initialize Vulkan after automatic selection has decided the phase
+    // is large enough to benefit. The ordinary CPU path remains the fallback.
+    if (!rad::gpu::available())
+    {
+        Warning("-gpu transfers: %s; using the CPU path",
+                rad::gpu::last_error().c_str());
+        return false;
+    }
+
+    rad::gpu::formfactor_scene scene;
+    if (!MarshalFormFactorScene(scene))
+    {
+        Warning("-gpu transfers: translucent or oversized patch winding; using the CPU path");
+        return false;
+    }
+
+    const size_t largest_row = *std::max_element(degree.begin(), degree.end());
+    const size_t batch_pairs = GpuTransferBatchPairs(largest_row);
 
     std::vector<size_t> offsets(g_num_patches + 1, 0);
     for (unsigned i = 0; i < g_num_patches; i++)
@@ -622,7 +689,21 @@ bool MakeScalesSparseGpu()
     std::vector<float> results;
     std::vector<transfer_raw_index_t> row_indices;
     std::vector<float> row_values;
-    pairs.reserve(GPU_TRANSFER_BATCH_PAIRS);
+    pairs.reserve(batch_pairs);
+
+    if (!rad::gpu::formfactor_begin(scene, (uint32_t)batch_pairs))
+    {
+        Warning("-gpu transfers: %s; using the CPU path",
+                rad::gpu::last_error().c_str());
+        return false;
+    }
+    struct formfactor_session_guard_t
+    {
+        ~formfactor_session_guard_t()
+        {
+            rad::gpu::formfactor_end();
+        }
+    } formfactor_session_guard;
 
     unsigned receiver = 0;
     size_t dispatches = 0;
@@ -633,7 +714,7 @@ bool MakeScalesSparseGpu()
         while (receiver < g_num_patches)
         {
             const size_t row_count = offsets[receiver + 1] - offsets[receiver];
-            if (!pairs.empty() && pairs.size() + row_count > GPU_TRANSFER_BATCH_PAIRS)
+            if (!pairs.empty() && pairs.size() + row_count > batch_pairs)
             {
                 break;
             }
@@ -647,7 +728,7 @@ bool MakeScalesSparseGpu()
             receiver++;
         }
 
-        if (!rad::gpu::formfactor_batch(scene, pairs, results)
+        if (!rad::gpu::formfactor_batch(pairs.data(), pairs.size(), results)
             || results.size() != pairs.size())
         {
             Warning("-gpu transfers: %s; using the CPU path",

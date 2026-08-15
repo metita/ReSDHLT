@@ -1755,6 +1755,21 @@ static void     Settings()
     Log("\n");
 }
 
+// settings.txt can append defaults to the original command line.  A plain
+// `i + 1 < argc` check therefore does not prove that an option actually has a
+// value: the next token can be another option injected by that file.  Keep
+// every value-taking CSG option on the same checked path.
+static const char* RequireOptionValue(const char* option, int& i, const int argc, char** argv)
+{
+    if (i + 1 >= argc || argv[i + 1][0] == '-')
+    {
+        Log("Error: option '%s' requires a value\n", option);
+        Usage();
+    }
+
+    return argv[++i];
+}
+
 // AJM: added in
 // =====================================================================================
 //  CSGCleanup
@@ -1810,24 +1825,17 @@ int             main(const int argc, char** argv)
     {
         if (!strcasecmp(argv[i], "-threads"))
         {
-            if (i + 1 < argc)	//added "1" .--vluzacn
+            g_numthreads = atoi(RequireOptionValue("-threads", i, argc, argv));
+            if (g_numthreads < 1)
             {
-                g_numthreads = atoi(argv[++i]);
-                if (g_numthreads < 1)
-                {
-                    Log("Expected value of at least 1 for '-threads'\n");
-                    Usage();
-                }
-            }
-            else
-            {
+                Log("Expected value of at least 1 for '-threads'\n");
                 Usage();
             }
         }
 
         else if (!strcasecmp(argv[i], "-worldextent"))
         {
-            g_iWorldExtent = atoi(argv[++i]);
+            g_iWorldExtent = atoi(RequireOptionValue("-worldextent", i, argc, argv));
         }
 
 		else if (!strcasecmp(argv[i], "-console"))
@@ -1835,10 +1843,7 @@ int             main(const int argc, char** argv)
 #ifndef SYSTEM_WIN32
 			Warning("The option '-console #' is only valid for Windows.");
 #endif
-			if (i + 1 < argc)
-				++i;
-			else
-				Usage();
+			RequireOptionValue("-console", i, argc, argv);
 		}
 #ifdef SYSTEM_WIN32
         else if (!strcasecmp(argv[i], "-estimate"))
@@ -1856,14 +1861,7 @@ int             main(const int argc, char** argv)
 
         else if (!strcasecmp(argv[i], "-dev"))
         {
-            if (i + 1 < argc)	//added "1" .--vluzacn
-            {
-                g_developer = (developer_level_t)atoi(argv[++i]);
-            }
-            else
-            {
-                Usage();
-            }
+            g_developer = (developer_level_t)atoi(RequireOptionValue("-dev", i, argc, argv));
         }
         else if (!strcasecmp(argv[i], "-verbose"))
         {
@@ -1926,38 +1924,22 @@ int             main(const int argc, char** argv)
 
 		else if (!strcasecmp(argv[i], "-cliptype"))
 		{
-			if (i + 1 < argc)	//added "1" .--vluzacn
-			{
-				++i;
-				if(!strcasecmp(argv[i],"smallest"))
+			const char* value = RequireOptionValue("-cliptype", i, argc, argv);
+				if(!strcasecmp(value,"smallest"))
 				{ g_cliptype = clip_smallest; }
-				else if(!strcasecmp(argv[i],"normalized"))
+				else if(!strcasecmp(value,"normalized"))
 				{ g_cliptype = clip_normalized; }
-				else if(!strcasecmp(argv[i],"simple"))
+				else if(!strcasecmp(value,"simple"))
 				{ g_cliptype = clip_simple; }
-				else if(!strcasecmp(argv[i],"precise"))
+				else if(!strcasecmp(value,"precise"))
 				{ g_cliptype = clip_precise; }
-				else if(!strcasecmp(argv[i],"legacy"))
+				else if(!strcasecmp(value,"legacy"))
 				{ g_cliptype = clip_legacy; }
-			}
-            else
-            {
-                Log("Error: -cliptype: incorrect usage of parameter\n");
-                Usage();
-            }
 		}
 
 		else if (!strcasecmp(argv[i], "-nullfile"))
 		{
-            if (i + 1 < argc)	//added "1" .--vluzacn
-            {
-                g_nullfile = argv[++i];
-            }
-            else
-            {
-            	Log("Error: -nullfile: expected path to null ent file following parameter\n");
-                Usage();
-            }
+			g_nullfile = RequireOptionValue("-nullfile", i, argc, argv);
 		}
         else if (!strcasecmp(argv[i], "-nowadautodetect"))
         { 
@@ -1969,129 +1951,59 @@ int             main(const int argc, char** argv)
         }
         else if (!strcasecmp(argv[i], "-wadinclude"))
         {
-            if (i + 1 < argc)	//added "1" .--vluzacn
-            {
-                g_WadInclude.push_back(argv[++i]);
-            }
-            else
-            {
-                Usage();
-            }
+            g_WadInclude.push_back(RequireOptionValue("-wadinclude", i, argc, argv));
         }
         else if (!strcasecmp(argv[i], "-texdata"))
         {
-            if (i + 1 < argc)	//added "1" .--vluzacn
-            {
-                int             x = atoi(argv[++i]) * 1024;
+            int             x = atoi(RequireOptionValue("-texdata", i, argc, argv)) * 1024;
 
-                //if (x > g_max_map_miptex) //--vluzacn
-                {
-                    g_max_map_miptex = x;
-                }
-            }
-            else
+            //if (x > g_max_map_miptex) //--vluzacn
             {
-                Usage();
+                g_max_map_miptex = x;
             }
         }
         else if (!strcasecmp(argv[i], "-lightdata"))
         {
-            if (i + 1 < argc)	//added "1" .--vluzacn
-            {
-                int             x = atoi(argv[++i]) * 1024;
+            int             x = atoi(RequireOptionValue("-lightdata", i, argc, argv)) * 1024;
 
-                //if (x > g_max_map_lightdata) //--vluzacn
-                {
-                    g_max_map_lightdata = x;
-                }
-            }
-            else
+            //if (x > g_max_map_lightdata) //--vluzacn
             {
-                Usage();
+                g_max_map_lightdata = x;
             }
         }
         else if (!strcasecmp(argv[i], "-brushunion"))
         {
-            if (i + 1 < argc)	//added "1" .--vluzacn
-            {
-                g_BrushUnionThreshold = (float)atof(argv[++i]);
-            }
-            else
-            {
-                Usage();
-            }
+            g_BrushUnionThreshold = (float)atof(RequireOptionValue("-brushunion", i, argc, argv));
         }
         else if (!strcasecmp(argv[i], "-tiny"))
         {
-            if (i + 1 < argc)	//added "1" .--vluzacn
-            {
-                g_tiny_threshold = (float)atof(argv[++i]);
-            }
-            else
-            {
-                Usage();
-            }
+            g_tiny_threshold = (float)atof(RequireOptionValue("-tiny", i, argc, argv));
         }
         else if (!strcasecmp(argv[i], "-hullfile"))
         {
-            if (i + 1 < argc)	//added "1" .--vluzacn
-            {
-                g_hullfile = argv[++i];
-            }
-            else
-            {
-                Usage();
-            }
+            g_hullfile = RequireOptionValue("-hullfile", i, argc, argv);
         }
 		else if (!strcasecmp (argv[i], "-wadcfgfile"))
 		{
-			if (i + 1 < argc)
-			{
-				g_wadcfgfile = argv[++i];
-			}
-			else
-			{
-				Usage ();
-			}
+			g_wadcfgfile = RequireOptionValue("-wadcfgfile", i, argc, argv);
 		}
 		else if (!strcasecmp (argv[i], "-wadconfig"))
 		{
-			if (i + 1 < argc)
-			{
-				g_wadconfigname = argv[++i];
-			}
-			else
-			{
-				Usage ();
-			}
+			g_wadconfigname = RequireOptionValue("-wadconfig", i, argc, argv);
 		}
         else if (!strcasecmp(argv[i], "-scale"))
         {
-            if (i + 1 < argc)
-            {
-                g_scalesize = atof(argv[++i]);
-            }
-            else
-            {
-                Usage();
-            }
+            g_scalesize = atof(RequireOptionValue("-scale", i, argc, argv));
         }
 		else if (!strcasecmp (argv[i], "-lang"))
 		{
-			if (i + 1 < argc)
-			{
-				char tmp[_MAX_PATH];
+			char tmp[_MAX_PATH];
 #ifdef SYSTEM_WIN32
-				GetModuleFileName (NULL, tmp, _MAX_PATH);
+			GetModuleFileName (NULL, tmp, _MAX_PATH);
 #else
-				safe_strncpy (tmp, argv[0], _MAX_PATH);
+			safe_strncpy (tmp, argv[0], _MAX_PATH);
 #endif
-				LoadLangFile (argv[++i], tmp);
-			}
-			else
-			{
-				Usage();
-			}
+			LoadLangFile (RequireOptionValue("-lang", i, argc, argv), tmp);
 		}
 		else if (!strcasecmp (argv[i], "-noresetlog"))
 		{
@@ -2125,15 +2037,8 @@ int             main(const int argc, char** argv)
 		}
 		else if (!strcasecmp (argv[i], "-mergesize"))
 		{
-			if (i + 1 < argc)
-			{
-				g_merge_maxsize = atof(argv[++i]);
-				g_merge_entities = true;
-			}
-			else
-			{
-				Usage();
-			}
+			g_merge_maxsize = atof(RequireOptionValue("-mergesize", i, argc, argv));
+			g_merge_entities = true;
 		}
 		else if (!strcasecmp (argv[i], "-mergeblend"))
 		{

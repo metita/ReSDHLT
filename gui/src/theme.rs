@@ -15,7 +15,9 @@ pub const CARD_HI: Color32 = Color32::from_rgb(0x22, 0x27, 0x31);
 pub const LINE: Color32 = Color32::from_rgb(0x2A, 0x30, 0x3B);
 pub const TEXT: Color32 = Color32::from_rgb(0xE6, 0xE9, 0xEF);
 pub const MUTED: Color32 = Color32::from_rgb(0x8B, 0x93, 0xA1);
-pub const FAINT: Color32 = Color32::from_rgb(0x60, 0x68, 0x76);
+// 4.68:1 against CARD, the lightest surface it is drawn on. This keeps even
+// the 11.5 px command previews above WCAG AA's 4.5:1 normal-text threshold.
+pub const FAINT: Color32 = Color32::from_rgb(0x80, 0x88, 0x96);
 pub const ACCENT: Color32 = Color32::from_rgb(0x5A, 0xA9, 0xFF);
 pub const ACCENT_DEEP: Color32 = Color32::from_rgb(0x1E, 0x4C, 0x84);
 pub const OK: Color32 = Color32::from_rgb(0x4E, 0xD0, 0x8A);

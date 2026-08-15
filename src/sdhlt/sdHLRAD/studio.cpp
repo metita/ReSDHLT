@@ -8,6 +8,41 @@
 model_t models[MAX_MODELS];
 int num_models;
 
+static void StudioFingerprintBytes(uint64_t& hash, const void* data, size_t size)
+{
+	const byte* bytes = (const byte*)data;
+	for (size_t i = 0; i < size; ++i)
+	{
+		hash ^= bytes[i];
+		hash *= UINT64_C(1099511628211);
+	}
+}
+
+uint64_t StudioModelFingerprint(void)
+{
+	uint64_t hash = UINT64_C(1469598103934665603);
+	StudioFingerprintBytes(hash, &num_models, sizeof(num_models));
+	for (int i = 0; i < num_models; ++i)
+	{
+		const model_t* model = &models[i];
+		StudioFingerprintBytes(hash, model->name, strlen(model->name) + 1);
+		StudioFingerprintBytes(hash, model->origin, sizeof(model->origin));
+		StudioFingerprintBytes(hash, model->angles, sizeof(model->angles));
+		StudioFingerprintBytes(hash, model->scale, sizeof(model->scale));
+		StudioFingerprintBytes(hash, &model->trace_mode, sizeof(model->trace_mode));
+		StudioFingerprintBytes(hash, &model->body, sizeof(model->body));
+		StudioFingerprintBytes(hash, &model->skin, sizeof(model->skin));
+
+		const studiohdr_t* header = (const studiohdr_t*)model->extradata;
+		if (header && header->length > 0)
+		{
+			StudioFingerprintBytes(hash, &header->length, sizeof(header->length));
+			StudioFingerprintBytes(hash, header, (size_t)header->length);
+		}
+	}
+	return hash;
+}
+
 void LoadStudioModel( const char *modelname, const vec3_t origin, const vec3_t angles, const vec3_t scale, int body, int skin, int trace_mode )
 {
 	if( num_models >= MAX_MODELS )

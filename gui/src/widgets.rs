@@ -151,12 +151,7 @@ pub fn chip(ui: &mut Ui, text: &str, color: Color32) -> Response {
 
 /// A titled card. Every group of options sits in one, which is what gives the
 /// tabs their consistent rhythm.
-pub fn card<R>(
-    ui: &mut Ui,
-    title: &str,
-    subtitle: &str,
-    body: impl FnOnce(&mut Ui) -> R,
-) -> R {
+pub fn card<R>(ui: &mut Ui, title: &str, subtitle: &str, body: impl FnOnce(&mut Ui) -> R) -> R {
     let out = egui::Frame::none()
         .fill(CARD)
         .stroke(egui::Stroke::new(1.0_f32, LINE))
@@ -173,11 +168,8 @@ pub fn card<R>(
                 });
                 ui.add_space(6.0);
                 let line = ui.available_rect_before_wrap();
-                ui.painter().hline(
-                    line.x_range(),
-                    line.top(),
-                    egui::Stroke::new(1.0_f32, LINE),
-                );
+                ui.painter()
+                    .hline(line.x_range(), line.top(), egui::Stroke::new(1.0_f32, LINE));
                 ui.add_space(6.0);
             }
             body(ui)
@@ -189,13 +181,20 @@ pub fn card<R>(
 
 /// iOS-style switch. Reads much faster than a checkbox in a long list of
 /// on/off options, which is most of this UI.
-pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
+pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     let size = Vec2::new(38.0, 20.0);
     let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click());
-    if resp.clicked() {
+    let keyboard_toggle = resp.has_focus()
+        && ui.input(|input| {
+            input.key_pressed(egui::Key::Space) || input.key_pressed(egui::Key::Enter)
+        });
+    if resp.clicked() || keyboard_toggle {
         *on = !*on;
         resp.mark_changed();
     }
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *on, label)
+    });
     let how = ui.ctx().animate_bool(resp.id, *on);
     let hovered = resp.hovered();
 
@@ -222,9 +221,16 @@ pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
 
 /// Toggle row: switch plus the state in words, so nothing depends on colour
 /// alone.
-pub fn toggle_row(ui: &mut Ui, m: &Metrics, label: &str, help: &str, badge: Option<&str>, on: &mut bool) {
+pub fn toggle_row(
+    ui: &mut Ui,
+    m: &Metrics,
+    label: &str,
+    help: &str,
+    badge: Option<&str>,
+    on: &mut bool,
+) {
     row(ui, m, label, help, badge, |ui| {
-        let changed = toggle(ui, on).changed();
+        let changed = toggle(ui, on, label).changed();
         ui.label(
             RichText::new(if *on { "activado" } else { "desactivado" })
                 .color(if *on { OK } else { MUTED })
@@ -236,7 +242,13 @@ pub fn toggle_row(ui: &mut Ui, m: &Metrics, label: &str, help: &str, badge: Opti
 
 /// Slider that always fills the control column, with the number box at a fixed
 /// place on the right.
-pub fn slider_u32(ui: &mut Ui, m: &Metrics, value: &mut u32, range: std::ops::RangeInclusive<u32>, step: f64) {
+pub fn slider_u32(
+    ui: &mut Ui,
+    m: &Metrics,
+    value: &mut u32,
+    range: std::ops::RangeInclusive<u32>,
+    step: f64,
+) {
     ui.spacing_mut().slider_width = (m.ctrl_w - 78.0).max(90.0);
     let mut s = egui::Slider::new(value, range);
     if step > 0.0 {
@@ -292,11 +304,7 @@ pub fn path_row(
 
 /// Evenly divided tab strip: every tab gets the same width, so the header stays
 /// symmetric no matter how long the labels are.
-pub fn tab_strip<T: PartialEq + Copy>(
-    ui: &mut Ui,
-    current: &mut T,
-    tabs: &[(T, &str)],
-) {
+pub fn tab_strip<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, tabs: &[(T, &str)]) {
     let n = tabs.len() as f32;
     let spacing = ui.spacing().item_spacing.x;
     let w = ((ui.available_width() - spacing * (n - 1.0)) / n).max(60.0);
@@ -311,7 +319,11 @@ pub fn tab_strip<T: PartialEq + Copy>(
             let btn = egui::Button::new(text)
                 .min_size(Vec2::new(w, 28.0))
                 .rounding(ROUND)
-                .fill(if selected { ACCENT_DEEP } else { Color32::TRANSPARENT })
+                .fill(if selected {
+                    ACCENT_DEEP
+                } else {
+                    Color32::TRANSPARENT
+                })
                 .stroke(egui::Stroke::new(
                     1.0_f32,
                     if selected { ACCENT } else { LINE },

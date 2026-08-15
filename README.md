@@ -49,9 +49,9 @@ phong normal once per sample rather than once per candidate patch, and reuses it
 scratch buffers per thread rather than allocating about 1.2 million times per
 map. Every one of those was verified to produce a byte identical `.bsp`.
 
-RAD is also built with AVX2 by default, worth another 4 to 5%. Read the warning
-under [Building](#building-from-source) before you hand those binaries to someone
-whose CPU you do not know.
+The optional AVX2 RAD build is another 4 to 5% faster. Releases publish it as a
+separate `-avx2` ZIP; the normal Windows ZIP and new source builds are portable
+so they do not silently crash on an older CPU.
 
 Threading was broken in ways that cost far more than any of the above. Linux
 builds ran single threaded unless you passed `-threads` explicitly. Windows
@@ -112,8 +112,11 @@ are hunting for the thing that blew up your texture data or your face count.
 
 ### Optional GPU lighting
 
-`-gpu` runs RAD's direct light gathering and Sparse transfer-factor construction
-as Vulkan compute. Direct-light speed depends on how many lights the map has;
+`-gpu` forces RAD's compatible direct-light gathering and Sparse transfer-factor
+construction through Vulkan compute. `-gpuauto` is the recommended switch: it
+measures each phase separately and keeps small work on the CPU, without opening
+the Vulkan device until a phase crosses its workload threshold. Direct-light
+speed depends on how many lights the map has;
 transfer-factor speed depends on how many visible patch pairs `MakeScales` has
 to evaluate. Same room, same settings, only the light count changing, on a GTX
 1060 against six CPU threads with `-extra`:
@@ -139,7 +142,8 @@ when no Vulkan driver is present.
 
 The transfer kernel is used with `-vismatrix sparse`, the default. It walks the
 sparse visibility pairs directly instead of testing the full patches-squared
-matrix. It falls back to the CPU implementation for RGB transfers, translucent
+matrix. Patch and winding data are uploaded once per compile and the pair/result
+buffers are reused across every batch. It falls back to the CPU implementation for RGB transfers, translucent
 patches, and custom bounce shadows. The bounce accumulation itself remains on
 the CPU: it already consumes the packed transfer lists and is much smaller than
 constructing them (on `ze_cardinal`, 12 bounces totalled about 6 seconds while
@@ -191,6 +195,11 @@ large texture library, and CSG aborted rather than ignoring the excess.
 | BSP | `-allleaks` | Mark every hole, not just the first one found |
 | RAD | `-skylevel N` | Sky sampling fineness, 4 to 8, default 6 |
 | RAD | `-gpu` | Compute direct lighting and Sparse transfer factors with Vulkan |
+| RAD | `-gpuauto` | Select CPU or Vulkan independently for each phase by workload |
+| RAD | `-gpu-gather` | Enable only compatible direct-light gathering on Vulkan |
+| RAD | `-gpu-transfers` | Enable only Sparse transfer-factor construction on Vulkan |
+| RAD | `-nogpu-gather` | Exclude gather when using `-gpu` or `-gpuauto` |
+| RAD | `-nogpu-transfers` | Exclude Sparse transfers when using `-gpu` or `-gpuauto` |
 | RAD | `-gpuadapter N` | Pick the Vulkan device by index |
 | RAD | `-noallocblockcheck` | Compile even when the map overflows the lightmap atlas |
 | RAD | `-profile` | Report where RAD spends its time, no external profiler needed |
@@ -200,29 +209,40 @@ large texture library, and CSG aborted rather than ignoring the excess.
 ## Building from source
 
 ```sh
-cmake -B build -S .
-cmake --build build -j
+cmake --preset portable
+cmake --build --preset portable
+ctest --preset portable
 ```
 
-Binaries land in `tools/`. The build defaults to Release, because an unset
-`CMAKE_BUILD_TYPE` used to produce unoptimised tools that were several times
-slower for no visible reason.
+For the faster RAD binary on a known AVX2 machine, replace `portable` with
+`avx2`. Both presets use Ninja and RelWithDebInfo, and keep their executables in
+`build/<preset>/bin` so one variant can never contaminate the other. The
+traditional `cmake -B build -S .` flow remains supported, defaults to a portable
+Release build, and still places binaries in `tools/` for map-editor integrations.
+Install/package smoke tests run through CTest.
 
 | Option | Default | What it is for |
 |---|---|---|
-| `SDHLT_ARCH` | `avx2` | Instruction set for RAD. Set it empty for a portable build |
+| `SDHLT_ARCH` | empty | Instruction set for RAD. Use `avx2` only on a compatible CPU |
 | `SDHLT_ARCH_ALL` | `OFF` | Apply the above to CSG, BSP and VIS as well. Read below first |
 | `SDHLT_GPU` | `ON` | Build the Vulkan backend behind `-gpu` |
 | `SDHLT_LTO` | `OFF` | Link time optimisation |
 | `SDHLT_PROFILE` | `OFF` | Counters inside the ray casting functions |
+| `SDHLT_COMPILER_CACHE` | `ON` | Use sccache/ccache when it is installed |
+| `SDHLT_STRONG_WARNINGS` | `ON` | Enable strong warnings without treating them as errors |
+| `SDHLT_OUTPUT_IN_BUILD_TREE` | `OFF` | Isolate executables per build tree; presets turn this on |
 
 Two warnings about `SDHLT_ARCH`. An AVX2 build will not start at all on a CPU
 older than roughly 2013, and the failure is a silent crash rather than a message,
-so build with `-DSDHLT_ARCH=` for binaries you hand to strangers. And
+so distribute the portable build unless the target CPU is known. And
 `SDHLT_ARCH_ALL` is off for a reason: building CSG, BSP and VIS with AVX2 changes
 their floating point results, which on `koth_sandy` produced a `.bsp` whose vis
 data made RAD abort. RAD only writes light data, so it is the safe one to
 vectorise.
+
+Windows releases contain portable and AVX2 runtime ZIPs, matching symbol ZIPs,
+per-asset `.sha256` files and a combined `SHA256SUMS.txt`. The GUI remains in
+both runtime packages; only RAD's CPU instruction target differs.
 
 Editing a compute shader under `src/sdhlt/sdHLRAD/gpu/shaders/` means
 regenerating the embedded SPIR-V with `python scripts/gen_spirv.py`, which needs

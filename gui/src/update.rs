@@ -9,19 +9,24 @@
 //! dependency, so the whole feature costs no new code to audit and no TLS stack
 //! to keep current.
 
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc::{channel, Receiver};
 use std::thread;
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 /// Where releases are published. Anything downloaded is checked against this
 /// host, so a redirect cannot point the updater somewhere else.
 pub const REPO: &str = "metita/ReSDHLT";
 const API_HOST: &str = "https://api.github.com";
-const ALLOWED_DOWNLOAD_HOSTS: [&str; 2] =
-    ["https://github.com/", "https://objects.githubusercontent.com/"];
+const ALLOWED_DOWNLOAD_HOSTS: [&str; 2] = [
+    "https://github.com/",
+    "https://objects.githubusercontent.com/",
+];
 
 // ---------------------------------------------------------------- version
 
@@ -63,6 +68,7 @@ pub struct Release {
     pub asset_name: String,
     pub asset_url: String,
     pub asset_size: u64,
+    pub checksum_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -98,6 +104,10 @@ pub enum Msg {
 
 pub struct Check {
     pub rx: Receiver<Msg>,
+}
+
+pub struct Install {
+    pub rx: Receiver<Result<(), String>>,
 }
 
 #[cfg(windows)]
@@ -193,20 +203,23 @@ fn parse_release(body: &[u8]) -> Result<Option<Release>, String> {
     let version =
         Version::parse(&api.tag_name).ok_or_else(|| format!("tag raro: {}", api.tag_name))?;
 
-    // The Windows package, or any zip if the naming ever changes.
+    // Never let GitHub's asset order choose an ISA-specific package. The GUI
+    // updates to the portable build for this exact OS/architecture; AVX2 is an
+    // explicit manual download and a Windows ZIP is never offered on Linux.
+    let Some(expected_name) = expected_asset_name() else {
+        return Ok(None);
+    };
     let asset = api
         .assets
         .iter()
-        .find(|a| {
-            let n = a.name.to_ascii_lowercase();
-            n.ends_with(".zip") && n.contains("windows")
-        })
-        .or_else(|| {
-            api.assets
-                .iter()
-                .find(|a| a.name.to_ascii_lowercase().ends_with(".zip"))
-        })
-        .ok_or("la release no trae ningún .zip")?;
+        .find(|asset| asset.name.eq_ignore_ascii_case(expected_name))
+        .ok_or_else(|| format!("la release no trae el paquete portable {expected_name}"))?;
+
+    let checksum_name = format!("{expected_name}.sha256");
+    let checksum_asset = api
+        .assets
+        .iter()
+        .find(|candidate| candidate.name.eq_ignore_ascii_case(&checksum_name));
 
     if !ALLOWED_DOWNLOAD_HOSTS
         .iter()
@@ -217,6 +230,17 @@ fn parse_release(body: &[u8]) -> Result<Option<Release>, String> {
             asset.browser_download_url
         ));
     }
+    if let Some(checksum) = checksum_asset {
+        if !ALLOWED_DOWNLOAD_HOSTS
+            .iter()
+            .any(|host| checksum.browser_download_url.starts_with(host))
+        {
+            return Err(format!(
+                "el checksum no apunta a GitHub: {}",
+                checksum.browser_download_url
+            ));
+        }
+    }
 
     Ok(Some(Release {
         version,
@@ -225,7 +249,57 @@ fn parse_release(body: &[u8]) -> Result<Option<Release>, String> {
         asset_name: asset.name.clone(),
         asset_url: asset.browser_download_url.clone(),
         asset_size: asset.size,
+        checksum_url: checksum_asset.map(|checksum| checksum.browser_download_url.clone()),
     }))
+}
+
+fn parse_sha256_manifest(text: &[u8], asset_name: &str) -> Result<String, String> {
+    let text = std::str::from_utf8(text).map_err(|_| "checksum ilegible".to_string())?;
+    let mut matching = None;
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let mut fields = line.split_whitespace();
+        let Some(hash) = fields.next() else { continue };
+        let Some(name) = fields.next() else { continue };
+        if fields.next().is_some() || name.trim_start_matches('*') != asset_name {
+            continue;
+        }
+        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("checksum SHA-256 inválido".to_string());
+        }
+        if matching.replace(hash.to_ascii_lowercase()).is_some() {
+            return Err("el manifest repite el checksum del paquete".to_string());
+        }
+    }
+    matching.ok_or_else(|| format!("el manifest no contiene {asset_name}"))
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 128 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn expected_asset_name() -> Option<&'static str> {
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    {
+        Some("ReSDHLT-Windows-x64.zip")
+    }
+    #[cfg(all(windows, target_arch = "x86"))]
+    {
+        Some("ReSDHLT-Windows-x86.zip")
+    }
+    #[cfg(not(all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
+    {
+        None
+    }
 }
 
 // ---------------------------------------------------------------- install
@@ -248,6 +322,15 @@ pub fn install(release: &Release) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
 
+    let checksum_url = release.checksum_url.as_deref().ok_or_else(|| {
+        format!(
+            "la release {} no publica {}.sha256; actualización rechazada",
+            release.tag, release.asset_name
+        )
+    })?;
+    let checksum_body = curl(&["--fail", checksum_url])?;
+    let expected_sha256 = parse_sha256_manifest(&checksum_body, &release.asset_name)?;
+
     let zip = work.join("package.zip");
     curl(&[
         "--fail",
@@ -266,14 +349,43 @@ pub fn install(release: &Release) -> Result<(), String> {
             release.asset_size
         ));
     }
+    let actual_sha256 = sha256_file(&zip)?;
+    if actual_sha256 != expected_sha256 {
+        return Err(format!(
+            "SHA-256 incorrecto para {}: esperado {}, recibido {}",
+            release.asset_name, expected_sha256, actual_sha256
+        ));
+    }
 
     let unpacked = work.join("pkg");
     unzip(&zip, &unpacked)?;
-    if !unpacked.join("resdhlt-gui.exe").is_file() {
-        return Err("el paquete no trae resdhlt-gui.exe".to_string());
+    for required in [
+        "resdhlt-gui.exe",
+        "tools/sdHLCSG.exe",
+        "tools/sdHLBSP.exe",
+        "tools/sdHLVIS.exe",
+        "tools/sdHLRAD.exe",
+        "tools/sdRIPENT.exe",
+        "tools/settings.txt",
+        "tools/sdhlt.wad",
+    ] {
+        if !unpacked.join(required).is_file() {
+            return Err(format!("el paquete está incompleto: falta {required}"));
+        }
     }
 
     spawn_swapper(&unpacked, &install_dir, &exe, &work)
+}
+
+/// Downloading and unpacking can take minutes on a slow link. Keep that work
+/// off the egui thread so progress, cancel buttons and window repainting stay
+/// responsive.
+pub fn install_async(release: Release) -> Install {
+    let (tx, rx) = channel();
+    thread::spawn(move || {
+        let _ = tx.send(install(&release));
+    });
+    Install { rx }
 }
 
 #[cfg(windows)]
@@ -285,8 +397,8 @@ fn unzip(zip: &Path, dest: &Path) -> Result<(), String> {
         "-Command",
         &format!(
             "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
-            zip.display(),
-            dest.display()
+            ps_literal(zip),
+            ps_literal(dest)
         ),
     ]);
     hide_console(&mut cmd);
@@ -300,11 +412,21 @@ fn unzip(zip: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn ps_literal(path: &Path) -> String {
+    path.display().to_string().replace('\'', "''")
+}
+
 #[cfg(not(windows))]
 fn unzip(zip: &Path, dest: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let out = Command::new("unzip")
-        .args(["-o", &zip.display().to_string(), "-d", &dest.display().to_string()])
+        .args([
+            "-o",
+            &zip.display().to_string(),
+            "-d",
+            &dest.display().to_string(),
+        ])
         .output()
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
@@ -320,23 +442,50 @@ fn spawn_swapper(src: &Path, dest: &Path, exe: &Path, work: &Path) -> Result<(),
     let body = format!(
         r#"$ErrorActionPreference = 'Stop'
 Start-Transcript -Path '{log}' -Force | Out-Null
+$backup = Join-Path '{work}' 'backup'
+$installed = @()
 try {{
     # The GUI is still shutting down; its files stay locked until it is gone.
     Wait-Process -Id {pid} -Timeout 60 -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 400
-    Copy-Item -Path (Join-Path '{src}' '*') -Destination '{dest}' -Recurse -Force
+    if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{
+        throw 'la GUI no terminó dentro de 60 segundos'
+    }}
+
+    New-Item -ItemType Directory -Path $backup -Force | Out-Null
+    $incoming = Get-ChildItem -LiteralPath '{src}' -Force
+    foreach ($item in $incoming) {{
+        $target = Join-Path '{dest}' $item.Name
+        if (Test-Path -LiteralPath $target) {{
+            Move-Item -LiteralPath $target -Destination $backup -Force
+        }}
+        $installed += $target
+        Copy-Item -LiteralPath $item.FullName -Destination $target -Recurse -Force
+    }}
     Start-Process -FilePath '{exe}'
 }} catch {{
     Write-Output "FALLO: $_"
+    foreach ($target in $installed) {{
+        if (Test-Path -LiteralPath $target) {{
+            Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
+        }}
+    }}
+    if (Test-Path -LiteralPath $backup) {{
+        Get-ChildItem -LiteralPath $backup -Force | ForEach-Object {{
+            Move-Item -LiteralPath $_.FullName -Destination '{dest}' -Force
+        }}
+    }}
+    Write-Output 'ROLLBACK: instalación anterior restaurada'
 }} finally {{
     Stop-Transcript | Out-Null
 }}
 "#,
-        log = log.display(),
+        log = ps_literal(&log),
         pid = std::process::id(),
-        src = src.display(),
-        dest = dest.display(),
-        exe = exe.display(),
+        src = ps_literal(src),
+        dest = ps_literal(dest),
+        exe = ps_literal(exe),
+        work = ps_literal(work),
     );
     std::fs::write(&script, body).map_err(|e| e.to_string())?;
 
@@ -355,18 +504,8 @@ try {{
 }
 
 #[cfg(not(windows))]
-fn spawn_swapper(src: &Path, dest: &Path, exe: &Path, _work: &Path) -> Result<(), String> {
-    // No lock to dance around outside Windows: copy and re-exec.
-    let out = Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "sleep 1; cp -rf '{}/.' '{}' && '{}' &",
-            src.display(),
-            dest.display(),
-            exe.display()
-        ))
-        .spawn();
-    out.map(|_| ()).map_err(|e| e.to_string())
+fn spawn_swapper(_src: &Path, _dest: &Path, _exe: &Path, _work: &Path) -> Result<(), String> {
+    Err("el actualizador automático todavía no está disponible en esta plataforma".to_string())
 }
 
 #[cfg(test)]
@@ -406,19 +545,69 @@ mod tests {
     }
 
     #[test]
-    fn picks_the_windows_zip_out_of_a_release() {
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    fn picks_the_portable_windows_zip_even_when_avx2_comes_first() {
         let body = br#"{
             "tag_name": "v9.9.9",
             "body": "notas",
             "assets": [
+                {"name":"ReSDHLT-Windows-x64-avx2.zip","browser_download_url":"https://github.com/x/y/avx2.zip","size":99},
                 {"name":"source.tar.gz","browser_download_url":"https://github.com/x/y/a.tar.gz","size":1},
-                {"name":"ReSDHLT-Windows-x64.zip","browser_download_url":"https://github.com/x/y/w.zip","size":42}
+                {"name":"ReSDHLT-Windows-x64.zip","browser_download_url":"https://github.com/x/y/w.zip","size":42},
+                {"name":"ReSDHLT-Windows-x64.zip.sha256","browser_download_url":"https://github.com/x/y/w.zip.sha256","size":96}
             ]
         }"#;
         let r = parse_release(body).unwrap().unwrap();
         assert_eq!(r.version, Version(9, 9, 9));
         assert_eq!(r.asset_name, "ReSDHLT-Windows-x64.zip");
+        assert_eq!(r.asset_url, "https://github.com/x/y/w.zip");
         assert_eq!(r.asset_size, 42);
+        assert_eq!(
+            r.checksum_url.as_deref(),
+            Some("https://github.com/x/y/w.zip.sha256")
+        );
+    }
+
+    #[test]
+    fn sha256_manifest_requires_one_valid_entry_for_the_asset() {
+        let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let manifest = format!("{hash} *ReSDHLT-Windows-x64.zip\n");
+        assert_eq!(
+            parse_sha256_manifest(manifest.as_bytes(), "ReSDHLT-Windows-x64.zip").unwrap(),
+            hash
+        );
+        assert!(parse_sha256_manifest(
+            b"not-a-hash *ReSDHLT-Windows-x64.zip\n",
+            "ReSDHLT-Windows-x64.zip"
+        )
+        .is_err());
+        assert!(
+            parse_sha256_manifest(manifest.as_bytes(), "ReSDHLT-Windows-x64-avx2.zip").is_err()
+        );
+    }
+
+    #[test]
+    fn sha256_file_matches_a_known_vector() {
+        let path =
+            std::env::temp_dir().join(format!("resdhlt-sha256-test-{}.bin", std::process::id()));
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            sha256_file(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn non_windows_never_falls_back_to_the_windows_zip() {
+        let body = br#"{
+            "tag_name": "v9.9.9",
+            "assets": [
+                {"name":"ReSDHLT-Windows-x64.zip","browser_download_url":"https://github.com/x/y/w.zip","size":42}
+            ]
+        }"#;
+        assert!(matches!(parse_release(body), Ok(None)));
     }
 
     #[test]
@@ -448,14 +637,21 @@ mod tests {
         std::fs::create_dir_all(&work).unwrap();
         let zip = work.join("package.zip");
 
-        if let Err(e) = curl(&["--fail", "--output", &zip.display().to_string(), &release.asset_url])
-        {
+        if let Err(e) = curl(&[
+            "--fail",
+            "--output",
+            &zip.display().to_string(),
+            &release.asset_url,
+        ]) {
             eprintln!("descarga no disponible, salteado: {e}");
             return;
         }
 
         let size = std::fs::metadata(&zip).unwrap().len();
-        assert_eq!(size, release.asset_size, "el .zip no coincide con la release");
+        assert_eq!(
+            size, release.asset_size,
+            "el .zip no coincide con la release"
+        );
 
         let out = work.join("pkg");
         unzip(&zip, &out).unwrap();
@@ -480,8 +676,16 @@ mod tests {
         match latest_release("seedee/SDHLT") {
             Ok(Some(r)) => {
                 assert!(r.version >= Version(1, 0, 0), "{:?}", r.version);
-                assert!(r.asset_name.to_lowercase().ends_with(".zip"), "{}", r.asset_name);
-                assert!(r.asset_url.starts_with("https://github.com/"), "{}", r.asset_url);
+                assert!(
+                    r.asset_name.to_lowercase().ends_with(".zip"),
+                    "{}",
+                    r.asset_name
+                );
+                assert!(
+                    r.asset_url.starts_with("https://github.com/"),
+                    "{}",
+                    r.asset_url
+                );
             }
             Ok(None) => {}
             Err(e) => eprintln!("sin red o API limitada, salteado: {e}"),
@@ -492,7 +696,8 @@ mod tests {
     fn downloads_must_come_from_github() {
         let evil = "https://evil.example.com/ReSDHLT-Windows-x64.zip";
         assert!(!ALLOWED_DOWNLOAD_HOSTS.iter().any(|h| evil.starts_with(h)));
-        let good = "https://github.com/metita/ReSDHLT/releases/download/v0.2.0/ReSDHLT-Windows-x64.zip";
+        let good =
+            "https://github.com/metita/ReSDHLT/releases/download/v0.2.0/ReSDHLT-Windows-x64.zip";
         assert!(ALLOWED_DOWNLOAD_HOSTS.iter().any(|h| good.starts_with(h)));
     }
 }

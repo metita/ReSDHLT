@@ -1653,7 +1653,7 @@ int             main(const int argc, char** argv)
         {
             if (i + 1 < argc)	//added "1" .--vluzacn
             {
-                int             g_numthreads = atoi(argv[++i]);
+                g_numthreads = atoi(argv[++i]);
 
                 if (g_numthreads < 1)
                 {

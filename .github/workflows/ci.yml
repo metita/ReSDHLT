@@ -2,11 +2,46 @@
 # See: https://github.com/actions/starter-workflows/blob/main/ci/cmake-single-platform.yml
 name: build
 
+env:
+  SCCACHE_GHA_ENABLED: "true"
+
 on:
   push:
   pull_request:
 
 jobs:
+  gui:
+    runs-on: windows-latest
+    env:
+      RUSTC_WRAPPER: sccache
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Enable compiler cache
+      uses: mozilla-actions/sccache-action@v0.0.11
+      with:
+        version: "v0.16.0"
+
+    - name: Install Rust quality components
+      run: rustup component add rustfmt clippy
+
+    - name: Check formatting
+      working-directory: gui
+      run: cargo fmt --all -- --check
+
+    - name: Lint all GUI targets
+      working-directory: gui
+      run: cargo clippy --locked --all-targets -- -D warnings
+
+    - name: Test the GUI
+      working-directory: gui
+      run: cargo test --locked --all-targets
+
+    - name: Build the release GUI
+      working-directory: gui
+      run: cargo build --locked --release
+
   build:
     runs-on: ${{ matrix.os }}
 
@@ -21,24 +56,28 @@ jobs:
       #
       # To add more build types (Release, Debug, RelWithDebInfo, etc.) customize the build_type list.
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        build_type: [Release]
-        c_compiler: [gcc, cl]
         include:
           - os: windows-latest
+            build_type: Release
             c_compiler: cl
             cpp_compiler: cl
           - os: ubuntu-latest
+            build_type: Release
             c_compiler: gcc
             cpp_compiler: g++
-        exclude:
-          - os: windows-latest
-            c_compiler: gcc
           - os: ubuntu-latest
-            c_compiler: cl
+            build_type: Release
+            c_compiler: clang
+            cpp_compiler: clang++
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Enable compiler cache
+      if: runner.os == 'Linux'
+      uses: mozilla-actions/sccache-action@v0.0.11
+      with:
+        version: "v0.16.0"
 
     - name: Set reusable strings
       # Turn repeated input strings (such as the build output directory) into step outputs. These step outputs can be used throughout the workflow file.
@@ -61,28 +100,26 @@ jobs:
       # Build your program with the given configuration. Note that --config is needed because the default Windows generator is a multi-config generator (Visual Studio generator).
       run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }}
 
-    - name: Smoke test
-      # No ctest suite is defined, so ctest would fail with "No tests were found".
-      # Instead verify every tool was produced and can start up and print usage.
-      shell: bash
-      run: |
-        set -e
-        # The Visual Studio generator is multi-config, so on Windows the
-        # binaries land in tools/Release rather than tools.
-        if [ -d tools/${{ matrix.build_type }} ]; then cd tools/${{ matrix.build_type }}; else cd tools; fi
-        for tool in sdHLCSG sdHLBSP sdHLVIS sdHLRAD sdRIPENT; do
-          if [ -f "./$tool" ]; then bin="./$tool"; else bin="./$tool.exe"; fi
-          if [ ! -f "$bin" ]; then echo "MISSING: $tool"; exit 1; fi
-          # The tools exit non-zero when invoked with no map, so just confirm
-          # they run and emit their usage banner.
-          out=$("$bin" 2>&1 || true)
-          echo "$out" | grep -q "Half-Life Compilation Tools" || { echo "NO BANNER: $tool"; echo "$out" | head -5; exit 1; }
-          echo "ok: $tool"
-        done
+    - name: CTest package integration
+      run: >
+        ctest --test-dir ${{ steps.strings.outputs.build-output-dir }}
+        --build-config ${{ matrix.build_type }}
+        --output-on-failure
+
+    - name: Stage the installable package
+      run: >
+        cmake --install ${{ steps.strings.outputs.build-output-dir }}
+        --config ${{ matrix.build_type }}
+        --prefix ${{ github.workspace }}/package/ReSDHLT
+
+    - name: Test the package layout and CLI failures
+      run: >
+        python tests/smoke_package.py
+        --tools-dir ${{ github.workspace }}/package/ReSDHLT
 
     - name: Archiving
       # Default Build Artifact zipper does not retain file permission.
-      run: 7z a ReSDHLT-${{ matrix.os }}-${{ matrix.c_compiler }}.zip tools
+      run: 7z a ReSDHLT-${{ matrix.os }}-${{ matrix.c_compiler }}.zip package/ReSDHLT
 
     - name: Upload a Build Artifact
       uses: actions/upload-artifact@v4.3.1
