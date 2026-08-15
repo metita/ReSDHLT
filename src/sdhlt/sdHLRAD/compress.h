@@ -45,6 +45,7 @@ inline unsigned int bitget
 inline unsigned int bitput
 	(unsigned int i, unsigned int start, unsigned int end)
 {
+	(void)end;
 	return i << start;
 }
 

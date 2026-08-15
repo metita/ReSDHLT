@@ -200,6 +200,28 @@ jobs:
           [IO.File]::WriteAllLines("SHA256SUMS.txt", $manifest, [Text.UTF8Encoding]::new($false))
           Get-Content SHA256SUMS.txt
 
+      - name: Sign release packages with Ed25519
+        working-directory: gui
+        shell: pwsh
+        env:
+          RESDHLT_ED25519_PRIVATE_KEY_B64: ${{ secrets.RESDHLT_ED25519_PRIVATE_KEY_B64 }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not $env:RESDHLT_ED25519_PRIVATE_KEY_B64) {
+            throw "Falta el secreto RESDHLT_ED25519_PRIVATE_KEY_B64; se rechaza una release sin firma."
+          }
+          $assets = @(
+            "../ReSDHLT-Windows-x64.zip",
+            "../ReSDHLT-Windows-x64-avx2.zip",
+            "../ReSDHLT-Windows-x64-symbols.zip",
+            "../ReSDHLT-Windows-x64-avx2-symbols.zip"
+          )
+          foreach ($asset in $assets) {
+            $signature = "$asset.sig"
+            cargo run --locked --release --bin resdhlt-release-signer -- $asset $signature
+            if ($LASTEXITCODE) { throw "No se pudo firmar $asset" }
+          }
+
       # A release page with nothing but a compare link tells a mapper nothing.
       # Write the notes into docs/release-notes/<tag>.md and they become the
       # body, with GitHub's generated commit list appended underneath. Without
@@ -233,5 +255,9 @@ jobs:
             ReSDHLT-Windows-x64-symbols.zip.sha256
             ReSDHLT-Windows-x64-avx2-symbols.zip.sha256
             SHA256SUMS.txt
+            ReSDHLT-Windows-x64.zip.sig
+            ReSDHLT-Windows-x64-avx2.zip.sig
+            ReSDHLT-Windows-x64-symbols.zip.sig
+            ReSDHLT-Windows-x64-avx2-symbols.zip.sig
           body: ${{ steps.notes.outputs.body }}
           generate_release_notes: true

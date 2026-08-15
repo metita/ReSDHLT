@@ -16,6 +16,8 @@ use std::process::Command;
 use std::sync::mpsc::{channel, Receiver};
 use std::thread;
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -27,6 +29,9 @@ const ALLOWED_DOWNLOAD_HOSTS: [&str; 2] = [
     "https://github.com/",
     "https://objects.githubusercontent.com/",
 ];
+// Public half of the release key. The private 32-byte seed lives only in the
+// GitHub Actions secret RESDHLT_ED25519_PRIVATE_KEY_B64.
+const RELEASE_PUBLIC_KEY_B64: &str = "l4LNeBTN4mH+ibxCfU2M0Hg/AYmRiy2Qwpn2jaIo3uM=";
 
 // ---------------------------------------------------------------- version
 
@@ -69,6 +74,7 @@ pub struct Release {
     pub asset_url: String,
     pub asset_size: u64,
     pub checksum_url: Option<String>,
+    pub signature_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -220,6 +226,16 @@ fn parse_release(body: &[u8]) -> Result<Option<Release>, String> {
         .assets
         .iter()
         .find(|candidate| candidate.name.eq_ignore_ascii_case(&checksum_name));
+    let signature_name = format!("{expected_name}.sig");
+    let signature_asset = api
+        .assets
+        .iter()
+        .find(|candidate| candidate.name.eq_ignore_ascii_case(&signature_name));
+    let Some(signature_asset) = signature_asset else {
+        return Err(format!(
+            "la release no trae la firma Ed25519 {signature_name}"
+        ));
+    };
 
     if !ALLOWED_DOWNLOAD_HOSTS
         .iter()
@@ -241,6 +257,15 @@ fn parse_release(body: &[u8]) -> Result<Option<Release>, String> {
             ));
         }
     }
+    if !ALLOWED_DOWNLOAD_HOSTS
+        .iter()
+        .any(|host| signature_asset.browser_download_url.starts_with(host))
+    {
+        return Err(format!(
+            "la firma no apunta a GitHub: {}",
+            signature_asset.browser_download_url
+        ));
+    }
 
     Ok(Some(Release {
         version,
@@ -250,6 +275,7 @@ fn parse_release(body: &[u8]) -> Result<Option<Release>, String> {
         asset_url: asset.browser_download_url.clone(),
         asset_size: asset.size,
         checksum_url: checksum_asset.map(|checksum| checksum.browser_download_url.clone()),
+        signature_url: Some(signature_asset.browser_download_url.clone()),
     }))
 }
 
@@ -285,6 +311,31 @@ fn sha256_file(path: &Path) -> Result<String, String> {
         hasher.update(&buffer[..read]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn verify_release_signature(path: &Path, encoded_signature: &[u8]) -> Result<(), String> {
+    let key_bytes = STANDARD
+        .decode(RELEASE_PUBLIC_KEY_B64)
+        .map_err(|_| "clave pública Ed25519 inválida".to_string())?;
+    let key_bytes: [u8; 32] = key_bytes
+        .try_into()
+        .map_err(|_| "la clave pública Ed25519 no tiene 32 bytes".to_string())?;
+    let key = VerifyingKey::from_bytes(&key_bytes)
+        .map_err(|_| "clave pública Ed25519 inválida".to_string())?;
+    let signature_bytes = STANDARD
+        .decode(
+            std::str::from_utf8(encoded_signature)
+                .map_err(|_| "firma ilegible".to_string())?
+                .trim(),
+        )
+        .map_err(|_| "firma Ed25519 no es base64 válido".to_string())?;
+    let signature_bytes: [u8; 64] = signature_bytes
+        .try_into()
+        .map_err(|_| "la firma Ed25519 no tiene 64 bytes".to_string())?;
+    let signature = Signature::from_bytes(&signature_bytes);
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    key.verify(&bytes, &signature)
+        .map_err(|_| "la firma Ed25519 del paquete no coincide".to_string())
 }
 
 fn expected_asset_name() -> Option<&'static str> {
@@ -356,6 +407,14 @@ pub fn install(release: &Release) -> Result<(), String> {
             release.asset_name, expected_sha256, actual_sha256
         ));
     }
+    let signature_url = release.signature_url.as_deref().ok_or_else(|| {
+        format!(
+            "la release {} no publica {}.sig; actualización rechazada",
+            release.tag, release.asset_name
+        )
+    })?;
+    let signature_body = curl(&["--fail", signature_url])?;
+    verify_release_signature(&zip, &signature_body)?;
 
     let unpacked = work.join("pkg");
     unzip(&zip, &unpacked)?;
@@ -554,7 +613,8 @@ mod tests {
                 {"name":"ReSDHLT-Windows-x64-avx2.zip","browser_download_url":"https://github.com/x/y/avx2.zip","size":99},
                 {"name":"source.tar.gz","browser_download_url":"https://github.com/x/y/a.tar.gz","size":1},
                 {"name":"ReSDHLT-Windows-x64.zip","browser_download_url":"https://github.com/x/y/w.zip","size":42},
-                {"name":"ReSDHLT-Windows-x64.zip.sha256","browser_download_url":"https://github.com/x/y/w.zip.sha256","size":96}
+                {"name":"ReSDHLT-Windows-x64.zip.sha256","browser_download_url":"https://github.com/x/y/w.zip.sha256","size":96},
+                {"name":"ReSDHLT-Windows-x64.zip.sig","browser_download_url":"https://github.com/x/y/w.zip.sig","size":88}
             ]
         }"#;
         let r = parse_release(body).unwrap().unwrap();
@@ -565,6 +625,10 @@ mod tests {
         assert_eq!(
             r.checksum_url.as_deref(),
             Some("https://github.com/x/y/w.zip.sha256")
+        );
+        assert_eq!(
+            r.signature_url.as_deref(),
+            Some("https://github.com/x/y/w.zip.sig")
         );
     }
 
@@ -595,6 +659,23 @@ mod tests {
             sha256_file(&path).unwrap(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn ed25519_signature_accepts_the_release_key_and_rejects_tampering() {
+        let seed = STANDARD
+            .decode("3a7gdHrMRAiav1nB+jMHpTph4KrNsJ4r7e0NoIAKRJM=")
+            .unwrap();
+        let key = ed25519_dalek::SigningKey::from_bytes(&seed.try_into().unwrap());
+        let path =
+            std::env::temp_dir().join(format!("resdhlt-signature-test-{}.bin", std::process::id()));
+        std::fs::write(&path, b"signed package").unwrap();
+        let signature = ed25519_dalek::Signer::sign(&key, b"signed package");
+        let encoded = STANDARD.encode(signature.to_bytes());
+        assert!(verify_release_signature(&path, encoded.as_bytes()).is_ok());
+        std::fs::write(&path, b"tampered package").unwrap();
+        assert!(verify_release_signature(&path, encoded.as_bytes()).is_err());
         let _ = std::fs::remove_file(path);
     }
 

@@ -230,6 +230,7 @@ Install/package smoke tests run through CTest.
 | `SDHLT_PROFILE` | `OFF` | Counters inside the ray casting functions |
 | `SDHLT_COMPILER_CACHE` | `ON` | Use sccache/ccache when it is installed |
 | `SDHLT_STRONG_WARNINGS` | `ON` | Enable strong warnings without treating them as errors |
+| `SDHLT_WARNINGS_AS_ERRORS` | `OFF` | Opt into `/WX` or `-Werror` for staged warning cleanup |
 | `SDHLT_OUTPUT_IN_BUILD_TREE` | `OFF` | Isolate executables per build tree; presets turn this on |
 
 Two warnings about `SDHLT_ARCH`. An AVX2 build will not start at all on a CPU
@@ -241,8 +242,14 @@ data made RAD abort. RAD only writes light data, so it is the safe one to
 vectorise.
 
 Windows releases contain portable and AVX2 runtime ZIPs, matching symbol ZIPs,
-per-asset `.sha256` files and a combined `SHA256SUMS.txt`. The GUI remains in
-both runtime packages; only RAD's CPU instruction target differs.
+per-asset `.sha256` files, detached Ed25519 `.sig` files, and a combined
+`SHA256SUMS.txt`. The GUI remains in both runtime packages; only RAD's CPU
+instruction target differs. Release CI requires the base64-encoded 32-byte
+private seed in the repository secret `RESDHLT_ED25519_PRIVATE_KEY_B64`; the
+public half is pinned in `gui/src/update.rs` and the updater rejects unsigned or
+tampered packages. To rotate it, run
+`cargo run --bin resdhlt-release-signer -- --generate-key`, update the pinned
+public key in the signer/updater, and replace the CI secret together.
 
 Editing a compute shader under `src/sdhlt/sdHLRAD/gpu/shaders/` means
 regenerating the embedded SPIR-V with `python scripts/gen_spirv.py`, which needs

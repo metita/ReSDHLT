@@ -208,6 +208,12 @@ namespace rad
         // Uploads immutable patch/winding/sky data once and reuses the pair,
         // result and readback buffers across all transfer batches.
         bool formfactor_begin(const formfactor_scene &scene, uint32_t max_pairs);
+        // Submit/collect are split so the CPU can construct the next pair batch
+        // while the previous dispatch is running. Slots 0 and 1 are independent
+        // and may both be in flight at once.
+        bool formfactor_submit(const transfer_pair *pairs, size_t count,
+                               uint32_t slot);
+        bool formfactor_collect(uint32_t slot, std::vector<float> &trans);
         bool formfactor_batch(const transfer_pair *pairs, size_t count,
                               std::vector<float> &trans);
         void formfactor_end();

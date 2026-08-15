@@ -358,6 +358,8 @@ void GpuGatherIntercept (const vec3_t pos, const byte* const pvs, const vec3_t n
                          vec3_t *sample, byte *styles, int step, int miptex,
                          int texlightgap_surfacenum)
 {
+    (void)sample;
+    (void)styles;
     gpu_gather_data &d = *g_data;
     // Group by the face whose BuildFacelights is running, not by the sample's
     // own surface: near an edge, texlightgap_surfacenum names a neighbouring

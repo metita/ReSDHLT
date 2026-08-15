@@ -28,7 +28,9 @@ if (NOT SDHLT_IS_MULTI_CONFIG AND NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(SDHLT_LTO "Enable link time optimisation for Release builds." OFF)
-option(SDHLT_STRONG_WARNINGS "Enable strong compiler warnings (warnings are not errors)." ON)
+option(SDHLT_STRONG_WARNINGS "Enable strong compiler warnings." ON)
+option(SDHLT_WARNINGS_AS_ERRORS
+    "Treat compiler warnings as errors (legacy warning debt may require a staged cleanup)." OFF)
 option(SDHLT_COMPILER_CACHE "Use sccache or ccache when one is available." ON)
 
 if (SDHLT_COMPILER_CACHE AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
@@ -334,6 +336,7 @@ elseif (${CMAKE_SYSTEM_NAME} MATCHES "Windows")
     add_compile_definitions(
         SYSTEM_WIN32
         STDC_HEADERS
+        _CRT_SECURE_NO_WARNINGS
     )
     message("${CMAKE_PROJECT_NAME} > Configuring for ${CMAKE_SYSTEM_NAME}")
 else()
@@ -347,8 +350,14 @@ endif()
 if (SDHLT_STRONG_WARNINGS)
     if (MSVC)
         add_compile_options(/W4)
+        if (SDHLT_WARNINGS_AS_ERRORS)
+            add_compile_options(/WX)
+        endif()
     elseif (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
         add_compile_options(-Wall -Wextra -Wshadow)
+        if (SDHLT_WARNINGS_AS_ERRORS)
+            add_compile_options(-Werror)
+        endif()
     endif()
 endif()
 

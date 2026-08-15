@@ -37,10 +37,10 @@ static std::atomic<uint64_t> s_sparse_candidate_faces(0);
 static std::atomic<uint64_t> s_sparse_visible_pairs(0);
 
 // Vismatrix protected
-static unsigned IsVisbitInArray(const unsigned x, const unsigned y)
+static int IsVisbitInArray(const unsigned x, const unsigned y)
 {
     int             first, last, current;
-    int             y_byte = y / 8;
+    const unsigned  y_byte = y / 8;
     sparse_row_t*  row;
     sparse_column_t* column = s_vismatrix + x;
 
@@ -197,6 +197,7 @@ static void     TestPatchToFace(const unsigned patchnum, const int facenum, cons
 								, std::vector<unsigned>& visible_patches
 								)
 {
+    (void)head;
     patch_t*        patch = &g_patches[patchnum];
     patch_t*        patch2 = g_face_patches[facenum];
 
@@ -685,11 +686,12 @@ bool MakeScalesSparseGpu()
     const size_t old_index_bytes = g_transfer_index_bytes;
     const size_t old_data_bytes = g_transfer_data_bytes;
 
-    std::vector<rad::gpu::transfer_pair> pairs;
-    std::vector<float> results;
+    std::vector<rad::gpu::transfer_pair> pair_slots[2];
+    std::vector<float> result_slots[2];
     std::vector<transfer_raw_index_t> row_indices;
     std::vector<float> row_values;
-    pairs.reserve(batch_pairs);
+    pair_slots[0].reserve(batch_pairs);
+    pair_slots[1].reserve(batch_pairs);
 
     if (!rad::gpu::formfactor_begin(scene, (uint32_t)batch_pairs))
     {
@@ -705,41 +707,36 @@ bool MakeScalesSparseGpu()
         }
     } formfactor_session_guard;
 
-    unsigned receiver = 0;
-    size_t dispatches = 0;
-    while (receiver < g_num_patches)
+    auto build_batch = [&](unsigned &cursor, std::vector<rad::gpu::transfer_pair> &pairs,
+                           unsigned &first, unsigned &last)
     {
-        const unsigned batch_first = receiver;
+        first = cursor;
         pairs.clear();
-        while (receiver < g_num_patches)
+        while (cursor < g_num_patches)
         {
-            const size_t row_count = offsets[receiver + 1] - offsets[receiver];
+            const size_t row_count = offsets[cursor + 1] - offsets[cursor];
             if (!pairs.empty() && pairs.size() + row_count > batch_pairs)
-            {
                 break;
-            }
-            for (size_t p = offsets[receiver]; p < offsets[receiver + 1]; p++)
+            for (size_t p = offsets[cursor]; p < offsets[cursor + 1]; p++)
             {
                 rad::gpu::transfer_pair pair;
-                pair.receiver = (int32_t)receiver;
+                pair.receiver = (int32_t)cursor;
                 pair.emitter = (int32_t)emitters[p];
                 pairs.push_back(pair);
             }
-            receiver++;
+            cursor++;
         }
+        last = cursor;
+    };
 
-        if (!rad::gpu::formfactor_batch(pairs.data(), pairs.size(), results)
-            || results.size() != pairs.size())
-        {
-            Warning("-gpu transfers: %s; using the CPU path",
-                    rad::gpu::last_error().c_str());
-            RollbackGpuTransfers(old_total, old_index_bytes, old_data_bytes);
+    auto process_batch = [&](const std::vector<rad::gpu::transfer_pair> &pairs,
+                             const std::vector<float> &results, unsigned first,
+                             unsigned last)
+    {
+        if (results.size() != pairs.size())
             return false;
-        }
-        dispatches++;
-
         size_t result_pos = 0;
-        for (unsigned row = batch_first; row < receiver; row++)
+        for (unsigned row = first; row < last; row++)
         {
             row_indices.clear();
             row_values.clear();
@@ -750,11 +747,7 @@ bool MakeScalesSparseGpu()
             {
                 const float value = results[result_pos];
                 if (!std::isfinite(value))
-                {
-                    Warning("-gpu transfers: non-finite result; using the CPU path");
-                    RollbackGpuTransfers(old_total, old_index_bytes, old_data_bytes);
                     return false;
-                }
                 if (value > 0.0f)
                 {
                     row_indices.push_back(emitters[p]);
@@ -765,6 +758,62 @@ bool MakeScalesSparseGpu()
                                 (unsigned)row_indices.size());
             g_total_transfer += row_indices.size();
         }
+        return true;
+    };
+
+    unsigned receiver = 0;
+    size_t dispatches = 0;
+    unsigned batch_first[2] = {};
+    unsigned batch_last[2] = {};
+    int current_slot = 0;
+    build_batch(receiver, pair_slots[current_slot], batch_first[current_slot],
+                batch_last[current_slot]);
+    if (!rad::gpu::formfactor_submit(pair_slots[current_slot].data(),
+                                     pair_slots[current_slot].size(), current_slot))
+    {
+        Warning("-gpu transfers: %s; using the CPU path",
+                rad::gpu::last_error().c_str());
+        RollbackGpuTransfers(old_total, old_index_bytes, old_data_bytes);
+        return false;
+    }
+    dispatches++;
+
+    while (true)
+    {
+        const int next_slot = current_slot ^ 1;
+        const bool has_next = receiver < g_num_patches;
+        if (has_next)
+        {
+            build_batch(receiver, pair_slots[next_slot], batch_first[next_slot],
+                        batch_last[next_slot]);
+            if (!rad::gpu::formfactor_submit(pair_slots[next_slot].data(),
+                                             pair_slots[next_slot].size(), next_slot))
+            {
+                Warning("-gpu transfers: %s; using the CPU path",
+                        rad::gpu::last_error().c_str());
+                RollbackGpuTransfers(old_total, old_index_bytes, old_data_bytes);
+                return false;
+            }
+            dispatches++;
+        }
+
+        if (!rad::gpu::formfactor_collect(current_slot, result_slots[current_slot]))
+        {
+            Warning("-gpu transfers: %s; using the CPU path",
+                    rad::gpu::last_error().c_str());
+            RollbackGpuTransfers(old_total, old_index_bytes, old_data_bytes);
+            return false;
+        }
+        if (!process_batch(pair_slots[current_slot], result_slots[current_slot],
+                           batch_first[current_slot], batch_last[current_slot]))
+        {
+            Warning("-gpu transfers: non-finite or incomplete result; using the CPU path");
+            RollbackGpuTransfers(old_total, old_index_bytes, old_data_bytes);
+            return false;
+        }
+        if (!has_next)
+            break;
+        current_slot = next_slot;
     }
 
     Log("  %.2fM candidates, %zu dispatches (%.2f seconds)\n",

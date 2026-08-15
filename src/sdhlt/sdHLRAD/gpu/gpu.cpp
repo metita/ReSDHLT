@@ -72,6 +72,7 @@ namespace rad
                 PFN_vkResetDescriptorPool ResetDescriptorPool = nullptr;
                 PFN_vkCreateCommandPool CreateCommandPool = nullptr;
                 PFN_vkResetCommandPool ResetCommandPool = nullptr;
+                PFN_vkResetCommandBuffer ResetCommandBuffer = nullptr;
                 PFN_vkAllocateCommandBuffers AllocateCommandBuffers = nullptr;
                 PFN_vkBeginCommandBuffer BeginCommandBuffer = nullptr;
                 PFN_vkEndCommandBuffer EndCommandBuffer = nullptr;
@@ -82,6 +83,7 @@ namespace rad
                 PFN_vkCmdCopyBuffer CmdCopyBuffer = nullptr;
                 PFN_vkCmdPipelineBarrier CmdPipelineBarrier = nullptr;
                 PFN_vkCreateFence CreateFence = nullptr;
+                PFN_vkDestroyFence DestroyFence = nullptr;
                 PFN_vkResetFences ResetFences = nullptr;
                 PFN_vkWaitForFences WaitForFences = nullptr;
                 PFN_vkQueueSubmit QueueSubmit = nullptr;
@@ -357,6 +359,7 @@ namespace rad
                 g.fn.ResetDescriptorPool = (PFN_vkResetDescriptorPool)device_fn("vkResetDescriptorPool");
                 g.fn.CreateCommandPool = (PFN_vkCreateCommandPool)device_fn("vkCreateCommandPool");
                 g.fn.ResetCommandPool = (PFN_vkResetCommandPool)device_fn("vkResetCommandPool");
+                g.fn.ResetCommandBuffer = (PFN_vkResetCommandBuffer)device_fn("vkResetCommandBuffer");
                 g.fn.AllocateCommandBuffers =
                     (PFN_vkAllocateCommandBuffers)device_fn("vkAllocateCommandBuffers");
                 g.fn.BeginCommandBuffer = (PFN_vkBeginCommandBuffer)device_fn("vkBeginCommandBuffer");
@@ -369,6 +372,7 @@ namespace rad
                 g.fn.CmdCopyBuffer = (PFN_vkCmdCopyBuffer)device_fn("vkCmdCopyBuffer");
                 g.fn.CmdPipelineBarrier = (PFN_vkCmdPipelineBarrier)device_fn("vkCmdPipelineBarrier");
                 g.fn.CreateFence = (PFN_vkCreateFence)device_fn("vkCreateFence");
+                g.fn.DestroyFence = (PFN_vkDestroyFence)device_fn("vkDestroyFence");
                 g.fn.ResetFences = (PFN_vkResetFences)device_fn("vkResetFences");
                 g.fn.WaitForFences = (PFN_vkWaitForFences)device_fn("vkWaitForFences");
                 g.fn.QueueSubmit = (PFN_vkQueueSubmit)device_fn("vkQueueSubmit");
@@ -377,6 +381,7 @@ namespace rad
 
                 VkCommandPoolCreateInfo cpci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
                 cpci.queueFamilyIndex = g.queue_family;
+                cpci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
                 if (g.fn.CreateCommandPool(g.device, &cpci, nullptr, &g.command_pool) != VK_SUCCESS)
                 {
                     g.error = "vkCreateCommandPool failed";
@@ -465,18 +470,33 @@ namespace rad
                     type = find_memory_type(req.memoryTypeBits, properties);
                 }
                 if (type < 0)
+                {
+                    out.destroy();
                     return false;
+                }
 
                 VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
                 mai.allocationSize = req.size;
                 mai.memoryTypeIndex = (uint32_t)type;
                 if (g.fn.AllocateMemory(g.device, &mai, nullptr, &out.memory) != VK_SUCCESS)
+                {
+                    out.destroy();
                     return false;
+                }
                 if (g.fn.BindBufferMemory(g.device, out.buffer, out.memory, 0) != VK_SUCCESS)
+                {
+                    out.destroy();
                     return false;
+                }
                 if (!map)
                     return true;
-                return g.fn.MapMemory(g.device, out.memory, 0, VK_WHOLE_SIZE, 0, &out.mapped) == VK_SUCCESS;
+                if (g.fn.MapMemory(g.device, out.memory, 0, VK_WHOLE_SIZE, 0, &out.mapped)
+                    != VK_SUCCESS)
+                {
+                    out.destroy();
+                    return false;
+                }
+                return true;
             }
 
             bool create_host_buffer(gpu_buffer &out, VkDeviceSize size)
@@ -484,6 +504,79 @@ namespace rad
                 return create_buffer(out, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                      | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
+            }
+
+            bool submit_copy_locked(VkBuffer source, VkBuffer destination, VkDeviceSize size,
+                                    const char *what)
+            {
+                g.fn.ResetCommandPool(g.device, g.command_pool, 0);
+                VkCommandBufferBeginInfo cbbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                if (g.fn.BeginCommandBuffer(g.command_buffer, &cbbi) != VK_SUCCESS)
+                {
+                    g.error = std::string(what) + ": vkBeginCommandBuffer failed";
+                    return false;
+                }
+                VkBufferCopy region = {0, 0, size};
+                g.fn.CmdCopyBuffer(g.command_buffer, source, destination, 1, &region);
+                VkMemoryBarrier to_compute = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                to_compute.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                to_compute.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                g.fn.CmdPipelineBarrier(g.command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+                                        &to_compute, 0, nullptr, 0, nullptr);
+                if (g.fn.EndCommandBuffer(g.command_buffer) != VK_SUCCESS)
+                {
+                    g.error = std::string(what) + ": vkEndCommandBuffer failed";
+                    return false;
+                }
+                g.fn.ResetFences(g.device, 1, &g.fence);
+                VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                submit.commandBufferCount = 1;
+                submit.pCommandBuffers = &g.command_buffer;
+                if (g.fn.QueueSubmit(g.queue, 1, &submit, g.fence) != VK_SUCCESS)
+                {
+                    g.error = std::string(what) + ": vkQueueSubmit failed";
+                    return false;
+                }
+                if (g.fn.WaitForFences(g.device, 1, &g.fence, VK_TRUE, ~0ull) != VK_SUCCESS)
+                {
+                    g.error = std::string(what) + ": vkWaitForFences failed (device lost?)";
+                    return false;
+                }
+                return true;
+            }
+
+            bool upload_device_buffer_locked(gpu_buffer &destination, const void *data,
+                                              size_t size, VkBufferUsageFlags usage,
+                                              const char *what)
+            {
+                const VkDeviceSize bytes = size ? (VkDeviceSize)size : 16;
+                if (!create_buffer(destination, bytes,
+                                   usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false))
+                {
+                    g.error = std::string(what) + ": device-local buffer creation failed";
+                    return false;
+                }
+                if (!size)
+                    return true;
+
+                gpu_buffer staging;
+                if (!create_buffer(staging, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                   | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true))
+                {
+                    destination.destroy();
+                    g.error = std::string(what) + ": staging buffer creation failed";
+                    return false;
+                }
+                std::memcpy(staging.mapped, data, size);
+                const bool ok = submit_copy_locked(staging.buffer, destination.buffer, bytes, what);
+                staging.destroy();
+                if (!ok)
+                    destination.destroy();
+                return ok;
             }
 
             bool ensure_descriptor_pool_locked()
@@ -838,13 +931,21 @@ namespace rad
 
             struct formfactor_session
             {
+                struct slot
+                {
+                    VkDescriptorSet set = VK_NULL_HANDLE;
+                    VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+                    VkFence fence = VK_NULL_HANDLE;
+                    gpu_buffer pair_buf;
+                    gpu_buffer result_buf;
+                    gpu_buffer readback_buf;
+                    uint32_t pair_count = 0;
+                    bool submitted = false;
+                };
                 bool active = false;
                 VkDescriptorPool pool = VK_NULL_HANDLE;
-                VkDescriptorSet set = VK_NULL_HANDLE;
                 gpu_buffer scene_bufs[4];
-                gpu_buffer pair_buf;
-                gpu_buffer result_buf;
-                gpu_buffer readback_buf;
+                slot slots[2];
                 uint32_t max_pairs = 0;
             };
             formfactor_session ffsess;
@@ -889,11 +990,18 @@ namespace rad
             {
                 if (!ffsess.active && !ffsess.pool)
                     return;
+                for (formfactor_session::slot &slot : ffsess.slots)
+                {
+                    if (slot.submitted && slot.fence)
+                        g.fn.WaitForFences(g.device, 1, &slot.fence, VK_TRUE, ~0ull);
+                    slot.pair_buf.destroy();
+                    slot.result_buf.destroy();
+                    slot.readback_buf.destroy();
+                    if (slot.fence && g.fn.DestroyFence)
+                        g.fn.DestroyFence(g.device, slot.fence, nullptr);
+                }
                 for (gpu_buffer &buffer : ffsess.scene_bufs)
                     buffer.destroy();
-                ffsess.pair_buf.destroy();
-                ffsess.result_buf.destroy();
-                ffsess.readback_buf.destroy();
                 if (ffsess.pool)
                     g.fn.DestroyDescriptorPool(g.device, ffsess.pool, nullptr);
                 ffsess = formfactor_session();
@@ -962,11 +1070,9 @@ namespace rad
             // dummy allocation the kernel never indexes
             auto upload = [&](gpu_buffer &buf, const void *data, size_t size)
             {
-                if (!create_host_buffer(buf, size ? size : 16))
-                    return false;
-                if (size)
-                    std::memcpy(buf.mapped, data, size);
-                return true;
+                return upload_device_buffer_locked(buf, data, size,
+                                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                   "gather scene upload");
             };
 
             gsess.max_items = max_chunk_items;
@@ -1205,11 +1311,9 @@ namespace rad
 
             auto upload = [&](gpu_buffer &buffer, const void *data, size_t size)
             {
-                if (!create_host_buffer(buffer, size ? size : 16))
-                    return false;
-                if (size)
-                    std::memcpy(buffer.mapped, data, size);
-                return true;
+                return upload_device_buffer_locked(buffer, data, size,
+                                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                   "formfactor scene upload");
             };
 
             const VkDeviceSize pair_size = (VkDeviceSize)max_pairs * sizeof(transfer_pair);
@@ -1221,15 +1325,20 @@ namespace rad
                 && upload(ffsess.scene_bufs[2], scene.sky_normals.data(),
                           scene.sky_normals.size() * sizeof(float))
                 && upload(ffsess.scene_bufs[3], scene.sky_levels.data(),
-                          scene.sky_levels.size() * sizeof(int32_t))
-                && create_host_buffer(ffsess.pair_buf, pair_size)
-                && create_buffer(ffsess.result_buf, result_size,
-                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false)
-                && create_buffer(ffsess.readback_buf, result_size,
-                                 VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                 | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
+                          scene.sky_levels.size() * sizeof(int32_t));
+            for (formfactor_session::slot &slot : ffsess.slots)
+            {
+                ok = ok && create_host_buffer(slot.pair_buf, pair_size)
+                    && create_buffer(slot.result_buf, result_size,
+                                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                         | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false)
+                    && create_buffer(slot.readback_buf, result_size,
+                                     VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                         | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                     true);
+            }
             if (!ok)
             {
                 g.error = "formfactor_begin: buffer creation failed";
@@ -1239,9 +1348,9 @@ namespace rad
 
             VkDescriptorPoolSize pool_size = {};
             pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            pool_size.descriptorCount = 6;
+            pool_size.descriptorCount = 12;
             VkDescriptorPoolCreateInfo dpci = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-            dpci.maxSets = 1;
+            dpci.maxSets = 2;
             dpci.poolSizeCount = 1;
             dpci.pPoolSizes = &pool_size;
             if (g.fn.CreateDescriptorPool(g.device, &dpci, nullptr, &ffsess.pool) != VK_SUCCESS)
@@ -1253,102 +1362,172 @@ namespace rad
 
             VkDescriptorSetAllocateInfo dsai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
             dsai.descriptorPool = ffsess.pool;
-            dsai.descriptorSetCount = 1;
-            dsai.pSetLayouts = &g.ff_set_layout;
-            if (g.fn.AllocateDescriptorSets(g.device, &dsai, &ffsess.set) != VK_SUCCESS)
+            dsai.descriptorSetCount = 2;
+            VkDescriptorSetLayout set_layouts[2] = {g.ff_set_layout, g.ff_set_layout};
+            dsai.pSetLayouts = set_layouts;
+            VkDescriptorSet sets[2] = {};
+            if (g.fn.AllocateDescriptorSets(g.device, &dsai, sets) != VK_SUCCESS)
             {
                 g.error = "formfactor_begin: descriptor set allocation failed";
                 formfactor_end_locked();
                 return false;
             }
 
-            VkDescriptorBufferInfo infos[6];
-            VkBuffer bindings[6] = {
-                ffsess.scene_bufs[0].buffer, ffsess.scene_bufs[1].buffer,
-                ffsess.scene_bufs[2].buffer, ffsess.scene_bufs[3].buffer,
-                ffsess.pair_buf.buffer, ffsess.result_buf.buffer,
-            };
-            VkWriteDescriptorSet writes[6] = {};
-            for (uint32_t i = 0; i < 6; i++)
+            VkCommandBufferAllocateInfo cbai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            cbai.commandPool = g.command_pool;
+            cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            cbai.commandBufferCount = 2;
+            VkCommandBuffer command_buffers[2] = {};
+            if (g.fn.AllocateCommandBuffers(g.device, &cbai, command_buffers) != VK_SUCCESS)
             {
-                infos[i] = {bindings[i], 0, VK_WHOLE_SIZE};
-                writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                writes[i].dstSet = ffsess.set;
-                writes[i].dstBinding = i;
-                writes[i].descriptorCount = 1;
-                writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                writes[i].pBufferInfo = &infos[i];
+                g.error = "formfactor_begin: command buffer allocation failed";
+                formfactor_end_locked();
+                return false;
             }
-            g.fn.UpdateDescriptorSets(g.device, 6, writes, 0, nullptr);
+            VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            for (int slot_index = 0; slot_index < 2; slot_index++)
+            {
+                formfactor_session::slot &slot = ffsess.slots[slot_index];
+                slot.set = sets[slot_index];
+                slot.command_buffer = command_buffers[slot_index];
+                if (g.fn.CreateFence(g.device, &fci, nullptr, &slot.fence) != VK_SUCCESS)
+                {
+                    g.error = "formfactor_begin: fence creation failed";
+                    formfactor_end_locked();
+                    return false;
+                }
+
+                VkDescriptorBufferInfo infos[6];
+                VkBuffer bindings[6] = {
+                    ffsess.scene_bufs[0].buffer, ffsess.scene_bufs[1].buffer,
+                    ffsess.scene_bufs[2].buffer, ffsess.scene_bufs[3].buffer,
+                    slot.pair_buf.buffer, slot.result_buf.buffer,
+                };
+                VkWriteDescriptorSet writes[6] = {};
+                for (uint32_t i = 0; i < 6; i++)
+                {
+                    infos[i] = {bindings[i], 0, VK_WHOLE_SIZE};
+                    writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                    writes[i].dstSet = slot.set;
+                    writes[i].dstBinding = i;
+                    writes[i].descriptorCount = 1;
+                    writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    writes[i].pBufferInfo = &infos[i];
+                }
+                g.fn.UpdateDescriptorSets(g.device, 6, writes, 0, nullptr);
+            }
             ffsess.max_pairs = max_pairs;
             ffsess.active = true;
+            return true;
+        }
+
+        bool formfactor_submit(const transfer_pair *pairs, size_t pair_count,
+                               uint32_t slot_index)
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            if (!ffsess.active)
+            {
+                g.error = "formfactor_submit: no active form factor session";
+                return false;
+            }
+            if (slot_index >= 2 || !pairs || pair_count == 0 || pair_count > ffsess.max_pairs)
+            {
+                g.error = "formfactor_submit: bad pair count or slot";
+                return false;
+            }
+            formfactor_session::slot &slot = ffsess.slots[slot_index];
+            if (slot.submitted)
+            {
+                g.error = "formfactor_submit: slot is still in flight";
+                return false;
+            }
+
+            std::memcpy(slot.pair_buf.mapped, pairs, pair_count * sizeof(transfer_pair));
+            const uint32_t count = (uint32_t)pair_count;
+            const VkDeviceSize out_size = (VkDeviceSize)pair_count * sizeof(float);
+
+            if (g.fn.ResetCommandBuffer)
+                g.fn.ResetCommandBuffer(slot.command_buffer, 0);
+            VkCommandBufferBeginInfo cbbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            if (g.fn.BeginCommandBuffer(slot.command_buffer, &cbbi) != VK_SUCCESS)
+            {
+                g.error = "formfactor_submit: vkBeginCommandBuffer failed";
+                return false;
+            }
+            g.fn.CmdBindPipeline(slot.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, g.ff_pipeline);
+            g.fn.CmdBindDescriptorSets(slot.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                       g.ff_pipeline_layout, 0, 1, &slot.set, 0, nullptr);
+            g.fn.CmdPushConstants(slot.command_buffer, g.ff_pipeline_layout,
+                                  VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &count);
+            g.fn.CmdDispatch(slot.command_buffer, (count + 63) / 64, 1, 1);
+
+            VkMemoryBarrier to_copy = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            to_copy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            to_copy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            g.fn.CmdPipelineBarrier(slot.command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &to_copy, 0, nullptr, 0, nullptr);
+            VkBufferCopy region = {0, 0, out_size};
+            g.fn.CmdCopyBuffer(slot.command_buffer, slot.result_buf.buffer,
+                               slot.readback_buf.buffer, 1, &region);
+            VkMemoryBarrier to_host = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            to_host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            g.fn.CmdPipelineBarrier(slot.command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                    VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &to_host, 0, nullptr, 0, nullptr);
+            if (g.fn.EndCommandBuffer(slot.command_buffer) != VK_SUCCESS)
+            {
+                g.error = "formfactor_submit: vkEndCommandBuffer failed";
+                return false;
+            }
+
+            g.fn.ResetFences(g.device, 1, &slot.fence);
+            VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            submit.commandBufferCount = 1;
+            submit.pCommandBuffers = &slot.command_buffer;
+            if (g.fn.QueueSubmit(g.queue, 1, &submit, slot.fence) != VK_SUCCESS)
+            {
+                g.error = "formfactor_submit: vkQueueSubmit failed";
+                return false;
+            }
+            slot.pair_count = count;
+            slot.submitted = true;
+            return true;
+        }
+
+        bool formfactor_collect(uint32_t slot_index, std::vector<float> &trans)
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            trans.clear();
+            if (!ffsess.active || slot_index >= 2)
+            {
+                g.error = "formfactor_collect: no active session or bad slot";
+                return false;
+            }
+            formfactor_session::slot &slot = ffsess.slots[slot_index];
+            if (!slot.submitted)
+            {
+                g.error = "formfactor_collect: slot is not in flight";
+                return false;
+            }
+            if (g.fn.WaitForFences(g.device, 1, &slot.fence, VK_TRUE, ~0ull) != VK_SUCCESS)
+            {
+                g.error = "formfactor_collect: vkWaitForFences failed (device lost?)";
+                return false;
+            }
+            trans.resize(slot.pair_count);
+            std::memcpy(trans.data(), slot.readback_buf.mapped,
+                        (size_t)slot.pair_count * sizeof(float));
+            slot.submitted = false;
             return true;
         }
 
         bool formfactor_batch(const transfer_pair *pairs, size_t pair_count,
                               std::vector<float> &trans)
         {
-            std::lock_guard<std::mutex> lock(g_mutex);
-            trans.clear();
-            if (!ffsess.active)
-            {
-                g.error = "formfactor_batch: no active form factor session";
+            if (!formfactor_submit(pairs, pair_count, 0))
                 return false;
-            }
-            if (!pairs || pair_count == 0 || pair_count > ffsess.max_pairs)
-            {
-                g.error = "formfactor_batch: bad pair count";
-                return false;
-            }
-
-            std::memcpy(ffsess.pair_buf.mapped, pairs, pair_count * sizeof(transfer_pair));
-            const uint32_t count = (uint32_t)pair_count;
-            const VkDeviceSize out_size = (VkDeviceSize)pair_count * sizeof(float);
-
-            g.fn.ResetCommandPool(g.device, g.command_pool, 0);
-            VkCommandBufferBeginInfo cbbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-            cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-            g.fn.BeginCommandBuffer(g.command_buffer, &cbbi);
-            g.fn.CmdBindPipeline(g.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, g.ff_pipeline);
-            g.fn.CmdBindDescriptorSets(g.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                       g.ff_pipeline_layout, 0, 1, &ffsess.set, 0, nullptr);
-            g.fn.CmdPushConstants(g.command_buffer, g.ff_pipeline_layout,
-                                  VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &count);
-            g.fn.CmdDispatch(g.command_buffer, (count + 63) / 64, 1, 1);
-
-            VkMemoryBarrier to_copy = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-            to_copy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            to_copy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            g.fn.CmdPipelineBarrier(g.command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &to_copy, 0, nullptr, 0, nullptr);
-            VkBufferCopy region = {0, 0, out_size};
-            g.fn.CmdCopyBuffer(g.command_buffer, ffsess.result_buf.buffer,
-                               ffsess.readback_buf.buffer, 1, &region);
-            VkMemoryBarrier to_host = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-            to_host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-            g.fn.CmdPipelineBarrier(g.command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                    VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &to_host, 0, nullptr, 0, nullptr);
-            g.fn.EndCommandBuffer(g.command_buffer);
-
-            g.fn.ResetFences(g.device, 1, &g.fence);
-            VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
-            submit.commandBufferCount = 1;
-            submit.pCommandBuffers = &g.command_buffer;
-            if (g.fn.QueueSubmit(g.queue, 1, &submit, g.fence) != VK_SUCCESS)
-            {
-                g.error = "formfactor_batch: vkQueueSubmit failed";
-                return false;
-            }
-            if (g.fn.WaitForFences(g.device, 1, &g.fence, VK_TRUE, ~0ull) != VK_SUCCESS)
-            {
-                g.error = "formfactor_batch: vkWaitForFences failed (device lost?)";
-                return false;
-            }
-
-            trans.resize(pair_count);
-            std::memcpy(trans.data(), ffsess.readback_buf.mapped, (size_t)out_size);
-            return true;
+            return formfactor_collect(0, trans);
         }
 
         void formfactor_end()

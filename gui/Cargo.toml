@@ -15,12 +15,15 @@ eframe = { version = "=0.28.1", default-features = false, features = [
     "default_fonts",
     "glow",
 ] }
+base64 = "0.22"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 egui = "=0.28.1"
 fs2 = "=0.4.3"
 rfd = "=0.14.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [profile.release]
 opt-level = 2
@@ -30,5 +33,9 @@ strip = true
 [[bin]]
 name = "resdhlt-gui"
 path = "src/main.rs"
+
+[[bin]]
+name = "resdhlt-release-signer"
+path = "src/release_signer.rs"
 
 

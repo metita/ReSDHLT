@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Strike 1.6.
 
 ### Changed
+- RAD/Vulkan: immutable gather and form-factor scene buffers now use host-visible
+  staging plus device-local storage. Sparse form-factor dispatches have two
+  independent command-buffer/fence slots, so the next pair batch is submitted
+  while the previous result is collected and packed. Transfer counts remain
+  identical; the known bounce fixture still has its pre-existing one-byte
+  lighting delta (`191` versus `192`) outside the transfer pipeline.
+- Releases/updater: every runtime and symbol ZIP now gets a detached Ed25519
+  signature (`.sig`) in addition to SHA-256. The updater verifies the exact
+  portable ZIP against the pinned public key before unpacking; CI refuses to
+  publish if `RESDHLT_ED25519_PRIVATE_KEY_B64` is missing or mismatched.
+- Build hygiene: the release signer is a small audited Rust binary and the
+  signature key material is never stored in the repository; `--generate-key`
+  prints a new seed/public-key pair for rotating the documented CI secret.
 - Build/release: the portable build is now the default. The `portable` and
   `avx2` CMake presets use isolated output trees, RelWithDebInfo, optional
   compiler caching, separated symbols, package smoke tests, and SHA-256
