@@ -144,10 +144,12 @@ The transfer kernel is used with `-vismatrix sparse`, the default. It walks the
 sparse visibility pairs directly instead of testing the full patches-squared
 matrix. Patch and winding data are uploaded once per compile and the pair/result
 buffers are reused across every batch. It falls back to the CPU implementation for RGB transfers, translucent
-patches, and custom bounce shadows. The bounce accumulation itself remains on
-the CPU: it already consumes the packed transfer lists and is much smaller than
-constructing them (on `ze_cardinal`, 12 bounces totalled about 6 seconds while
-`MakeScales` alone took 58.43 seconds).
+patches, and custom bounce shadows. A style-0 **single-bounce** accumulation
+kernel is also available; multi-bounce runs deliberately stay on the CPU for
+deterministic lightmap bytes because a GPU float round-off can compound on the
+next iteration. The bounce phase is much smaller than constructing transfers
+(on `ze_cardinal`, 12 bounces totalled about 6 seconds while `MakeScales` alone
+took 58.43 seconds).
 
 It is off by default. Building it needs nothing extra, since the Khronos headers
 and the compiled SPIR-V are both in the tree and the Vulkan loader is opened by
@@ -160,9 +162,9 @@ pick a preset, press compile, watch the log. Every option carries a tooltip
 saying what it does and when to use it, and there is a tab summarising the
 recommendations that the benchmarks actually support.
 
-It updates itself from GitHub Releases. The check runs on launch, installs what
-it finds without asking, and never runs while a compile is in progress. The menu
-has a switch to turn all of that off.
+It updates itself from GitHub Releases. The check runs asynchronously on launch,
+but installation always requires an explicit click and is blocked while a
+compile is in progress. The menu has a switch to turn checks off.
 
 ```sh
 cd gui

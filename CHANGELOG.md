@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Strike 1.6.
 
 ### Changed
+- RAD/Vulkan: added a generated style-0 bounce kernel with device-local
+  accumulation and a safe CPU fallback. It is enabled for one-bounce runs after
+  validating opaque/style-0 inputs; RGB transfers, transparency, custom shadows,
+  style remapping, GPU errors, and multi-bounce runs remain on the deterministic
+  CPU path. `scripts/gen_spirv.py --only bounce` regenerates only this shader.
 - Build hygiene: cleaned the first `/W4` warning tranche in the shared file,
   logging, BSP and CSG paths (assignment-in-condition, signed/unsigned loop
   bounds, shadowed locals and proven initialization cases). The opt-in

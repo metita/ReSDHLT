@@ -252,6 +252,9 @@ set(RAD_HEADERS
 	${RAD_DIR}/meshdesc.h
 	${RAD_DIR}/meshtrace.h
     ${RAD_DIR}/gpu_gather.h
+    ${RAD_DIR}/gpu/gpu.h
+    ${RAD_DIR}/gpu/shaders/bounce.comp
+    ${RAD_DIR}/gpu/spirv/bounce_spirv.h
     ${RAD_DIR}/qrad.h
     ${RAD_DIR}/raybench.h
 )

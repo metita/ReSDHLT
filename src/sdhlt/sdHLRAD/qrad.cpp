@@ -18,11 +18,15 @@
 
 #include <vector>
 #include <string>
+#include <cmath>
 
 #include "qrad.h"
 #include "profiling.h"
 #include "raybench.h"
 #include "gpu_gather.h"
+#ifdef SDHLT_GPU
+#include "gpu/gpu.h"
+#endif
 
 
 /*
@@ -2537,6 +2541,103 @@ static void     GatherRGBLight(int threadnum)
 // =====================================================================================
 //  BounceLight
 // =====================================================================================
+#ifdef SDHLT_GPU
+struct gpu_bounce_state_t
+{
+    std::vector<uint32_t> row_offsets;
+    std::vector<uint32_t> emitters;
+    std::vector<float> factors;
+};
+
+static bool PrepareGpuBounce(gpu_bounce_state_t& state)
+{
+    // A multi-bounce GPU result is numerically valid but can round a different
+    // lightmap byte after the next iteration because Vulkan is float-only.
+    // Keep the production/default multi-bounce output deterministic and use
+    // this kernel only for the independently verifiable single-bounce case.
+    if (g_numbounce != 1 || !g_gpu || !g_gpu_transfers || g_rgb_transfers
+        || g_customshadow_with_bouncelight || g_opaque_face_count != 0)
+        return false;
+
+    state.row_offsets.assign((size_t)g_num_patches + 1, 0);
+    state.emitters.clear();
+    state.factors.clear();
+    for (unsigned receiver = 0; receiver < g_num_patches; receiver++)
+    {
+        const patch_t& patch = g_patches[receiver];
+        if (patch.translucent_b || patch.bouncestyle != -1)
+            return false;
+        if (patch.iIndex != 0 && (!patch.tIndex || !patch.tData))
+            return false;
+        for (unsigned style = 0; style < MAXLIGHTMAPS; style++)
+        {
+            if ((patch.directstyle[style] != 255 && patch.directstyle[style] != 0)
+                || (patch.totalstyle[style] != 255 && patch.totalstyle[style] != 0))
+                return false;
+        }
+
+        const transfer_data_t* data = patch.tData;
+        for (unsigned index = 0; index < patch.iIndex; index++)
+        {
+            const transfer_index_t& row = patch.tIndex[index];
+            if (row.index >= g_num_patches || row.size >= g_num_patches
+                || row.size + 1 > g_num_patches - row.index)
+                return false;
+            unsigned emitter = row.index;
+            const unsigned count = row.size + 1;
+            for (unsigned offset = 0; offset < count; offset++, emitter++)
+            {
+                float factor = 0.0f;
+                float_decompress(g_transfer_compress_type, data, &factor);
+                data += float_size[g_transfer_compress_type];
+                if (!std::isfinite(factor) || factor <= 0.0f)
+                    continue;
+                state.emitters.push_back(emitter);
+                state.factors.push_back(factor);
+            }
+        }
+        state.row_offsets[receiver + 1] = (uint32_t)state.emitters.size();
+    }
+    return state.emitters.size() <= UINT32_MAX;
+}
+
+static bool RunGpuBounce(const gpu_bounce_state_t& state)
+{
+    std::vector<rad::gpu::bounce_patch> patches(g_num_patches);
+    for (unsigned i = 0; i < g_num_patches; i++)
+    {
+        rad::gpu::bounce_patch& out = patches[i];
+        for (int component = 0; component < 3; component++)
+        {
+            out.direct[component] = (float)g_patches[i].directlight[0][component];
+            out.total[component] = (float)emitlight[i][0][component];
+            out.reflectivity[component] = (float)g_patches[i].bouncereflectivity[component];
+        }
+    }
+    std::vector<rad::gpu::bounce_result> results;
+    if (!rad::gpu::bounce_batch(patches, state.row_offsets, state.emitters,
+                                state.factors, results)
+        || results.size() != g_num_patches)
+    {
+        Warning("-gpu bounce: %s; using the CPU bounce path",
+                rad::gpu::last_error().c_str());
+        return false;
+    }
+    for (unsigned i = 0; i < g_num_patches; i++)
+    {
+        newstyles[i][0] = 0;
+        VectorCopy(results[i].total, addlight[i][0]);
+        for (unsigned style = 1; style < MAXLIGHTMAPS; style++)
+        {
+            newstyles[i][style] = 255;
+            VectorClear(addlight[i][style]);
+        }
+    }
+    CollectLight();
+    return true;
+}
+#endif
+
 static void     BounceLight()
 {
     unsigned        i;
@@ -2553,14 +2654,37 @@ static void     BounceLight()
 		}
     }
 
+#ifdef SDHLT_GPU
+    gpu_bounce_state_t gpu_bounce_state;
+#endif
+    bool gpu_bounces = false;
+#ifdef SDHLT_GPU
+    gpu_bounces = PrepareGpuBounce(gpu_bounce_state);
+    if (gpu_bounces)
+        Log("GPU bounces: style-0 accumulation enabled (%s)\n",
+            rad::gpu::device_name().c_str());
+    else if (g_gpu && g_gpu_transfers && g_numbounce > 1)
+        Log("GPU bounces: CPU fallback for multi-bounce determinism\n");
+#endif
+
     for (i = 0; i < g_numbounce; i++)
     {
         Log("Bounce %u ", i + 1);
+#ifdef SDHLT_GPU
+	if(gpu_bounces && RunGpuBounce(gpu_bounce_state))
+	{
+		// RunGpuBounce performed the style selection and CollectLight.
+	}
+	else
+#endif
+	{
+		gpu_bounces = false;
 	if(g_rgb_transfers)
 	       	{NamedRunThreadsOn(g_num_patches, g_estimate, GatherRGBLight);}
         else
         	{NamedRunThreadsOn(g_num_patches, g_estimate, GatherLight);}
         CollectLight();
+	}
 
         if (g_dumppatches)
         {

@@ -6,7 +6,7 @@ building ReSDHLT needs no shader compiler and no Vulkan SDK. Run this only
 after editing a .comp/.glsl file, and commit the result alongside it.
 
 Usage:
-    python scripts/gen_spirv.py [--compiler PATH]
+    python scripts/gen_spirv.py [--compiler PATH] [--only KERNEL]
 
 Accepts either glslc (Vulkan SDK, shaderc) or glslang. Looked up on PATH and
 under $VULKAN_SDK/bin unless --compiler is given.
@@ -27,6 +27,7 @@ KERNELS = [
     ("trace_bsp", "trace_bsp", "g_trace_bsp_spirv", []),
     ("gather", "gather", "g_gather_spirv", []),
     ("formfactor", "formfactor", "g_formfactor_spirv", []),
+    ("bounce", "bounce", "g_bounce_spirv", []),
 ]
 
 # The gather kernel's traversal stack is seven per-thread arrays, so its depth
@@ -87,12 +88,21 @@ def embed(spv, header, symbol):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--compiler")
+    ap.add_argument("--only", action="append",
+                    help="generate only the named output stem (repeatable)")
     args = ap.parse_args()
     compiler, kind = find_compiler(args.compiler)
     print("using %s" % compiler)
     os.makedirs(OUT, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
-        for src_stem, out_stem, symbol, defines in KERNELS:
+        kernels = KERNELS
+        if args.only:
+            wanted = set(args.only)
+            kernels = [k for k in KERNELS if k[1] in wanted]
+            missing = wanted - {k[1] for k in kernels}
+            if missing:
+                ap.error("unknown kernel(s): %s" % ", ".join(sorted(missing)))
+        for src_stem, out_stem, symbol, defines in kernels:
             src = os.path.join(SHADERS, src_stem + ".comp")
             spv = os.path.join(tmp, out_stem + ".spv")
             compile_one(compiler, kind, src, spv, defines)

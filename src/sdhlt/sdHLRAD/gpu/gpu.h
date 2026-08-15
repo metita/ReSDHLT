@@ -223,5 +223,31 @@ namespace rad
         bool formfactor_batch(const formfactor_scene &scene,
                               const std::vector<transfer_pair> &pairs,
                               std::vector<float> &trans);
+
+        // ===== style-0 radiosity bounce accumulation =====
+        // The first GPU bounce kernel deliberately models only the stable
+        // style-0 path: RGB/custom-shadow/transparency/style remapping stay on
+        // the reference CPU path.  The host decides whether a map qualifies,
+        // so unsupported maps fall back without changing their output.
+        struct bounce_patch
+        {
+            float direct[3];
+            float total[3];
+            float reflectivity[3];
+        };
+        static_assert(sizeof(bounce_patch) == 36, "must match the GLSL BouncePatch layout");
+
+        struct bounce_result
+        {
+            float total[3];
+            float pad = 0.0f;
+        };
+        static_assert(sizeof(bounce_result) == 16, "must match the GLSL BounceResult layout");
+
+        bool bounce_batch(const std::vector<bounce_patch> &patches,
+                          const std::vector<uint32_t> &row_offsets,
+                          const std::vector<uint32_t> &emitters,
+                          const std::vector<float> &factors,
+                          std::vector<bounce_result> &results);
     }
 }

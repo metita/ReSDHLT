@@ -26,6 +26,7 @@
 #include "spirv/gather_f32_d48_spirv.h"
 #include "spirv/gather_f32_d64_spirv.h"
 #include "spirv/formfactor_spirv.h" // generated: g_formfactor_spirv[]
+#include "spirv/bounce_spirv.h"     // generated: g_bounce_spirv[]
 
 // vulkan host plumbing for the gpu lighting backend the loader is opened
 // dynamically from the vulkan loader libraries that ship with the gpu
@@ -123,6 +124,11 @@ namespace rad
                 VkDescriptorSetLayout ff_set_layout = VK_NULL_HANDLE;
                 VkPipelineLayout ff_pipeline_layout = VK_NULL_HANDLE;
                 VkPipeline ff_pipeline = VK_NULL_HANDLE;
+
+                // cached style-0 bounce pipeline
+                VkDescriptorSetLayout bounce_set_layout = VK_NULL_HANDLE;
+                VkPipelineLayout bounce_pipeline_layout = VK_NULL_HANDLE;
+                VkPipeline bounce_pipeline = VK_NULL_HANDLE;
 
                 bool has_float64 = false;
                 int gather_f32_depth = 0;   // stack depth the cached kernel was built for
@@ -748,6 +754,16 @@ namespace rad
                     && create_compute_pipeline(g_formfactor_spirv, g_formfactor_spirv_size, 6, 4,
                                                "formfactor", g.ff_set_layout,
                                                g.ff_pipeline_layout, g.ff_pipeline);
+            }
+
+            bool ensure_bounce_pipeline_locked()
+            {
+                if (g.bounce_pipeline)
+                    return true;
+                return ensure_descriptor_pool_locked()
+                    && create_compute_pipeline(g_bounce_spirv, g_bounce_spirv_size, 5, 4,
+                                               "bounce", g.bounce_set_layout,
+                                               g.bounce_pipeline_layout, g.bounce_pipeline);
             }
         }
 
@@ -1545,6 +1561,151 @@ namespace rad
             const bool ok = formfactor_batch(pairs.data(), pairs.size(), trans);
             formfactor_end();
             return ok;
+        }
+
+        bool bounce_batch(const std::vector<bounce_patch> &patches,
+                          const std::vector<uint32_t> &row_offsets,
+                          const std::vector<uint32_t> &emitters,
+                          const std::vector<float> &factors,
+                          std::vector<bounce_result> &results)
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            results.clear();
+            if (patches.empty() || row_offsets.size() != patches.size() + 1
+                || emitters.size() != factors.size()
+                || patches.size() > UINT32_MAX || emitters.size() > UINT32_MAX)
+            {
+                g.error = "bounce_batch: invalid CSR input";
+                return false;
+            }
+            if (!ensure_device_locked() || !ensure_bounce_pipeline_locked())
+                return false;
+
+            gpu_buffer patch_buf, offset_buf, emitter_buf, factor_buf;
+            gpu_buffer result_buf, readback_buf;
+            auto destroy_buffers = [&]()
+            {
+                patch_buf.destroy();
+                offset_buf.destroy();
+                emitter_buf.destroy();
+                factor_buf.destroy();
+                result_buf.destroy();
+                readback_buf.destroy();
+            };
+            auto upload = [&](gpu_buffer &buffer, const void *data, size_t size)
+            {
+                return upload_device_buffer_locked(buffer, data, size,
+                                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                   "bounce scene upload");
+            };
+
+            const VkDeviceSize result_size =
+                (VkDeviceSize)patches.size() * sizeof(bounce_result);
+            if (!upload(patch_buf, patches.data(), patches.size() * sizeof(bounce_patch))
+                || !upload(offset_buf, row_offsets.data(),
+                           row_offsets.size() * sizeof(uint32_t))
+                || !upload(emitter_buf, emitters.data(),
+                           emitters.size() * sizeof(uint32_t))
+                || !upload(factor_buf, factors.data(), factors.size() * sizeof(float))
+                || !create_buffer(result_buf, result_size,
+                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                      | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false)
+                || !create_buffer(readback_buf, result_size,
+                                  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                      | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                  true))
+            {
+                destroy_buffers();
+                return false;
+            }
+
+            g.fn.ResetDescriptorPool(g.device, g.descriptor_pool, 0);
+            VkDescriptorSetAllocateInfo dsai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            dsai.descriptorPool = g.descriptor_pool;
+            dsai.descriptorSetCount = 1;
+            dsai.pSetLayouts = &g.bounce_set_layout;
+            VkDescriptorSet set = VK_NULL_HANDLE;
+            if (g.fn.AllocateDescriptorSets(g.device, &dsai, &set) != VK_SUCCESS)
+            {
+                g.error = "bounce_batch: descriptor set allocation failed";
+                destroy_buffers();
+                return false;
+            }
+
+            VkBuffer bindings[5] = {patch_buf.buffer, offset_buf.buffer, emitter_buf.buffer,
+                                    factor_buf.buffer, result_buf.buffer};
+            VkDescriptorBufferInfo infos[5] = {};
+            VkWriteDescriptorSet writes[5] = {};
+            for (uint32_t i = 0; i < 5; i++)
+            {
+                infos[i] = {bindings[i], 0, VK_WHOLE_SIZE};
+                writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                writes[i].dstSet = set;
+                writes[i].dstBinding = i;
+                writes[i].descriptorCount = 1;
+                writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                writes[i].pBufferInfo = &infos[i];
+            }
+            g.fn.UpdateDescriptorSets(g.device, 5, writes, 0, nullptr);
+
+            g.fn.ResetCommandPool(g.device, g.command_pool, 0);
+            VkCommandBufferBeginInfo cbbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            if (g.fn.BeginCommandBuffer(g.command_buffer, &cbbi) != VK_SUCCESS)
+            {
+                g.error = "bounce_batch: vkBeginCommandBuffer failed";
+                destroy_buffers();
+                return false;
+            }
+            g.fn.CmdBindPipeline(g.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                 g.bounce_pipeline);
+            g.fn.CmdBindDescriptorSets(g.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                       g.bounce_pipeline_layout, 0, 1, &set, 0, nullptr);
+            const uint32_t count = (uint32_t)patches.size();
+            g.fn.CmdPushConstants(g.command_buffer, g.bounce_pipeline_layout,
+                                  VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(count), &count);
+            g.fn.CmdDispatch(g.command_buffer, (count + 63) / 64, 1, 1);
+
+            VkMemoryBarrier to_copy = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            to_copy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            to_copy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            g.fn.CmdPipelineBarrier(g.command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &to_copy,
+                                    0, nullptr, 0, nullptr);
+            VkBufferCopy region = {0, 0, result_size};
+            g.fn.CmdCopyBuffer(g.command_buffer, result_buf.buffer, readback_buf.buffer,
+                               1, &region);
+            VkMemoryBarrier to_host = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            to_host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            g.fn.CmdPipelineBarrier(g.command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                    VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &to_host,
+                                    0, nullptr, 0, nullptr);
+            if (g.fn.EndCommandBuffer(g.command_buffer) != VK_SUCCESS)
+            {
+                g.error = "bounce_batch: vkEndCommandBuffer failed";
+                destroy_buffers();
+                return false;
+            }
+
+            g.fn.ResetFences(g.device, 1, &g.fence);
+            VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            submit.commandBufferCount = 1;
+            submit.pCommandBuffers = &g.command_buffer;
+            if (g.fn.QueueSubmit(g.queue, 1, &submit, g.fence) != VK_SUCCESS
+                || g.fn.WaitForFences(g.device, 1, &g.fence, VK_TRUE, ~0ull) != VK_SUCCESS)
+            {
+                g.error = "bounce_batch: Vulkan dispatch failed (device lost?)";
+                destroy_buffers();
+                return false;
+            }
+
+            results.resize(patches.size());
+            std::memcpy(results.data(), readback_buf.mapped, (size_t)result_size);
+            destroy_buffers();
+            return true;
         }
     }
 }

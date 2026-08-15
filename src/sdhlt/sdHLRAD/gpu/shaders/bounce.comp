@@ -1,0 +1,63 @@
+// style-0 radiosity accumulation. One invocation owns one receiver patch.
+// The CPU only dispatches this kernel when all style remapping, RGB transfers,
+// transparency and custom bounce shadows are absent.  Keeping that contract
+// explicit is what lets the original CPU GatherLight remain the correctness
+// fallback for every richer map.
+#version 450
+
+layout(local_size_x = 64) in;
+
+struct BouncePatch
+{
+    float directX, directY, directZ;
+    float totalX, totalY, totalZ;
+    float reflectX, reflectY, reflectZ;
+};
+
+struct BounceResult
+{
+    vec3 total;
+    float pad;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer PatchBuffer { BouncePatch patches[]; };
+layout(std430, set = 0, binding = 1) readonly buffer OffsetBuffer { uint rowOffsets[]; };
+layout(std430, set = 0, binding = 2) readonly buffer EmitterBuffer { uint emitters[]; };
+layout(std430, set = 0, binding = 3) readonly buffer FactorBuffer { float factors[]; };
+layout(std430, set = 0, binding = 4) writeonly buffer ResultBuffer { BounceResult results[]; };
+
+layout(push_constant) uniform Params
+{
+    uint numPatches;
+};
+
+void main()
+{
+    uint receiver = gl_GlobalInvocationID.x;
+    if (receiver >= numPatches)
+        return;
+
+    BouncePatch r = patches[receiver];
+    precise vec3 total = vec3(r.totalX, r.totalY, r.totalZ);
+    uint begin = rowOffsets[receiver];
+    uint end = rowOffsets[receiver + 1];
+    for (uint pair = begin; pair < end; ++pair)
+    {
+        BouncePatch e = patches[emitters[pair]];
+        // Keep the same operation order as GatherLight: direct and bounced
+        // light are scaled and reflected independently before each add.
+        // Combining them into one vector expression permits FMA/reassociation
+        // on some drivers and compounds into visible differences after bounce 1.
+        precise vec3 reflectivity = vec3(e.reflectX, e.reflectY, e.reflectZ);
+        precise vec3 direct = vec3(e.directX, e.directY, e.directZ);
+        precise vec3 direct_scaled = direct * factors[pair];
+        direct_scaled = direct_scaled * reflectivity;
+        total += direct_scaled;
+        precise vec3 bounced = vec3(e.totalX, e.totalY, e.totalZ);
+        precise vec3 bounced_scaled = bounced * factors[pair];
+        bounced_scaled = bounced_scaled * reflectivity;
+        total += bounced_scaled;
+    }
+    results[receiver].total = total;
+    results[receiver].pad = 0.0;
+}
