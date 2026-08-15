@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Strike 1.6.
 
 ### Changed
+- Release security: rotated the Ed25519 signing key, updated the pinned public
+  key in the GUI and signer, and stored the matching private seed only in the
+  GitHub Actions secret.
 - RAD/Vulkan: added a generated style-0 bounce kernel with device-local
   accumulation and a safe CPU fallback. It is enabled for one-bounce runs after
   validating opaque/style-0 inputs; RGB transfers, transparency, custom shadows,

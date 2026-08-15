@@ -31,7 +31,7 @@ const ALLOWED_DOWNLOAD_HOSTS: [&str; 2] = [
 ];
 // Public half of the release key. The private 32-byte seed lives only in the
 // GitHub Actions secret RESDHLT_ED25519_PRIVATE_KEY_B64.
-const RELEASE_PUBLIC_KEY_B64: &str = "l4LNeBTN4mH+ibxCfU2M0Hg/AYmRiy2Qwpn2jaIo3uM=";
+const RELEASE_PUBLIC_KEY_B64: &str = "iKjm08UlKxquw5vOfFDSmkqXnclWy30HypTUrRYEDQ8=";
 
 // ---------------------------------------------------------------- version
 
@@ -313,15 +313,11 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn verify_release_signature(path: &Path, encoded_signature: &[u8]) -> Result<(), String> {
-    let key_bytes = STANDARD
-        .decode(RELEASE_PUBLIC_KEY_B64)
-        .map_err(|_| "clave pública Ed25519 inválida".to_string())?;
-    let key_bytes: [u8; 32] = key_bytes
-        .try_into()
-        .map_err(|_| "la clave pública Ed25519 no tiene 32 bytes".to_string())?;
-    let key = VerifyingKey::from_bytes(&key_bytes)
-        .map_err(|_| "clave pública Ed25519 inválida".to_string())?;
+fn verify_signature_with_key(
+    path: &Path,
+    encoded_signature: &[u8],
+    key: &VerifyingKey,
+) -> Result<(), String> {
     let signature_bytes = STANDARD
         .decode(
             std::str::from_utf8(encoded_signature)
@@ -336,6 +332,18 @@ fn verify_release_signature(path: &Path, encoded_signature: &[u8]) -> Result<(),
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     key.verify(&bytes, &signature)
         .map_err(|_| "la firma Ed25519 del paquete no coincide".to_string())
+}
+
+fn verify_release_signature(path: &Path, encoded_signature: &[u8]) -> Result<(), String> {
+    let key_bytes = STANDARD
+        .decode(RELEASE_PUBLIC_KEY_B64)
+        .map_err(|_| "clave pública Ed25519 inválida".to_string())?;
+    let key_bytes: [u8; 32] = key_bytes
+        .try_into()
+        .map_err(|_| "la clave pública Ed25519 no tiene 32 bytes".to_string())?;
+    let key = VerifyingKey::from_bytes(&key_bytes)
+        .map_err(|_| "clave pública Ed25519 inválida".to_string())?;
+    verify_signature_with_key(path, encoded_signature, &key)
 }
 
 fn expected_asset_name() -> Option<&'static str> {
@@ -673,9 +681,11 @@ mod tests {
         std::fs::write(&path, b"signed package").unwrap();
         let signature = ed25519_dalek::Signer::sign(&key, b"signed package");
         let encoded = STANDARD.encode(signature.to_bytes());
-        assert!(verify_release_signature(&path, encoded.as_bytes()).is_ok());
+        assert!(verify_signature_with_key(&path, encoded.as_bytes(), &key.verifying_key()).is_ok());
         std::fs::write(&path, b"tampered package").unwrap();
-        assert!(verify_release_signature(&path, encoded.as_bytes()).is_err());
+        assert!(
+            verify_signature_with_key(&path, encoded.as_bytes(), &key.verifying_key()).is_err()
+        );
         let _ = std::fs::remove_file(path);
     }
 

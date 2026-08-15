@@ -11,7 +11,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-const EXPECTED_PUBLIC_KEY_B64: &str = "l4LNeBTN4mH+ibxCfU2M0Hg/AYmRiy2Qwpn2jaIo3uM=";
+const EXPECTED_PUBLIC_KEY_B64: &str = "iKjm08UlKxquw5vOfFDSmkqXnclWy30HypTUrRYEDQ8=";
 
 fn usage() -> ! {
     eprintln!("uso: resdhlt-release-signer <zip> <firma.sig>");
