@@ -11,6 +11,8 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
 - Release security: rotated the Ed25519 signing key, updated the pinned public
   key in the GUI and signer, and stored the matching private seed only in the
   GitHub Actions secret.
+- Portability: removed obsolete C++ `register` specifiers so the RAD target
+  builds cleanly with Clang in C++17 mode.
 - RAD/Vulkan: added a generated style-0 bounce kernel with device-local
   accumulation and a safe CPU fallback. It is enabled for one-bounce runs after
   validating opaque/style-0 inputs; RGB transfers, transparency, custom shadows,
