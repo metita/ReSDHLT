@@ -374,6 +374,32 @@ add_executable(RAD ${RAD_SOURCES} ${RAD_HEADERS})
 add_executable(VIS ${VIS_SOURCES} ${VIS_HEADERS})
 add_executable(RIPENT ${RIPENT_SOURCES} ${RIPENT_HEADERS})
 
+# The original RAD/VIS/RIPENT sources still carry a known warning backlog.
+# Keep /W4 visible in ordinary builds, but make the opt-in /WX build useful:
+# these are the only legacy diagnostic classes currently allowlisted for those
+# three targets. Warnings in BSP/CSG/common, and warning IDs outside this list,
+# still fail the strict build. Remove entries as each source file is cleaned.
+if (SDHLT_WARNINGS_AS_ERRORS)
+    if (MSVC)
+        set(SDHLT_LEGACY_MSVC_WARNING_ALLOWLIST
+            /wd4018 /wd4100 /wd4101 /wd4189 /wd4267 /wd4302 /wd4311
+            /wd4389 /wd4456 /wd4457 /wd4505 /wd4701 /wd4703 /wd4706)
+        foreach(_target RAD VIS RIPENT)
+            target_compile_options(${_target} PRIVATE
+                ${SDHLT_LEGACY_MSVC_WARNING_ALLOWLIST})
+        endforeach()
+    elseif (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+        set(SDHLT_LEGACY_GNU_WARNING_ALLOWLIST
+            -Wno-sign-compare -Wno-unused-parameter -Wno-unused-variable
+            -Wno-shadow -Wno-conversion -Wno-pointer-to-int-cast
+            -Wno-parentheses)
+        foreach(_target RAD VIS RIPENT)
+            target_compile_options(${_target} PRIVATE
+                ${SDHLT_LEGACY_GNU_WARNING_ALLOWLIST})
+        endforeach()
+    endif()
+endif()
+
 set_target_properties(BSP CSG RAD VIS
     PROPERTIES
         PREFIX ${SDHLT_PREFIX}${SDHLT_GAME_PREFIX}

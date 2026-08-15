@@ -16,8 +16,10 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
 - Build hygiene: cleaned the first `/W4` warning tranche in the shared file,
   logging, BSP and CSG paths (assignment-in-condition, signed/unsigned loop
   bounds, shadowed locals and proven initialization cases). The opt-in
-  `SDHLT_WARNINGS_AS_ERRORS=ON` build remains intentionally staged: legacy RAD,
-  VIS and RIPENT warnings still need their own parity-reviewed pass.
+  `SDHLT_WARNINGS_AS_ERRORS=ON` build now passes all targets while keeping
+  `/W4` visible in normal builds: a documented allowlist isolates the remaining
+  legacy RAD/VIS/RIPENT warning debt; warnings outside that allowlist still
+  fail the strict build.
 - RAD/Vulkan: immutable gather and form-factor scene buffers now use host-visible
   staging plus device-local storage. Sparse form-factor dispatches have two
   independent command-buffer/fence slots, so the next pair batch is submitted
