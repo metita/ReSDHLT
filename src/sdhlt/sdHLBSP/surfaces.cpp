@@ -159,7 +159,6 @@ static void     InitHash()
     vec3_t          size;
     vec_t           volume;
     vec_t           scale;
-    int             newsize[2];
     int             i;
 
     memset(hashverts, 0, sizeof(hashverts));

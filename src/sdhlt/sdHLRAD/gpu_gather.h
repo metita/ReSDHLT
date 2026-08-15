@@ -23,6 +23,9 @@
 // stack - makes GpuGatherRun() decline, and RAD runs the CPU path unchanged.
 
 extern bool     g_gpu;                                     // -gpu was given
+extern bool     g_gpu_auto;                                // choose CPU for small workloads
+extern bool     g_gpu_gather;                              // direct-light phase enabled
+extern bool     g_gpu_transfers;                           // sparse form-factor phase enabled
 extern int      g_gpu_adapter;                             // -gpuadapter, -1 = automatic
 
 // 0 = the GPU path is not running, 1 = collect pass, 2 = consume pass.

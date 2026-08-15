@@ -43,10 +43,11 @@ static int		hash_numslots[3];
 
 static void     InitHash(const vec3_t mins, const vec3_t maxs)
 {
+	(void)mins;
+	(void)maxs;
     vec3_t          size;
     vec_t           volume;
     vec_t           scale;
-    int             newsize[2];
 
 	// Let's ignore the parameters and make things more predictable, so there won't be strange cases such as division by 0 or extreme scaling values.
 	VectorFill(hash_min, -8000);

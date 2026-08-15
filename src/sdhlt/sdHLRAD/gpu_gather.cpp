@@ -2,6 +2,9 @@
 #include "gpu_gather.h"
 
 bool            g_gpu = false;
+bool            g_gpu_auto = false;
+bool            g_gpu_gather = false;
+bool            g_gpu_transfers = false;
 int             g_gpu_adapter = -1;
 int             g_gpu_phase = 0;
 
@@ -37,6 +40,7 @@ namespace
     const double GATHER_CEILING_SECONDS = 0.40;
     const size_t GATHER_CHUNK_MIN = 256;
     const size_t GATHER_CHUNK_START = 2048;
+    const size_t GPU_AUTO_GATHER_LIGHTS = 150;
 
     struct gpu_gather_data
     {
@@ -80,6 +84,20 @@ namespace
     // The row table is rebuilt for every chunk, so a remembered index is only
     // good for the chunk it came from.
     int g_row_generation = 0;
+
+    size_t CountDirectLights ()
+    {
+        size_t count = 0;
+        const int numleafs = 1 + g_dmodels[0].visleafs;
+        for (int leaf = 0; leaf < numleafs; leaf++)
+        {
+            for (directlight_t *light = RadGpuDirectLights (leaf); light; light = light->next)
+            {
+                count++;
+            }
+        }
+        return count;
+    }
 
     bool MarshalScene (rad::gpu::gather_scene &scene)
     {
@@ -340,6 +358,8 @@ void GpuGatherIntercept (const vec3_t pos, const byte* const pvs, const vec3_t n
                          vec3_t *sample, byte *styles, int step, int miptex,
                          int texlightgap_surfacenum)
 {
+    (void)sample;
+    (void)styles;
     gpu_gather_data &d = *g_data;
     // Group by the face whose BuildFacelights is running, not by the sample's
     // own surface: near an edge, texlightgap_surfacenum names a neighbouring
@@ -645,12 +665,17 @@ bool GpuBuildFacelights ()
     {
         return false;
     }
-    rad::gpu::set_adapter_override (g_gpu_adapter);
-    if (!rad::gpu::available ())
+    if (g_gpu_auto)
     {
-        Warning ("-gpu: %s; using the CPU path", rad::gpu::last_error ().c_str ());
-        return false;
+        const size_t light_count = CountDirectLights ();
+        if (light_count < GPU_AUTO_GATHER_LIGHTS)
+        {
+            Log ("BuildFacelights: GPU auto chose CPU (%d lights; crossover starts near %d)\n",
+                 (int)light_count, (int)GPU_AUTO_GATHER_LIGHTS);
+            return false;
+        }
     }
+    rad::gpu::set_adapter_override (g_gpu_adapter);
 
     g_data = new gpu_gather_data ();
     g_data->rowbytes = (size_t)((g_dmodels[0].visleafs + 7) / 8);
@@ -662,6 +687,13 @@ bool GpuBuildFacelights ()
     if (!MarshalScene (scene))
     {
         Warning ("-gpu: the map exceeds the kernel's light or style limits; using the CPU path");
+        GpuGatherFinish ();
+        return false;
+    }
+
+    if (!rad::gpu::available ())
+    {
+        Warning ("-gpu gather: %s; using the CPU path", rad::gpu::last_error ().c_str ());
         GpuGatherFinish ();
         return false;
     }

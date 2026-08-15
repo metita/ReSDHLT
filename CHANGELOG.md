@@ -4,10 +4,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - ReSDHLT
+## [0.9.0] - 2026-08-15
 Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Strike 1.6.
 
 ### Changed
+- Release security: rotated the Ed25519 signing key, updated the pinned public
+  key in the GUI and signer, and stored the matching private seed only in the
+  GitHub Actions secret.
+- Portability: removed obsolete C++ `register` specifiers so the RAD target
+  builds cleanly with Clang in C++17 mode.
+- RAD/Vulkan: added a generated style-0 bounce kernel with device-local
+  accumulation and a safe CPU fallback. It is enabled for one-bounce runs after
+  validating opaque/style-0 inputs; RGB transfers, transparency, custom shadows,
+  style remapping, GPU errors, and multi-bounce runs remain on the deterministic
+  CPU path. `scripts/gen_spirv.py --only bounce` regenerates only this shader.
+- Build hygiene: cleaned the first `/W4` warning tranche in the shared file,
+  logging, BSP and CSG paths (assignment-in-condition, signed/unsigned loop
+  bounds, shadowed locals and proven initialization cases). The opt-in
+  `SDHLT_WARNINGS_AS_ERRORS=ON` build now passes all targets while keeping
+  `/W4` visible in normal builds: a documented allowlist isolates the remaining
+  legacy RAD/VIS/RIPENT warning debt; warnings outside that allowlist still
+  fail the strict build.
+- RAD/Vulkan: immutable gather and form-factor scene buffers now use host-visible
+  staging plus device-local storage. Sparse form-factor dispatches have two
+  independent command-buffer/fence slots, so the next pair batch is submitted
+  while the previous result is collected and packed. Transfer counts remain
+  identical; the known bounce fixture still has its pre-existing one-byte
+  lighting delta (`191` versus `192`) outside the transfer pipeline.
+- Releases/updater: every runtime and symbol ZIP now gets a detached Ed25519
+  signature (`.sig`) in addition to SHA-256. The updater verifies the exact
+  portable ZIP against the pinned public key before unpacking; CI refuses to
+  publish if `RESDHLT_ED25519_PRIVATE_KEY_B64` is missing or mismatched.
+- Build hygiene: the release signer is a small audited Rust binary and the
+  signature key material is never stored in the repository; `--generate-key`
+  prints a new seed/public-key pair for rotating the documented CI secret.
+- Build/release: the portable build is now the default. The `portable` and
+  `avx2` CMake presets use isolated output trees, RelWithDebInfo, optional
+  compiler caching, separated symbols, package smoke tests, and SHA-256
+  manifests. The traditional `cmake -B build -S .` layout remains available
+  for map-editor integrations.
+- RAD: `-gpuauto` selects CPU or Vulkan independently for direct-light gather
+  and Sparse transfer-factor generation. `-gpu-gather`, `-gpu-transfers`,
+  `-nogpu-gather`, and `-nogpu-transfers` expose the phases explicitly. Vulkan
+  uploads the immutable form-factor scene once and reuses pair/result buffers
+  across bounded dispatches. A CPU/GPU run with six transfer dispatches
+  produced the same SHA-256 BSP as the CPU reference.
+- GUI: preview and execution now consume the same immutable `CompilePlan`;
+  preflight validates stage dependencies and missing tools, cancellation is
+  reported separately, destructive controls are locked during jobs, and a
+  workspace lock prevents concurrent compiles from corrupting intermediates.
+- GUI updater: checks and downloads remain asynchronous, but installation now
+  requires an explicit click, the exact portable Windows asset, a matching
+  SHA-256 manifest, and a rollback-capable swap. The GUI also refuses a second
+  instance so project state cannot be overwritten by two windows.
 - RAD: `-gpu` now also computes Sparse patch transfer factors on Vulkan. The
   old path tested the full patch-pair space on the CPU even though the Sparse
   visibility matrix already named the useful pairs. The GPU path walks those
@@ -16,15 +65,10 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
   translucent patches, custom bounce shadows, and GPU errors fall back to the
   original CPU `MakeScales`. A sealed-room parity test produced the same 95,742
   transfers and differed by one lighting byte (`191` vs `192`) out of 15,102.
-- `gui/`: the launch check now updates on its own. It ignores the daily
-  throttle, because opening the compiler and being told "there was something
-  new yesterday" helps nobody, and it installs what it finds without asking:
-  the window still opens naming the version and showing the progress, so it is
-  never a mystery, but nothing has to be clicked. A check that lands later,
-  with the app already open, only opens that window and waits - and an
-  automatic install never runs while a compile is in progress. The menu
-  checkbox that used to say "Buscar al abrir (una vez por día)" now says
-  "Actualizar sola al abrir" and is still the way to turn all of it off
+- `gui/`: the launch check runs asynchronously and reports available releases,
+  but installation always requires the explicit `Actualizar ahora` action.
+  The menu checkbox is `Buscar actualizaciones al abrir`; updates are blocked
+  while a compile is running.
 - `gui/`: when idle the app now asks for a repaint every 30s while update
   checks are enabled. egui sleeps until an input event, and the reply from the
   check thread is not one, so an app left open for days would sit there having
@@ -51,8 +95,9 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
   the PVS is conservative, so a negative answer cannot darken anything that was
   lit before. Switches itself off if no sky face is found, rather than risk a
   black map
-- `SDHLT_ARCH` (default `avx2`, applied to **RAD only**): 4-5% off RAD's CPU
-  time with byte-identical output. RAD only because building CSG/BSP/VIS with
+- `SDHLT_ARCH` (portable by default, with optional `avx2` applied to **RAD
+  only**): 4-5% off RAD's CPU time with byte-identical output. RAD only because
+  building CSG/BSP/VIS with
   `/arch:AVX2` changed their floating-point output and produced a `koth_sandy`
   .bsp whose vis data made RAD abort with "DecompressVis Overflow" -
   reproducible, and gone as soon as those three are built portably.
@@ -95,6 +140,15 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
   201-WAD compile
 
 ### Added
+- CLI/package smoke coverage now exercises all five shipped tools beside
+  `settings.txt`, including 71 missing-value cases across CSG, BSP, VIS, RAD,
+  and RIPENT. CI runs the same checks on every push and pull request, together
+  with GUI formatting, Clippy, tests, and release compilation.
+- GUI RAD controls now expose automatic GPU selection, gather and Sparse
+  transfer phases, GPU adapter selection, BSP `-lmoptimize`, and `-allleaks`.
+- Project persistence now lives under `%LOCALAPPDATA%/ReSDHLT`, migrates the
+  old executable-local files, flushes atomically, keeps a backup, and surfaces
+  corrupt JSON instead of silently resetting it.
 - RAD: `-raybench` captures a bounded sample of the real sky rays generated by
   the map and reports the BSP tracer's raw throughput. An optional
   `SDHLT_EMBREE` build compares those same rays against Embree without changing
@@ -184,6 +238,16 @@ Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Stri
   Removed
 
 ### Fixed
+- Packaging: `settings.txt` now matches the actual `sdHL*` selectors, never
+  injects RIPENT's unsupported `-low`, and no longer adds the nonexistent
+  `-wadautodetect` option. CSG value options and `-worldextent` reject missing
+  values cleanly instead of reading past `argv`; BSP `-threads` now updates the
+  global thread count instead of a shadowing local.
+- GUI: project renames preserve the active identity, MAP warnings refer to the
+  selected project, renamed maps update `map_path`, stale checks refresh, paths
+  are trimmed consistently, and status/cancel/update states are reported with
+  the correct outcome. The custom toggle has keyboard and accessibility
+  semantics, and the faint command text now meets the 4.5:1 AA contrast target.
 - CSG: the `BEVELHINT` tool texture never did anything. `ParseBrush()` tested
   for `BEVEL` first, comparing only the first five characters, so `BEVELHINT`
   matched it, had its texture name overwritten with `NULL`, and never reached

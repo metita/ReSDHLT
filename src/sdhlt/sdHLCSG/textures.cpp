@@ -331,7 +331,7 @@ bool            TEX_InitFromWad()
                 const std::string& texName = std::get<0>(texture);
                 char* szWadFileName = std::get<1>(texture);
                 int texLumps = std::get<2>(texture);
-                Log("[%s] %s (%d)\n", szWadFileName, texName, texLumps);
+                Log("[%s] %s (%d)\n", szWadFileName, texName.c_str(), texLumps);
             }
             Log("---------------------------------\n\n");
 		}
@@ -344,13 +344,10 @@ bool            TEX_InitFromWad()
 
             for (const auto& texture : texturesOversized)
             {
-                for (const auto& texture : texturesOversized)
-                {
                     const std::string& texName = std::get<0>(texture);
                     char* szWadFileName = std::get<1>(texture);
                     int texBytes = std::get<2>(texture);
-                    Log("[%s] %s (%d bytes)\n", szWadFileName, texName, texBytes);
-                }
+                Log("[%s] %s (%d bytes)\n", szWadFileName, texName.c_str(), texBytes);
             }
             Log("----------------------------------------------------\n");
         }
@@ -469,12 +466,12 @@ int             LoadLump(const lumpinfo_t* const source, byte* dest, int* texsiz
             // Just read the miptex header and zero out the data offsets.
             // We will load the entire texture from the WAD at engine runtime
             int             i;
-            miptex_t*       miptex = (miptex_t*)dest;
+            miptex_t*       wad_miptex = (miptex_t*)dest;
 			hlassume ((int)sizeof (miptex_t) <= dest_maxsize, assume_MAX_MAP_MIPTEX);
             SafeRead(texfiles[source->iTexFile], dest, sizeof(miptex_t));
 
             for (i = 0; i < MIPLEVELS; i++)
-                miptex->offsets[i] = 0;
+                wad_miptex->offsets[i] = 0;
 			writewad_data = (byte *)malloc (source->disksize);
 			hlassume (writewad_data != NULL, assume_NoMemory);
 			if (fseek (texfiles[source->iTexFile], source->filepos, SEEK_SET))
@@ -773,14 +770,14 @@ void            WriteMiptex()
 // =====================================================================================
 //  LogWadUsage //seedee
 // =====================================================================================
-void LogWadUsage(wadpath_t *currentwad, int nummiptex)
+void LogWadUsage(wadpath_t *currentwad, int wad_nummiptex)
 {
     if (currentwad == nullptr) {
         return;
     }
     char currentwadName[_MAX_PATH];
     ExtractFile(currentwad->path, currentwadName);
-    double percentUsed = (double)currentwad->usedtextures / (double)nummiptex * 100;
+    double percentUsed = (double)currentwad->usedtextures / (double)wad_nummiptex * 100;
 
     Log("[%s] %i/%i texture%s (%2.2f%%)\n - %s\n", currentwadName, currentwad->usedtextures, currentwad->totaltextures, currentwad->usedtextures == 1 ? "" : "s", percentUsed, currentwad->path);
 }

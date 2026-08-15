@@ -1,0 +1,64 @@
+{
+  "version": 2,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "portable",
+      "displayName": "Portable x64 (Ninja, RelWithDebInfo)",
+      "description": "Portable release build. RAD does not require AVX2.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/portable",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "BUILD_TESTING": "ON",
+        "SDHLT_ARCH": "",
+        "SDHLT_COMPILER_CACHE": "ON",
+        "SDHLT_OUTPUT_IN_BUILD_TREE": "ON"
+      }
+    },
+    {
+      "name": "avx2",
+      "displayName": "AVX2 x64 (Ninja, RelWithDebInfo)",
+      "description": "Optimized RAD build for CPUs with AVX2 support.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/avx2",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "BUILD_TESTING": "ON",
+        "SDHLT_ARCH": "avx2",
+        "SDHLT_COMPILER_CACHE": "ON",
+        "SDHLT_OUTPUT_IN_BUILD_TREE": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "portable",
+      "configurePreset": "portable"
+    },
+    {
+      "name": "avx2",
+      "configurePreset": "avx2"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "portable",
+      "configurePreset": "portable",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "avx2",
+      "configurePreset": "avx2",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

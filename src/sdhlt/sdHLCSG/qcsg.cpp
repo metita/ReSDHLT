@@ -355,7 +355,7 @@ void WriteDetailBrush (int hull, const bface_t *faces)
 	{
 		Winding *w = f->w;
 		fprintf (out_detailbrush[hull], "%i %u\n", f->planenum, w->m_NumPoints);
-		for (int i = 0; i < w->m_NumPoints; i++)
+		for (int i = 0; i < (int)w->m_NumPoints; i++)
 		{
 			fprintf (out_detailbrush[hull], "%5.8f %5.8f %5.8f\n", w->m_Points[i][0], w->m_Points[i][1], w->m_Points[i][2]);
 		}
@@ -463,16 +463,16 @@ static void     SaveOutside(const brush_t* const b, const int hull, bface_t* out
 		// check the texture alignment of this face
 		if (!hull)
 		{
-			int texinfo = f->texinfo;
-			const char *texname = GetTextureByNumber_CSG (texinfo);
-			texinfo_t *tex = &g_texinfo[texinfo];
+			int face_texinfo = f->texinfo;
+			const char *face_texname = GetTextureByNumber_CSG (face_texinfo);
+			texinfo_t *tex = &g_texinfo[face_texinfo];
 
-            if (texinfo != -1 // nullified textures (NULL, BEVEL, aaatrigger, etc.)
+            if (face_texinfo != -1 // nullified textures (NULL, BEVEL, aaatrigger, etc.)
                 && !(tex->flags & TEX_SPECIAL) // sky
-                && strncasecmp(texname, "SKIP", 4)
-                && strncasecmp(texname, "HINT", 4) // HINT and SKIP will be nullified only after hlbsp
-                && strncasecmp(texname, "SOLIDHINT", 9)
-                && strncasecmp(texname, "BEVELHINT", 9)
+                && strncasecmp(face_texname, "SKIP", 4)
+                && strncasecmp(face_texname, "HINT", 4) // HINT and SKIP will be nullified only after hlbsp
+                && strncasecmp(face_texname, "SOLIDHINT", 9)
+                && strncasecmp(face_texname, "BEVELHINT", 9)
                 )
 			{
 				// check for "Malformed face (%d) normal"
@@ -483,22 +483,22 @@ static void     SaveOutside(const brush_t* const b, const int hull, bface_t* out
 				{
 					Warning ("Entity %i, Brush %i: Malformed texture alignment (texture %s): Texture axis perpendicular to face.",
 						b->originalentitynum, b->originalbrushnum,
-						texname
+						face_texname
 						);
 				}
 
 				// check for "Bad surface extents"
 				bool bad;
-				int i;
+				int point_index;
 				int j;
 				vec_t val;
 				
 				bad = false;
-				for (i = 0; i < f->w->m_NumPoints; i++)
+				for (point_index = 0; point_index < (int)f->w->m_NumPoints; point_index++)
 				{
 					for (j = 0; j < 2; j++)
 					{
-						val = DotProduct (f->w->m_Points[i], tex->vecs[j]) + tex->vecs[j][3];
+						val = DotProduct (f->w->m_Points[point_index], tex->vecs[j]) + tex->vecs[j][3];
 						if (val < -99999 || val > 999999)
 						{
 							bad = true;
@@ -509,7 +509,7 @@ static void     SaveOutside(const brush_t* const b, const int hull, bface_t* out
 				{
 					Warning ("Entity %i, Brush %i: Malformed texture alignment (texture %s): Bad surface extents.",
 						b->originalentitynum, b->originalbrushnum,
-						texname
+						face_texname
 						);
 				}
 			}
@@ -528,7 +528,7 @@ static void     SaveOutside(const brush_t* const b, const int hull, bface_t* out
 			f->texinfo = backnull? -1: texinfo;
 
             // swap point orders
-            for (i = 0; i < f->w->m_NumPoints / 2; i++)      // add points backwards
+			for (i = 0; i < (int)f->w->m_NumPoints / 2; i++)      // add points backwards
             {
                 VectorCopy(f->w->m_Points[i], temp);
                 VectorCopy(f->w->m_Points[f->w->m_NumPoints - 1 - i], f->w->m_Points[i]);
@@ -843,7 +843,7 @@ static void     CSGBrush(int brushnum)
 						}
 						int valid = 0;
 						int x;
-						for (x = 0; x < w->m_NumPoints; x++)
+					for (x = 0; x < (int)w->m_NumPoints; x++)
 						{
 							vec_t dist = DotProduct (w->m_Points[x], f2->plane->normal) - f2->plane->dist;
 							if (dist >= -ON_EPSILON*4) // only estimate
@@ -1406,9 +1406,9 @@ static void     CheckForNoClip()
 
 static void     ProcessModels()
 {
-    int             i, j, type;
+    int             i, j;
     int             placed;
-    int             first, contents;
+    int             first, contents = 0;
     brush_t         temp;
 
     for (i = 0; i < g_numentities; i++)
@@ -1424,7 +1424,7 @@ static void     ProcessModels()
 		{
 			temps[j] = g_mapbrushes[first + j];
 		}
-		int placedcontents;
+		int placedcontents = 0;
 		bool b_placedcontents = false;
 		for (placed = 0; placed < g_entities[i].numbrushes; )
 		{
@@ -1755,6 +1755,21 @@ static void     Settings()
     Log("\n");
 }
 
+// settings.txt can append defaults to the original command line.  A plain
+// `i + 1 < argc` check therefore does not prove that an option actually has a
+// value: the next token can be another option injected by that file.  Keep
+// every value-taking CSG option on the same checked path.
+static const char* RequireOptionValue(const char* option, int& i, const int argc, char** argv)
+{
+    if (i + 1 >= argc || argv[i + 1][0] == '-')
+    {
+        Log("Error: option '%s' requires a value\n", option);
+        Usage();
+    }
+
+    return argv[++i];
+}
+
 // AJM: added in
 // =====================================================================================
 //  CSGCleanup
@@ -1769,7 +1784,7 @@ void            CSGCleanup()
 //  Main
 //      Oh, come on.
 // =====================================================================================
-int             main(const int argc, char** argv)
+int             main(const int argc_input, char** argv_input)
 {
     int             i;                          
     char            name[_MAX_PATH];            // mapanme 
@@ -1786,8 +1801,8 @@ int             main(const int argc, char** argv)
     _setmaxstdio(2048);
 #endif
 
-	int argcold = argc;
-	char ** argvold = argv;
+	int argcold = argc_input;
+	char ** argvold = argv_input;
 	{
 		int argc;
 		char ** argv;
@@ -1810,24 +1825,17 @@ int             main(const int argc, char** argv)
     {
         if (!strcasecmp(argv[i], "-threads"))
         {
-            if (i + 1 < argc)	//added "1" .--vluzacn
+            g_numthreads = atoi(RequireOptionValue("-threads", i, argc, argv));
+            if (g_numthreads < 1)
             {
-                g_numthreads = atoi(argv[++i]);
-                if (g_numthreads < 1)
-                {
-                    Log("Expected value of at least 1 for '-threads'\n");
-                    Usage();
-                }
-            }
-            else
-            {
+                Log("Expected value of at least 1 for '-threads'\n");
                 Usage();
             }
         }
 
         else if (!strcasecmp(argv[i], "-worldextent"))
         {
-            g_iWorldExtent = atoi(argv[++i]);
+            g_iWorldExtent = atoi(RequireOptionValue("-worldextent", i, argc, argv));
         }
 
 		else if (!strcasecmp(argv[i], "-console"))
@@ -1835,10 +1843,7 @@ int             main(const int argc, char** argv)
 #ifndef SYSTEM_WIN32
 			Warning("The option '-console #' is only valid for Windows.");
 #endif
-			if (i + 1 < argc)
-				++i;
-			else
-				Usage();
+			RequireOptionValue("-console", i, argc, argv);
 		}
 #ifdef SYSTEM_WIN32
         else if (!strcasecmp(argv[i], "-estimate"))
@@ -1856,14 +1861,7 @@ int             main(const int argc, char** argv)
 
         else if (!strcasecmp(argv[i], "-dev"))
         {
-            if (i + 1 < argc)	//added "1" .--vluzacn
-            {
-                g_developer = (developer_level_t)atoi(argv[++i]);
-            }
-            else
-            {
-                Usage();
-            }
+            g_developer = (developer_level_t)atoi(RequireOptionValue("-dev", i, argc, argv));
         }
         else if (!strcasecmp(argv[i], "-verbose"))
         {
@@ -1926,38 +1924,22 @@ int             main(const int argc, char** argv)
 
 		else if (!strcasecmp(argv[i], "-cliptype"))
 		{
-			if (i + 1 < argc)	//added "1" .--vluzacn
-			{
-				++i;
-				if(!strcasecmp(argv[i],"smallest"))
+			const char* value = RequireOptionValue("-cliptype", i, argc, argv);
+				if(!strcasecmp(value,"smallest"))
 				{ g_cliptype = clip_smallest; }
-				else if(!strcasecmp(argv[i],"normalized"))
+				else if(!strcasecmp(value,"normalized"))
 				{ g_cliptype = clip_normalized; }
-				else if(!strcasecmp(argv[i],"simple"))
+				else if(!strcasecmp(value,"simple"))
 				{ g_cliptype = clip_simple; }
-				else if(!strcasecmp(argv[i],"precise"))
+				else if(!strcasecmp(value,"precise"))
 				{ g_cliptype = clip_precise; }
-				else if(!strcasecmp(argv[i],"legacy"))
+				else if(!strcasecmp(value,"legacy"))
 				{ g_cliptype = clip_legacy; }
-			}
-            else
-            {
-                Log("Error: -cliptype: incorrect usage of parameter\n");
-                Usage();
-            }
 		}
 
 		else if (!strcasecmp(argv[i], "-nullfile"))
 		{
-            if (i + 1 < argc)	//added "1" .--vluzacn
-            {
-                g_nullfile = argv[++i];
-            }
-            else
-            {
-            	Log("Error: -nullfile: expected path to null ent file following parameter\n");
-                Usage();
-            }
+			g_nullfile = RequireOptionValue("-nullfile", i, argc, argv);
 		}
         else if (!strcasecmp(argv[i], "-nowadautodetect"))
         { 
@@ -1969,129 +1951,59 @@ int             main(const int argc, char** argv)
         }
         else if (!strcasecmp(argv[i], "-wadinclude"))
         {
-            if (i + 1 < argc)	//added "1" .--vluzacn
-            {
-                g_WadInclude.push_back(argv[++i]);
-            }
-            else
-            {
-                Usage();
-            }
+            g_WadInclude.push_back(RequireOptionValue("-wadinclude", i, argc, argv));
         }
         else if (!strcasecmp(argv[i], "-texdata"))
         {
-            if (i + 1 < argc)	//added "1" .--vluzacn
-            {
-                int             x = atoi(argv[++i]) * 1024;
+            int             x = atoi(RequireOptionValue("-texdata", i, argc, argv)) * 1024;
 
-                //if (x > g_max_map_miptex) //--vluzacn
-                {
-                    g_max_map_miptex = x;
-                }
-            }
-            else
+            //if (x > g_max_map_miptex) //--vluzacn
             {
-                Usage();
+                g_max_map_miptex = x;
             }
         }
         else if (!strcasecmp(argv[i], "-lightdata"))
         {
-            if (i + 1 < argc)	//added "1" .--vluzacn
-            {
-                int             x = atoi(argv[++i]) * 1024;
+            int             x = atoi(RequireOptionValue("-lightdata", i, argc, argv)) * 1024;
 
-                //if (x > g_max_map_lightdata) //--vluzacn
-                {
-                    g_max_map_lightdata = x;
-                }
-            }
-            else
+            //if (x > g_max_map_lightdata) //--vluzacn
             {
-                Usage();
+                g_max_map_lightdata = x;
             }
         }
         else if (!strcasecmp(argv[i], "-brushunion"))
         {
-            if (i + 1 < argc)	//added "1" .--vluzacn
-            {
-                g_BrushUnionThreshold = (float)atof(argv[++i]);
-            }
-            else
-            {
-                Usage();
-            }
+            g_BrushUnionThreshold = (float)atof(RequireOptionValue("-brushunion", i, argc, argv));
         }
         else if (!strcasecmp(argv[i], "-tiny"))
         {
-            if (i + 1 < argc)	//added "1" .--vluzacn
-            {
-                g_tiny_threshold = (float)atof(argv[++i]);
-            }
-            else
-            {
-                Usage();
-            }
+            g_tiny_threshold = (float)atof(RequireOptionValue("-tiny", i, argc, argv));
         }
         else if (!strcasecmp(argv[i], "-hullfile"))
         {
-            if (i + 1 < argc)	//added "1" .--vluzacn
-            {
-                g_hullfile = argv[++i];
-            }
-            else
-            {
-                Usage();
-            }
+            g_hullfile = RequireOptionValue("-hullfile", i, argc, argv);
         }
 		else if (!strcasecmp (argv[i], "-wadcfgfile"))
 		{
-			if (i + 1 < argc)
-			{
-				g_wadcfgfile = argv[++i];
-			}
-			else
-			{
-				Usage ();
-			}
+			g_wadcfgfile = RequireOptionValue("-wadcfgfile", i, argc, argv);
 		}
 		else if (!strcasecmp (argv[i], "-wadconfig"))
 		{
-			if (i + 1 < argc)
-			{
-				g_wadconfigname = argv[++i];
-			}
-			else
-			{
-				Usage ();
-			}
+			g_wadconfigname = RequireOptionValue("-wadconfig", i, argc, argv);
 		}
         else if (!strcasecmp(argv[i], "-scale"))
         {
-            if (i + 1 < argc)
-            {
-                g_scalesize = atof(argv[++i]);
-            }
-            else
-            {
-                Usage();
-            }
+            g_scalesize = atof(RequireOptionValue("-scale", i, argc, argv));
         }
 		else if (!strcasecmp (argv[i], "-lang"))
 		{
-			if (i + 1 < argc)
-			{
-				char tmp[_MAX_PATH];
+			char tmp[_MAX_PATH];
 #ifdef SYSTEM_WIN32
-				GetModuleFileName (NULL, tmp, _MAX_PATH);
+			GetModuleFileName (NULL, tmp, _MAX_PATH);
 #else
-				safe_strncpy (tmp, argv[0], _MAX_PATH);
+			safe_strncpy (tmp, argv[0], _MAX_PATH);
 #endif
-				LoadLangFile (argv[++i], tmp);
-			}
-			else
-			{
-				Usage();
-			}
+			LoadLangFile (RequireOptionValue("-lang", i, argc, argv), tmp);
 		}
 		else if (!strcasecmp (argv[i], "-noresetlog"))
 		{
@@ -2125,15 +2037,8 @@ int             main(const int argc, char** argv)
 		}
 		else if (!strcasecmp (argv[i], "-mergesize"))
 		{
-			if (i + 1 < argc)
-			{
-				g_merge_maxsize = atof(argv[++i]);
-				g_merge_entities = true;
-			}
-			else
-			{
-				Usage();
-			}
+			g_merge_maxsize = atof(RequireOptionValue("-mergesize", i, argc, argv));
+			g_merge_entities = true;
 		}
 		else if (!strcasecmp (argv[i], "-mergeblend"))
 		{
@@ -2181,17 +2086,17 @@ int             main(const int argc, char** argv)
     atexit(CloseLog);                       
     LogStart(argcold, argvold);
 	{
-		int			 i;
+		int			 arg_index;
 		Log("Arguments: ");
-		for (i = 1; i < argc; i++)
+		for (arg_index = 1; arg_index < argc; arg_index++)
 		{
-			if (strchr(argv[i], ' '))
+			if (strchr(argv[arg_index], ' '))
 			{
-				Log("\"%s\" ", argv[i]);
+				Log("\"%s\" ", argv[arg_index]);
 			}
 			else
 			{
-				Log("%s ", argv[i]);
+				Log("%s ", argv[arg_index]);
 			}
 		}
 		Log("\n");
@@ -2380,10 +2285,10 @@ int             main(const int argc, char** argv)
     // if onlyents, just grab the entites and resave
     if (g_onlyents)
     {
-        char            out[_MAX_PATH];
+        char            onlyents_name[_MAX_PATH];
 
-        safe_snprintf(out, _MAX_PATH, "%s.bsp", g_Mapname);
-        LoadBSPFile(out);
+        safe_snprintf(onlyents_name, _MAX_PATH, "%s.bsp", g_Mapname);
+        LoadBSPFile(onlyents_name);
 
         // Write it all back out again.
         WriteBSP(g_Mapname);
@@ -2419,33 +2324,33 @@ int             main(const int argc, char** argv)
     // open hull files
     for (i = 0; i < NUM_HULLS; i++)
     {
-        char            name[_MAX_PATH];
+        char            hull_name[_MAX_PATH];
 
-        safe_snprintf(name, _MAX_PATH, "%s.p%i", g_Mapname, i);
+        safe_snprintf(hull_name, _MAX_PATH, "%s.p%i", g_Mapname, i);
 
-        out[i] = fopen(name, "w");
+        out[i] = fopen(hull_name, "w");
 
         if (!out[i]) 
-            Error("Couldn't open %s", name);
-		safe_snprintf(name, _MAX_PATH, "%s.b%i", g_Mapname, i);
-		out_detailbrush[i] = fopen(name, "w");
+			Error("Couldn't open %s", hull_name);
+		safe_snprintf(hull_name, _MAX_PATH, "%s.b%i", g_Mapname, i);
+		out_detailbrush[i] = fopen(hull_name, "w");
 		if (!out_detailbrush[i])
-			Error("Couldn't open %s", name);
+			Error("Couldn't open %s", hull_name);
 		if (g_viewsurface)
 		{
-			safe_snprintf (name, _MAX_PATH, "%s_surface%i.pts", g_Mapname, i);
-			out_view[i] = fopen (name, "w");
+			safe_snprintf (hull_name, _MAX_PATH, "%s_surface%i.pts", g_Mapname, i);
+			out_view[i] = fopen (hull_name, "w");
 			if (!out[i])
-				Error ("Counldn't open %s", name);
+				Error ("Counldn't open %s", hull_name);
 		}
     }
 	{
 		FILE			*f;
-		char			name[_MAX_PATH];
-		safe_snprintf (name, _MAX_PATH, "%s.hsz", g_Mapname);
-		f = fopen (name, "w");
+		char			hull_size_name[_MAX_PATH];
+		safe_snprintf (hull_size_name, _MAX_PATH, "%s.hsz", g_Mapname);
+		f = fopen (hull_size_name, "w");
 		if (!f)
-			Error("Couldn't open %s", name);
+			Error("Couldn't open %s", hull_size_name);
 		float x1,y1,z1;
 		float x2,y2,z2;
 		for (i = 0; i < NUM_HULLS; i++)

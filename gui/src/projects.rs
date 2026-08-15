@@ -1,9 +1,11 @@
 //! Saved projects: a name, the map, the folders and every compile option.
 //!
-//! Kept in `resdhlt-projects.json` next to the executable, separate from
+//! Kept in `%LOCALAPPDATA%/ReSDHLT/resdhlt-projects.json`, separate from
 //! `resdhlt-gui.json`: the working options file keeps its old shape, so an
-//! install from before projects existed still loads exactly as it did.
+//! install from before projects existed still loads exactly as it did. Older
+//! files next to the executable are migrated on first launch.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -89,16 +91,18 @@ impl Default for Library {
 }
 
 impl Library {
-    pub fn load(path: &Path) -> Self {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
+    pub fn load_checked(path: &Path) -> Result<Self, String> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str(&text)
+                .map_err(|error| format!("{} está corrupto: {error}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(format!("no pude leer {}: {error}", path.display())),
+        }
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(path, text).map_err(|e| e.to_string())
+        atomic_write(path, &text)
     }
 
     pub fn index_of(&self, name: &str) -> Option<usize> {
@@ -110,9 +114,10 @@ impl Library {
     /// Whether this name is free, ignoring the project at `skip` (so renaming
     /// something to its own name is allowed).
     pub fn name_taken(&self, name: &str, skip: Option<usize>) -> bool {
-        self.projects.iter().enumerate().any(|(i, p)| {
-            Some(i) != skip && p.name.eq_ignore_ascii_case(name.trim())
-        })
+        self.projects
+            .iter()
+            .enumerate()
+            .any(|(i, p)| Some(i) != skip && p.name.eq_ignore_ascii_case(name.trim()))
     }
 
     /// "zm_hola", "zm_hola (2)", "zm_hola (3)"...
@@ -132,8 +137,59 @@ impl Library {
 
     pub fn sort_by_name(&mut self) {
         self.projects
-            .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            .sort_by_key(|project| project.name.to_lowercase());
     }
+}
+
+/// Durable replacement for preferences and project files. A complete new file
+/// is flushed beside the destination before the old one is moved to `.bak`;
+/// failures restore the previous version instead of leaving truncated JSON.
+pub fn atomic_write(path: &Path, text: &str) -> Result<(), String> {
+    let parent = path.parent().ok_or("ruta de guardado sin carpeta")?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("state");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let temp = parent.join(format!(".{name}.{}.{nonce}.tmp", std::process::id()));
+    let backup = path.with_extension(format!(
+        "{}bak",
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| format!("{extension}."))
+            .unwrap_or_default()
+    ));
+
+    let write_result = (|| -> Result<(), String> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|e| e.to_string())?;
+        file.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+
+        if path.exists() {
+            let _ = std::fs::remove_file(&backup);
+            std::fs::rename(path, &backup).map_err(|e| e.to_string())?;
+        }
+        if let Err(error) = std::fs::rename(&temp, path) {
+            if backup.exists() {
+                let _ = std::fs::rename(&backup, path);
+            }
+            return Err(error.to_string());
+        }
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    write_result
 }
 
 /// Names go in a file, so they must survive being a JSON string and being read
@@ -320,7 +376,8 @@ mod tests {
     #[test]
     fn names_stay_unique_and_printable() {
         let mut lib = Library::default();
-        lib.projects.push(Project::new("zm_hola", Options::default()));
+        lib.projects
+            .push(Project::new("zm_hola", Options::default()));
         assert_eq!(lib.unique_name("zm_hola"), "zm_hola (2)");
         lib.projects
             .push(Project::new("zm_hola (2)", Options::default()));
@@ -341,5 +398,34 @@ mod tests {
         assert_eq!(FileKind::of("zm_hola.bsp"), FileKind::Bsp);
         assert_eq!(FileKind::of("zm_hola.p2"), FileKind::Intermediate);
         assert_eq!(FileKind::of("ZM_HOLA.LOG"), FileKind::Log);
+    }
+
+    #[test]
+    fn atomic_save_keeps_a_backup_of_the_previous_json() {
+        let root = std::env::temp_dir().join(format!("resdhlt-atomic-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("projects.json");
+        atomic_write(&path, "first").unwrap();
+        atomic_write(&path, "second").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+        assert_eq!(
+            std::fs::read_to_string(root.join("projects.json.bak")).unwrap(),
+            "first"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn corrupt_library_is_reported_instead_of_silently_reset() {
+        let root =
+            std::env::temp_dir().join(format!("resdhlt-corrupt-library-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("projects.json");
+        std::fs::write(&path, "{not json").unwrap();
+        assert!(Library::load_checked(&path)
+            .unwrap_err()
+            .contains("corrupto"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

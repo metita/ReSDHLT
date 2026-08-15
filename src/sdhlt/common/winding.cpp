@@ -423,10 +423,10 @@ void			Winding::RemoveColinearPoints(
 											  vec_t epsilon
 											  )
 {
-	unsigned int	i;
+	int			i;
 	vec3_t			v1, v2;
 	vec_t			*p1, *p2, *p3;
-	for (i = 0; i < m_NumPoints; i++)
+	for (i = 0; i < (int)m_NumPoints; i++)
 	{
 		p1 = m_Points[(i+m_NumPoints-1)%m_NumPoints];
 		p2 = m_Points[i];

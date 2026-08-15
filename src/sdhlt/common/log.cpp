@@ -193,6 +193,7 @@ void            LogError(const char* const message)
 
 void CDECL      OpenLog(const int clientid)
 {
+    (void)clientid;
     if (g_log)
     {
         char            logfilename[_MAX_PATH];
@@ -387,11 +388,11 @@ void CDECL FORMAT_PRINTF(2,3)      Fatal(assume_msgs msgid, const char* const wa
     LogError(message2);
 
     {
-        char            message[MAX_MESSAGE];
+        char            assumption_message[MAX_MESSAGE];
         const MessageTable_t* msg = GetAssume(msgid);
 
-        safe_snprintf(message, MAX_MESSAGE, "%s\n%s%s\n%s%s\n", Localize (msg->title), Localize ("Description: "), Localize (msg->text), Localize ("Howto Fix: "), Localize (msg->howto));
-        PrintOnce(message);
+        safe_snprintf(assumption_message, MAX_MESSAGE, "%s\n%s%s\n%s%s\n", Localize (msg->title), Localize ("Description: "), Localize (msg->text), Localize ("Howto Fix: "), Localize (msg->howto));
+        PrintOnce(assumption_message);
     }
 
     fatal = 1;

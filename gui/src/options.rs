@@ -145,6 +145,10 @@ pub struct Options {
     pub subdivide: u32,
     pub maxnodesize: u32,
     pub leakonly: bool,
+    /// Reorder faces to reduce wasted lightmap-atlas space.
+    pub lmoptimize: bool,
+    /// When the map leaks, keep surveying instead of stopping at the first hole.
+    pub allleaks: bool,
     pub notjunc: bool,
     pub noclip: bool,
     pub bsp_extra: String,
@@ -166,6 +170,16 @@ pub struct Options {
     pub texchop: f32,
     pub smooth: f32,
     pub vismatrix: VisMatrix,
+    /// Use the Vulkan RAD backend. Unsupported work falls back to the CPU.
+    pub gpu: bool,
+    /// Let RAD select CPU/GPU independently for each phase by workload size.
+    pub gpu_auto: bool,
+    /// Allow direct-light gathering on Vulkan.
+    pub gpu_gather: bool,
+    /// Allow Sparse transfer-factor generation on Vulkan.
+    pub gpu_transfers: bool,
+    /// Vulkan physical-device index. -1 lets RAD choose automatically.
+    pub gpu_adapter: i32,
     pub pre25: bool,
     pub nostudioshadow: bool,
     pub profile: bool,
@@ -210,6 +224,8 @@ impl Default for Options {
             subdivide: 240,
             maxnodesize: 1024,
             leakonly: false,
+            lmoptimize: false,
+            allleaks: false,
             notjunc: false,
             noclip: false,
             bsp_extra: String::new(),
@@ -229,9 +245,14 @@ impl Default for Options {
             texchop: 32.0,
             smooth: 50.0,
             vismatrix: VisMatrix::Sparse,
-            // On by default: almost nobody runs the 25th anniversary build, and
-            // compiling for it breaks bright areas on older clients. The reverse
-            // is merely a little dimmer. See the tooltip.
+            gpu: false,
+            gpu_auto: true,
+            gpu_gather: true,
+            gpu_transfers: true,
+            gpu_adapter: -1,
+            // Keep the historical compatibility default. The UI deliberately
+            // avoids claiming universal client behaviour: releases should be
+            // checked in the exact client/server combination they target.
             pre25: true,
             nostudioshadow: false,
             profile: false,
@@ -352,6 +373,7 @@ pub fn sanitize_folder(name: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default, clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -369,10 +391,7 @@ mod tests {
 
         // No project name: the map names the folder.
         o.project_name.clear();
-        assert!(o
-            .output_base()
-            .unwrap()
-            .ends_with(r"Mapas\ba_dust_island"));
+        assert!(o.output_base().unwrap().ends_with(r"Mapas\ba_dust_island"));
 
         // Turned off, everything lands in the output folder as before.
         o.organize_output = false;
@@ -396,7 +415,10 @@ mod tests {
         // beside the source map. Only the scratch gets moved out of the way.
         let base = o.output_base().unwrap();
         assert_eq!(base, PathBuf::from(r"E:\Mapping"));
-        assert_eq!(o.work_dir().unwrap(), PathBuf::from(r"E:\Mapping\intermedios"));
+        assert_eq!(
+            o.work_dir().unwrap(),
+            PathBuf::from(r"E:\Mapping\intermedios")
+        );
 
         // A map path with no folder gives nothing to hang the layout on.
         o.map_path = "ba_dust_island.map".to_string();
@@ -452,6 +474,57 @@ mod tests {
         assert_eq!(sanitize_folder("  raro.  "), "raro");
         assert_eq!(sanitize_folder("   "), "mapa");
     }
+
+    #[test]
+    fn extra_arguments_preserve_quoted_paths() {
+        let args = parse_extra_args(r#"-lights "C:\My Maps\custom.rad" -scale 2"#).unwrap();
+        assert_eq!(args, ["-lights", r"C:\My Maps\custom.rad", "-scale", "2"]);
+        assert!(parse_extra_args(r#"-lights "C:\broken.rad"#).is_err());
+    }
+
+    #[test]
+    fn gpu_and_new_bsp_controls_reach_the_command_line() {
+        let mut options = Options::default();
+        options.lmoptimize = true;
+        options.allleaks = true;
+        assert!(options.bsp_args().contains(&"-lmoptimize".to_string()));
+        assert!(options.bsp_args().contains(&"-allleaks".to_string()));
+
+        options.gpu = true;
+        options.gpu_auto = false;
+        options.gpu_gather = false;
+        options.gpu_adapter = 2;
+        let args = options.rad_args();
+        let gpu = args.iter().position(|arg| arg == "-gpu").unwrap();
+        let adapter = args.iter().position(|arg| arg == "-gpuadapter").unwrap();
+        assert!(adapter > gpu);
+        assert_eq!(args[adapter + 1], "2");
+        assert!(args.contains(&"-nogpu-gather".to_string()));
+        assert!(!args.contains(&"-nogpu-transfers".to_string()));
+    }
+
+    #[test]
+    fn gpu_auto_is_the_safe_gui_default() {
+        let mut options = Options::default();
+        options.gpu = true;
+        let args = options.rad_args();
+        assert!(args.contains(&"-gpuauto".to_string()));
+        assert!(!args.contains(&"-gpu".to_string()));
+    }
+
+    #[test]
+    fn paths_are_trimmed_before_a_plan_is_saved() {
+        let mut options = Options::default();
+        options.map_path = "  C:\\maps\\test.map  ".to_string();
+        options.tools_dir = "  C:\\tools  ".to_string();
+        options.output_dir = " C:\\out ".to_string();
+        options.wad_dir = " C:\\wads ".to_string();
+        options.normalize_paths();
+        assert_eq!(options.map_path, r"C:\maps\test.map");
+        assert_eq!(options.tools_dir, r"C:\tools");
+        assert_eq!(options.output_dir, r"C:\out");
+        assert_eq!(options.wad_dir, r"C:\wads");
+    }
 }
 
 /// One row of advice shown in the "always do this" panel.
@@ -471,12 +544,12 @@ pub fn always_rules() -> Vec<Rule> {
                    número a mano salvo que quieras dejar CPU libre para otra cosa.",
         },
         Rule {
-            title: "Deja -pre25 activado",
-            body: "Salvo que sepas que todos tus jugadores usan el cliente del 25 \
-                   aniversario, que en la práctica casi nadie usa. Compilar sin -pre25 \
-                   y jugar en un cliente antiguo produce zonas brillantes rotas; al \
-                   revés solo se ve un poco menos brillante. El error es asimétrico, \
-                   así que -pre25 es la opción segura.",
+            title: "Define el cliente objetivo para -pre25",
+            body: "El flag cambia el limiter de luz para compatibilidad con motores \
+                   anteriores al aniversario 25. Sigue activado como default histórico, \
+                   pero no asumas que una configuración sirve para todos los forks: prueba \
+                   las zonas más brillantes con el cliente y servidor reales donde vas a \
+                   publicar.",
         },
         Rule {
             title: "VIS en 'full' para lo que publicas",
@@ -520,9 +593,60 @@ fn push_num(args: &mut Vec<String>, flag: &str, value: impl std::fmt::Display) {
     args.push(value.to_string());
 }
 
+/// Splits the free-form argument field without losing quoted paths.
+///
+/// This intentionally implements the useful, unsurprising subset shared by
+/// Windows and Unix command lines: whitespace separates arguments, single and
+/// double quotes group text, and a backslash escapes the next quote or
+/// backslash. `Command::args` receives the resulting strings directly, so no
+/// shell is involved after this point.
+pub fn parse_extra_args(extra: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = extra.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' | '"' => {
+                if quote == Some(ch) {
+                    quote = None;
+                } else if quote.is_none() {
+                    quote = Some(ch);
+                } else {
+                    current.push(ch);
+                }
+            }
+            '\\' if matches!(chars.peek(), Some('\\' | '\'' | '"')) => {
+                current.push(chars.next().expect("peeked character exists"));
+            }
+            c if c.is_whitespace() && quote.is_none() => {
+                if !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if let Some(q) = quote {
+        return Err(format!("falta cerrar la comilla {q}"));
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    Ok(out)
+}
+
 fn push_extra(args: &mut Vec<String>, extra: &str) {
-    for token in extra.split_whitespace() {
-        args.push(token.to_string());
+    // Callers validate with `extra_args_errors` before executing. Keeping this
+    // helper infallible preserves the small argument-builder API used by the
+    // preview and tests; malformed input is kept as one literal argument and
+    // can therefore never be reinterpreted as several flags.
+    match parse_extra_args(extra) {
+        Ok(tokens) => args.extend(tokens),
+        Err(_) if !extra.trim().is_empty() => args.push(extra.trim().to_string()),
+        Err(_) => {}
     }
 }
 
@@ -576,6 +700,12 @@ impl Options {
         if self.leakonly {
             a.push("-leakonly".to_string());
         }
+        if self.lmoptimize {
+            a.push("-lmoptimize".to_string());
+        }
+        if self.allleaks {
+            a.push("-allleaks".to_string());
+        }
         if self.subdivide != 240 {
             push_num(&mut a, "-subdivide", self.subdivide);
         }
@@ -614,7 +744,7 @@ impl Options {
         // worldspawn key, which is why the map gets rewritten instead.
         if !self.wad_dir.trim().is_empty() {
             a.push("-waddir".to_string());
-            a.push(self.wad_dir.clone());
+            a.push(self.wad_dir.trim().to_string());
         }
         if self.rad_fast {
             a.push("-fast".to_string());
@@ -636,6 +766,22 @@ impl Options {
         }
         a.push("-vismatrix".to_string());
         a.push(self.vismatrix.flag().to_string());
+        if self.gpu {
+            a.push(if self.gpu_auto {
+                "-gpuauto".to_string()
+            } else {
+                "-gpu".to_string()
+            });
+            if !self.gpu_gather {
+                a.push("-nogpu-gather".to_string());
+            }
+            if !self.gpu_transfers {
+                a.push("-nogpu-transfers".to_string());
+            }
+            if self.gpu_adapter >= 0 {
+                push_num(&mut a, "-gpuadapter", self.gpu_adapter);
+            }
+        }
         if self.pre25 {
             a.push("-pre25".to_string());
         }
@@ -711,6 +857,31 @@ impl Options {
     /// map's own entries are resolved even without a WAD folder.
     pub fn will_resolve_wads(&self) -> bool {
         self.auto_wads && self.run_csg
+    }
+
+    /// Trim path fields once before persisting or constructing a compile plan.
+    pub fn normalize_paths(&mut self) {
+        self.map_path = self.map_path.trim().to_string();
+        self.tools_dir = self.tools_dir.trim().to_string();
+        self.output_dir = self.output_dir.trim().to_string();
+        self.wad_dir = self.wad_dir.trim().to_string();
+    }
+
+    /// Syntax errors in any free-form field, labelled by stage for the UI.
+    pub fn extra_args_errors(&self) -> Vec<String> {
+        [
+            ("CSG", &self.csg_extra),
+            ("BSP", &self.bsp_extra),
+            ("VIS", &self.vis_extra),
+            ("RAD", &self.rad_extra),
+        ]
+        .into_iter()
+        .filter_map(|(stage, text)| {
+            parse_extra_args(text)
+                .err()
+                .map(|e| format!("Parámetros extra de {stage}: {e}."))
+        })
+        .collect()
     }
 
     /// Problems worth warning about before a compile starts.

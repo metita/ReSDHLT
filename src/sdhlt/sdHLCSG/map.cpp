@@ -602,7 +602,7 @@ static void ParseBrush(entity_t* mapent)
 	{
 		brush_t *newb = CopyCurrentBrush (mapent, b);
 		newb->contents = CONTENTS_SOLID;
-		newb->cliphull = ~0;
+		newb->cliphull = ~0u;
 		for (j = 0; j < newb->numsides; j++)
 		{
 			side = &g_brushsides[newb->firstside + j];
@@ -884,14 +884,14 @@ bool            ParseMapEntity()
 				{
 					if (*ValueForKey (mapent, "origin"))
 					{
-						double v[3];
+						double scaled_origin[3];
 						int origin[3];
 						char string[MAXTOKEN];
 						int i;
-						GetVectorForKey (mapent, "origin", v);
-						VectorScale (v, ent_gscale, v);
+						GetVectorForKey (mapent, "origin", scaled_origin);
+						VectorScale (scaled_origin, ent_gscale, scaled_origin);
 						for (i=0; i<3; ++i)
-							origin[i] = (int)(v[i]>=0? v[i]+0.5: v[i]-0.5);
+							origin[i] = (int)(scaled_origin[i]>=0? scaled_origin[i]+0.5: scaled_origin[i]-0.5);
 						safe_snprintf(string, MAXTOKEN, "%d %d %d", origin[0], origin[1], origin[2]);
 						SetKeyValue (mapent, "origin", string);
 					}
@@ -902,21 +902,21 @@ bool            ParseMapEntity()
 					{
 						for (int i = 0; i < 2; i++)
 						{
-							vec_t *point = b[i];
+							vec_t *bounds_point = b[i];
 							if (ent_scale_b)
 							{
-								VectorSubtract (point, ent_scale_origin, point);
-								VectorScale (point, ent_scale, point);
-								VectorAdd (point, ent_scale_origin, point);
+								VectorSubtract (bounds_point, ent_scale_origin, bounds_point);
+								VectorScale (bounds_point, ent_scale, bounds_point);
+								VectorAdd (bounds_point, ent_scale_origin, bounds_point);
 							}
 							if (ent_move_b)
 							{
-								VectorAdd (point, ent_move, point);
+								VectorAdd (bounds_point, ent_move, bounds_point);
 
 							}
 							if (ent_gscale_b)
 							{
-								VectorScale (point, ent_gscale, point);
+								VectorScale (bounds_point, ent_gscale, bounds_point);
 							}
 						}
 						char string[MAXTOKEN];
@@ -1029,7 +1029,7 @@ unsigned int    CountEngineEntities()
     entity_t*       mapent = g_entities;
 
     // for each entity in the map
-    for (x=0; x<g_numentities; x++, mapent++)
+		for (x=0; x<(unsigned)g_numentities; x++, mapent++)
     {
         const char* classname = ValueForKey(mapent, "classname");
 

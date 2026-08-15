@@ -18,11 +18,15 @@
 
 #include <vector>
 #include <string>
+#include <cmath>
 
 #include "qrad.h"
 #include "profiling.h"
 #include "raybench.h"
 #include "gpu_gather.h"
+#ifdef SDHLT_GPU
+#include "gpu/gpu.h"
+#endif
 
 
 /*
@@ -44,6 +48,11 @@ typedef enum
 eVisMethods;
 
 eVisMethods		g_method = DEFAULT_METHOD;
+
+int RadVisMatrixMethodId()
+{
+    return (int)g_method;
+}
 
 vec_t           g_fade = DEFAULT_FADE;
 
@@ -152,6 +161,122 @@ int				stylewarningnext = 1;
 vec_t g_maxdiscardedlight = 0;
 vec3_t g_maxdiscardedpos = {0, 0, 0};
 
+// ParseEntities() deliberately runs after the command line because the BSP has
+// to be loaded first.  info_compile_parameters used to overwrite values the
+// user explicitly supplied on the command line as a side effect.  Keep the
+// small set of overlapping options here and re-apply only the explicit ones
+// after entities have been parsed.  This also gives compound switches a single
+// order-independent resolution point.
+struct rad_cli_overrides_t
+{
+    bool extra;
+    bool bounce;
+    bool pre25;
+    bool limiter;
+    bool lightdata;
+    bool verbose;
+    bool estimate;
+    bool priority;
+    bool ambient;
+    bool smooth;
+    bool dscale;
+    bool chop;
+    bool texchop;
+    bool vismatrix;
+    bool circus;
+    bool customshadowwithbounce;
+    bool rgbtransfers;
+
+    unsigned bounce_value;
+    vec_t limiter_value;
+    int lightdata_value;
+    bool verbose_value;
+    bool estimate_value;
+    q_threadpriority priority_value;
+    vec3_t ambient_value;
+    vec_t smooth_value;
+    vec_t dscale_value;
+    vec_t chop_value;
+    vec_t texchop_value;
+    eVisMethods vismatrix_value;
+};
+
+static rad_cli_overrides_t g_cli_overrides = {};
+
+static void CaptureCliOverrides()
+{
+    g_cli_overrides.bounce_value = g_numbounce;
+    g_cli_overrides.limiter_value = g_limitthreshold;
+    g_cli_overrides.lightdata_value = g_max_map_lightdata;
+    g_cli_overrides.verbose_value = g_verbose;
+    g_cli_overrides.estimate_value = g_estimate;
+    g_cli_overrides.priority_value = g_threadpriority;
+    VectorCopy(g_ambient, g_cli_overrides.ambient_value);
+    g_cli_overrides.smooth_value = g_smoothing_value;
+    g_cli_overrides.dscale_value = g_direct_scale;
+    g_cli_overrides.chop_value = g_chop;
+    g_cli_overrides.texchop_value = g_texchop;
+    g_cli_overrides.vismatrix_value = g_method;
+}
+
+static void ApplyCliOverrides()
+{
+    if (g_cli_overrides.extra)
+    {
+        g_extra = true;
+    }
+    if (g_cli_overrides.bounce)
+    {
+        g_numbounce = g_cli_overrides.bounce_value;
+    }
+    else if (g_cli_overrides.extra && g_numbounce < 12)
+    {
+        // -extra's historical default is twelve bounces, but an explicit
+        // -bounce always wins regardless of the arguments' order.
+        g_numbounce = 12;
+    }
+    if (g_cli_overrides.pre25)
+    {
+        g_pre25update = true;
+        if (!g_cli_overrides.limiter)
+        {
+            g_limitthreshold = 188.0;
+        }
+    }
+    if (g_cli_overrides.limiter)
+    {
+        g_limitthreshold = g_cli_overrides.limiter_value;
+    }
+    if (g_cli_overrides.lightdata)
+        g_max_map_lightdata = g_cli_overrides.lightdata_value;
+    if (g_cli_overrides.verbose)
+        g_verbose = g_cli_overrides.verbose_value;
+    if (g_cli_overrides.estimate)
+        g_estimate = g_cli_overrides.estimate_value;
+    if (g_cli_overrides.priority)
+        g_threadpriority = g_cli_overrides.priority_value;
+    if (g_cli_overrides.ambient)
+        VectorCopy(g_cli_overrides.ambient_value, g_ambient);
+    if (g_cli_overrides.smooth)
+        g_smoothing_value = g_cli_overrides.smooth_value;
+    if (g_cli_overrides.dscale)
+        g_direct_scale = g_cli_overrides.dscale_value;
+    if (g_cli_overrides.chop)
+        g_chop = g_cli_overrides.chop_value;
+    if (g_cli_overrides.texchop)
+        g_texchop = g_cli_overrides.texchop_value;
+    if (g_cli_overrides.vismatrix)
+        g_method = g_cli_overrides.vismatrix_value;
+    if (g_cli_overrides.circus)
+        g_circus = true;
+    if (g_cli_overrides.customshadowwithbounce)
+        g_customshadow_with_bouncelight = true;
+    if (g_cli_overrides.rgbtransfers)
+        g_rgb_transfers = true;
+
+    g_smoothing_threshold = (float)cos(g_smoothing_value * (Q_PI / 180.0));
+}
+
 // =====================================================================================
 //  GetParamsFromEnt
 //      this function is called from parseentity when it encounters the 
@@ -239,7 +364,7 @@ void            GetParamsFromEnt(entity_t* mapent)
     if (pszTmp)
     {
         float red = 0, green = 0, blue = 0;
-        if (sscanf(pszTmp, "%f %f %f", &red, &green, &blue))
+        if (sscanf(pszTmp, "%f %f %f", &red, &green, &blue) == 3)
         {
             if (red < 0 || red > 1 || green < 0 || green > 1 || blue < 0 || blue > 1)
             {
@@ -274,8 +399,8 @@ void            GetParamsFromEnt(entity_t* mapent)
     flTmp = FloatForKey(mapent, "smooth");
     if (flTmp)
     {
-        /*g_smoothing_threshold = flTmp;*/
-		g_smoothing_threshold = cos(g_smoothing_value * (Q_PI / 180.0)); // --vluzacn
+        g_smoothing_value = flTmp;
+		g_smoothing_threshold = (float)cos(g_smoothing_value * (Q_PI / 180.0));
         Log("%30s [ %-9s ]\n", "Smoothing threshold", ValueForKey(mapent, "smooth"));
     }
 
@@ -2416,6 +2541,103 @@ static void     GatherRGBLight(int threadnum)
 // =====================================================================================
 //  BounceLight
 // =====================================================================================
+#ifdef SDHLT_GPU
+struct gpu_bounce_state_t
+{
+    std::vector<uint32_t> row_offsets;
+    std::vector<uint32_t> emitters;
+    std::vector<float> factors;
+};
+
+static bool PrepareGpuBounce(gpu_bounce_state_t& state)
+{
+    // A multi-bounce GPU result is numerically valid but can round a different
+    // lightmap byte after the next iteration because Vulkan is float-only.
+    // Keep the production/default multi-bounce output deterministic and use
+    // this kernel only for the independently verifiable single-bounce case.
+    if (g_numbounce != 1 || !g_gpu || !g_gpu_transfers || g_rgb_transfers
+        || g_customshadow_with_bouncelight || g_opaque_face_count != 0)
+        return false;
+
+    state.row_offsets.assign((size_t)g_num_patches + 1, 0);
+    state.emitters.clear();
+    state.factors.clear();
+    for (unsigned receiver = 0; receiver < g_num_patches; receiver++)
+    {
+        const patch_t& patch = g_patches[receiver];
+        if (patch.translucent_b || patch.bouncestyle != -1)
+            return false;
+        if (patch.iIndex != 0 && (!patch.tIndex || !patch.tData))
+            return false;
+        for (unsigned style = 0; style < MAXLIGHTMAPS; style++)
+        {
+            if ((patch.directstyle[style] != 255 && patch.directstyle[style] != 0)
+                || (patch.totalstyle[style] != 255 && patch.totalstyle[style] != 0))
+                return false;
+        }
+
+        const transfer_data_t* data = patch.tData;
+        for (unsigned index = 0; index < patch.iIndex; index++)
+        {
+            const transfer_index_t& row = patch.tIndex[index];
+            if (row.index >= g_num_patches || row.size >= g_num_patches
+                || row.size + 1 > g_num_patches - row.index)
+                return false;
+            unsigned emitter = row.index;
+            const unsigned count = row.size + 1;
+            for (unsigned offset = 0; offset < count; offset++, emitter++)
+            {
+                float factor = 0.0f;
+                float_decompress(g_transfer_compress_type, data, &factor);
+                data += float_size[g_transfer_compress_type];
+                if (!std::isfinite(factor) || factor <= 0.0f)
+                    continue;
+                state.emitters.push_back(emitter);
+                state.factors.push_back(factor);
+            }
+        }
+        state.row_offsets[receiver + 1] = (uint32_t)state.emitters.size();
+    }
+    return state.emitters.size() <= UINT32_MAX;
+}
+
+static bool RunGpuBounce(const gpu_bounce_state_t& state)
+{
+    std::vector<rad::gpu::bounce_patch> patches(g_num_patches);
+    for (unsigned i = 0; i < g_num_patches; i++)
+    {
+        rad::gpu::bounce_patch& out = patches[i];
+        for (int component = 0; component < 3; component++)
+        {
+            out.direct[component] = (float)g_patches[i].directlight[0][component];
+            out.total[component] = (float)emitlight[i][0][component];
+            out.reflectivity[component] = (float)g_patches[i].bouncereflectivity[component];
+        }
+    }
+    std::vector<rad::gpu::bounce_result> results;
+    if (!rad::gpu::bounce_batch(patches, state.row_offsets, state.emitters,
+                                state.factors, results)
+        || results.size() != g_num_patches)
+    {
+        Warning("-gpu bounce: %s; using the CPU bounce path",
+                rad::gpu::last_error().c_str());
+        return false;
+    }
+    for (unsigned i = 0; i < g_num_patches; i++)
+    {
+        newstyles[i][0] = 0;
+        VectorCopy(results[i].total, addlight[i][0]);
+        for (unsigned style = 1; style < MAXLIGHTMAPS; style++)
+        {
+            newstyles[i][style] = 255;
+            VectorClear(addlight[i][style]);
+        }
+    }
+    CollectLight();
+    return true;
+}
+#endif
+
 static void     BounceLight()
 {
     unsigned        i;
@@ -2432,14 +2654,37 @@ static void     BounceLight()
 		}
     }
 
+#ifdef SDHLT_GPU
+    gpu_bounce_state_t gpu_bounce_state;
+#endif
+    bool gpu_bounces = false;
+#ifdef SDHLT_GPU
+    gpu_bounces = PrepareGpuBounce(gpu_bounce_state);
+    if (gpu_bounces)
+        Log("GPU bounces: style-0 accumulation enabled (%s)\n",
+            rad::gpu::device_name().c_str());
+    else if (g_gpu && g_gpu_transfers && g_numbounce > 1)
+        Log("GPU bounces: CPU fallback for multi-bounce determinism\n");
+#endif
+
     for (i = 0; i < g_numbounce; i++)
     {
         Log("Bounce %u ", i + 1);
+#ifdef SDHLT_GPU
+	if(gpu_bounces && RunGpuBounce(gpu_bounce_state))
+	{
+		// RunGpuBounce performed the style selection and CollectLight.
+	}
+	else
+#endif
+	{
+		gpu_bounces = false;
 	if(g_rgb_transfers)
 	       	{NamedRunThreadsOn(g_num_patches, g_estimate, GatherRGBLight);}
         else
         	{NamedRunThreadsOn(g_num_patches, g_estimate, GatherLight);}
         CollectLight();
+	}
 
         if (g_dumppatches)
         {
@@ -2676,7 +2921,7 @@ static void     RadWorld()
     {
         WorkBenchInit(g_numfaces);
     }
-	if (!(g_gpu && GpuBuildFacelights()))
+	if (!(g_gpu && g_gpu_gather && GpuBuildFacelights()))
 	{
 		NamedRunThreadsOnIndividual(g_numfaces, g_estimate, BuildFacelights);
 	}
@@ -2785,7 +3030,12 @@ static void     Usage()
     Log("    -nopaque        : Disable the opaque zhlt_lightflags for this compile\n\n");
 	Log("    -nostudioshadow : Disable opaque studiomodels, ignore zhlt_studioshadow for this compile\n\n");
 	Log("    -noallocblockcheck: Compile even when the map overflows the engine's lightmap atlas\n");
-	Log("    -gpu            : Gather direct lighting with Vulkan compute (falls back to the CPU)\n");
+	Log("    -gpu            : Force compatible gather and transfer work onto Vulkan\n");
+	Log("    -gpuauto        : Use Vulkan only when the phase workload is large enough\n");
+	Log("    -gpu-gather     : Enable only the direct-light gather GPU phase\n");
+	Log("    -gpu-transfers  : Enable only the Sparse form-factor GPU phase\n");
+	Log("    -nogpu-gather   : Disable gather when combined with -gpu or -gpuauto\n");
+	Log("    -nogpu-transfers: Disable transfers when combined with -gpu or -gpuauto\n");
 	Log("    -gpuadapter #   : Pick the Vulkan device by index instead of automatically\n");
     Log("    -smooth #       : Set smoothing threshold for blending (in degrees)\n");
 	Log("    -smooth2 #      : Set smoothing threshold between different textures\n");
@@ -2926,8 +3176,11 @@ static void     Settings()
 	Log("fast rad             [ %17s ] [ %17s ]\n", g_fastmode? "on": "off", DEFAULT_FASTMODE? "on": "off");
 	if (g_gpu)
 	{
-		Log("gpu gather           [ %17s ] [ %17s ]\n", "on", "off");
-		Log("gpu device           [ %17s ] [ %17s ]\n", GpuDeviceDescription (), "CPU");
+		Log("gpu policy           [ %17s ] [ %17s ]\n", g_gpu_auto? "automatic": "forced", "off");
+		Log("gpu gather           [ %17s ] [ %17s ]\n", g_gpu_gather? "on": "off", "off");
+		Log("gpu transfers        [ %17s ] [ %17s ]\n", g_gpu_transfers? "on": "off", "off");
+		Log("gpu device           [ %17s ] [ %17s ]\n",
+            g_gpu_auto? "selected on demand": GpuDeviceDescription (), "CPU");
 	}
 	Log("vismatrix algorithm  [ %17s ] [ %17s ]\n",
 		g_method == eMethodVismatrix? "Original": g_method == eMethodSparseVismatrix? "Sparse": g_method == eMethodNoVismatrix? "NoMatrix": "Unknown",
@@ -3289,6 +3542,13 @@ int             main(const int argc, char** argv)
     const char*     mapname_from_arg = NULL;
     const char*     user_lights = NULL;
 	char temp[_MAX_PATH]; //seedee
+    bool gpu_all_requested = false;
+    bool gpu_auto_requested = false;
+    bool gpu_force_requested = false;
+    bool gpu_gather_requested = false;
+    bool gpu_transfers_requested = false;
+    bool gpu_gather_disabled = false;
+    bool gpu_transfers_disabled = false;
 
     g_Program = "sdHLRAD";
 
@@ -3323,17 +3583,14 @@ int             main(const int argc, char** argv)
 		else if (!strcasecmp(argv[i], "-extra"))
         {
             g_extra = true;
-
-			if (g_numbounce < 12)
-			{
-				g_numbounce = 12;
-			}
+            g_cli_overrides.extra = true;
         }
         else if (!strcasecmp(argv[i], "-bounce"))
         {
             if (i + 1 < argc)	//added "1" .--vluzacn
             {
                 g_numbounce = atoi(argv[++i]);
+                g_cli_overrides.bounce = true;
 
                 if (g_numbounce > 1000)
                 {
@@ -3360,6 +3617,7 @@ int             main(const int argc, char** argv)
         else if (!strcasecmp(argv[i], "-verbose"))
         {
             g_verbose = true;
+            g_cli_overrides.verbose = true;
         }
         else if (!strcasecmp(argv[i], "-noinfo"))
         {
@@ -3385,12 +3643,14 @@ int             main(const int argc, char** argv)
         else if (!strcasecmp(argv[i], "-estimate"))
         {
             g_estimate = true;
+            g_cli_overrides.estimate = true;
         }
 #endif
 #ifdef SYSTEM_POSIX
         else if (!strcasecmp(argv[i], "-noestimate"))
         {
             g_estimate = false;
+            g_cli_overrides.estimate = true;
         }
 #endif
 #ifdef ZHLT_NETVIS
@@ -3419,6 +3679,7 @@ int             main(const int argc, char** argv)
             if (i + 1 < argc)	//added "1" .--vluzacn
             {
                 g_chop = atof(argv[++i]);
+                g_cli_overrides.chop = true;
                 if (g_chop < 1)
                 {
                     Log("expected value greater than 1 for '-chop'\n");
@@ -3439,6 +3700,7 @@ int             main(const int argc, char** argv)
             if (i + 1 < argc)	//added "1" .--vluzacn
             {
                 g_texchop = atof(argv[++i]);
+                g_cli_overrides.texchop = true;
                 if (g_texchop < 1)
                 {
                     Log("expected value greater than 1 for '-texchop'\n");
@@ -3510,6 +3772,7 @@ int             main(const int argc, char** argv)
                 g_ambient[0] = (float)atof(argv[++i]) * 128;
                 g_ambient[1] = (float)atof(argv[++i]) * 128;
                 g_ambient[2] = (float)atof(argv[++i]) * 128;
+                g_cli_overrides.ambient = true;
             }
             else
             {
@@ -3521,6 +3784,7 @@ int             main(const int argc, char** argv)
             if (i + 1 < argc)	//"1" was added to check if there is another argument afterwards (expected value) //seedee
             {
                 g_limitthreshold = atof(argv[++i]);
+                g_cli_overrides.limiter = true;
             }
             else
             {
@@ -3545,6 +3809,7 @@ int             main(const int argc, char** argv)
         else if (!strcasecmp(argv[i], "-circus"))
         {
             g_circus = true;
+            g_cli_overrides.circus = true;
         }
         else if (!strcasecmp(argv[i], "-noskyfix"))
         {
@@ -3574,10 +3839,12 @@ int             main(const int argc, char** argv)
         else if (!strcasecmp(argv[i], "-low"))
         {
             g_threadpriority = eThreadPriorityLow;
+            g_cli_overrides.priority = true;
         }
         else if (!strcasecmp(argv[i], "-high"))
         {
             g_threadpriority = eThreadPriorityHigh;
+            g_cli_overrides.priority = true;
         }
         else if (!strcasecmp(argv[i], "-nolog"))
         {
@@ -3628,6 +3895,7 @@ int             main(const int argc, char** argv)
             if (i + 1 < argc)	//added "1" .--vluzacn
             {
                 g_smoothing_value = atof(argv[++i]);
+                g_cli_overrides.smooth = true;
             }
             else
             {
@@ -3681,6 +3949,7 @@ int             main(const int argc, char** argv)
                 //if (x > g_max_map_lightdata) //--vluzacn
                 {
                     g_max_map_lightdata = x;
+                    g_cli_overrides.lightdata = true;
                 }
             }
             else
@@ -3696,14 +3965,17 @@ int             main(const int argc, char** argv)
 				if (!strcasecmp (value, "normal"))
 				{
 					g_method = eMethodVismatrix;
+					g_cli_overrides.vismatrix = true;
 				}
 				else if (!strcasecmp (value, "sparse"))
 				{
 					g_method = eMethodSparseVismatrix;
+					g_cli_overrides.vismatrix = true;
 				}
 				else if (!strcasecmp (value, "off"))
 				{
 					g_method = eMethodNoVismatrix;
+					g_cli_overrides.vismatrix = true;
 				}
 				else
 				{
@@ -3729,6 +4001,7 @@ int             main(const int argc, char** argv)
             if (i + 1 < argc)	//added "1" .--vluzacn
             {
                 g_direct_scale = (float)atof(argv[++i]);
+                g_cli_overrides.dscale = true;
             }
             else
             {
@@ -3797,10 +4070,12 @@ int             main(const int argc, char** argv)
         else if (!strcasecmp(argv[i], "-customshadowwithbounce"))
         {
         	g_customshadow_with_bouncelight = true;
+            g_cli_overrides.customshadowwithbounce = true;
         }
         else if (!strcasecmp(argv[i], "-rgbtransfers"))
         {
         	g_rgb_transfers = true;
+            g_cli_overrides.rgbtransfers = true;
         }
 
 
@@ -3879,7 +4154,29 @@ int             main(const int argc, char** argv)
 		}
 		else if (!strcasecmp(argv[i], "-gpu"))
 		{
-			g_gpu = true;
+			gpu_all_requested = true;
+            gpu_force_requested = true;
+		}
+		else if (!strcasecmp(argv[i], "-gpuauto"))
+		{
+			gpu_all_requested = true;
+            gpu_auto_requested = true;
+		}
+		else if (!strcasecmp(argv[i], "-gpu-gather"))
+		{
+            gpu_gather_requested = true;
+		}
+		else if (!strcasecmp(argv[i], "-gpu-transfers"))
+		{
+            gpu_transfers_requested = true;
+		}
+		else if (!strcasecmp(argv[i], "-nogpu-gather"))
+		{
+            gpu_gather_disabled = true;
+		}
+		else if (!strcasecmp(argv[i], "-nogpu-transfers"))
+		{
+            gpu_transfers_disabled = true;
 		}
 		else if (!strcasecmp(argv[i], "-gpuadapter"))
 		{
@@ -4052,10 +4349,10 @@ int             main(const int argc, char** argv)
 				Usage();
 			}
 		}
-		else if (!strcasecmp(argv[i], "-pre25")) //Pre25 should be after everything else to override
+		else if (!strcasecmp(argv[i], "-pre25"))
 		{
 			g_pre25update = true;
-            g_limitthreshold = 188.0;
+            g_cli_overrides.pre25 = true;
 		}
         else if (argv[i][0] == '-')
         {
@@ -4072,6 +4369,24 @@ int             main(const int argc, char** argv)
             Usage();
         }
     }
+
+    // Resolve compound switches once, after all arguments have been seen.
+    // Explicit scalar values win over preset defaults in either order.
+    g_gpu_gather = (gpu_all_requested || gpu_gather_requested)
+        && !gpu_gather_disabled;
+    g_gpu_transfers = (gpu_all_requested || gpu_transfers_requested)
+        && !gpu_transfers_disabled;
+    g_gpu = g_gpu_gather || g_gpu_transfers;
+    g_gpu_auto = g_gpu && gpu_auto_requested && !gpu_force_requested;
+    if (g_cli_overrides.pre25 && !g_cli_overrides.limiter)
+    {
+        g_limitthreshold = 188.0;
+    }
+    if (g_cli_overrides.extra && !g_cli_overrides.bounce && g_numbounce < 12)
+    {
+        g_numbounce = 12;
+    }
+    CaptureCliOverrides();
 
     if (!mapname_from_arg)
     {
@@ -4136,12 +4451,14 @@ int             main(const int argc, char** argv)
 	LoadExtentFile (extentfilename);
 #endif
     ParseEntities();
+    ApplyCliOverrides();
 	if (g_fastmode)
 	{
 		g_numbounce = 0;
 		g_softsky = false;
 	}
-    Settings();
+	ThreadSetPriority(g_threadpriority);
+	Settings();
 	DeleteEmbeddedLightmaps ();
 	LoadTextures ();
     LoadRadFiles(g_Mapname, user_lights, argv[0]);

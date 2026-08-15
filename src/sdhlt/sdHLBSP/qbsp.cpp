@@ -962,7 +962,7 @@ static surfchain_t* ReadSurfs(FILE* file)
 {
     int             r;
 	int				detaillevel;
-    int             planenum, g_texinfo, contents, numpoints;
+    int             planenum, texinfo, contents, numpoints;
     face_t*         f;
     int             i;
     double          v[3];
@@ -975,7 +975,7 @@ static surfchain_t* ReadSurfs(FILE* file)
 		if (file == polyfiles[2] && g_nohull2)
 			break;
         line++;
-        r = fscanf(file, "%i %i %i %i %i\n", &detaillevel, &planenum, &g_texinfo, &contents, &numpoints);
+        r = fscanf(file, "%i %i %i %i %i\n", &detaillevel, &planenum, &texinfo, &contents, &numpoints);
         if (r == 0 || r == -1)
         {
             return NULL;
@@ -997,16 +997,16 @@ static surfchain_t* ReadSurfs(FILE* file)
         {
             Error("ReadSurfs (line %i): %i > g_numplanes\n", line, planenum);
         }
-        if (g_texinfo > g_numtexinfo)
+        if (texinfo > g_numtexinfo)
         {
-            Error("ReadSurfs (line %i): %i > g_numtexinfo", line, g_texinfo);
+            Error("ReadSurfs (line %i): %i > g_numtexinfo", line, texinfo);
         }
 		if (detaillevel < 0)
 		{
 			Error("ReadSurfs (line %i): detaillevel %i < 0", line, detaillevel);
 		}
 
-        if (!strcasecmp(GetTextureByNumber(g_texinfo), "skip"))
+        if (!strcasecmp(GetTextureByNumber(texinfo), "skip"))
         {
             Verbose("ReadSurfs (line %i): skipping a surface", line);
 
@@ -1027,7 +1027,7 @@ static surfchain_t* ReadSurfs(FILE* file)
         f = AllocFace();
 		f->detaillevel = detaillevel;
         f->planenum = planenum;
-        f->texturenum = g_texinfo;
+        f->texturenum = texinfo;
         f->contents = contents;
         f->numpoints = numpoints;
         f->next = validfaces[planenum];
@@ -1523,12 +1523,12 @@ static void     ProcessFile(const char* const filename)
     }
 	{
 		FILE			*f;
-		char			name[_MAX_PATH];
-		safe_snprintf (name, _MAX_PATH, "%s.hsz", filename);
-		f = fopen (name, "r");
+		char			hull_size_name[_MAX_PATH];
+		safe_snprintf (hull_size_name, _MAX_PATH, "%s.hsz", filename);
+		f = fopen (hull_size_name, "r");
 		if (!f)
 		{
-			Warning("Couldn't open %s", name);
+			Warning("Couldn't open %s", hull_size_name);
 		}
 		else
 		{
@@ -1561,12 +1561,12 @@ static void     ProcessFile(const char* const filename)
     Settings(); // AJM: moved here due to info_compile_parameters entity
 
 	{
-		char name[_MAX_PATH];
-		safe_snprintf (name, _MAX_PATH, "%s.pln", filename);
-		FILE *planefile = fopen (name, "rb");
+		char planefile_name[_MAX_PATH];
+		safe_snprintf (planefile_name, _MAX_PATH, "%s.pln", filename);
+		FILE *planefile = fopen (planefile_name, "rb");
 		if (!planefile)
 		{
-			Warning("Couldn't open %s", name);
+			Warning("Couldn't open %s", planefile_name);
 #undef dplane_t
 #undef g_dplanes
 			for (i = 0; i < g_numplanes; i++)
@@ -1625,7 +1625,7 @@ static void     ProcessFile(const char* const filename)
 // =====================================================================================
 //  main
 // =====================================================================================
-int             main(const int argc, char** argv)
+int             main(const int argc_input, char** argv_input)
 {
     int             i;
     double          start, end;
@@ -1633,8 +1633,8 @@ int             main(const int argc, char** argv)
 
     g_Program = "sdHLBSP";
 
-	int argcold = argc;
-	char ** argvold = argv;
+	int argcold = argc_input;
+	char ** argvold = argv_input;
 	{
 		int argc;
 		char ** argv;
@@ -1653,7 +1653,7 @@ int             main(const int argc, char** argv)
         {
             if (i + 1 < argc)	//added "1" .--vluzacn
             {
-                int             g_numthreads = atoi(argv[++i]);
+                g_numthreads = atoi(argv[++i]);
 
                 if (g_numthreads < 1)
                 {
@@ -1927,17 +1927,17 @@ int             main(const int argc, char** argv)
     ThreadSetPriority(g_threadpriority);
     LogStart(argcold, argvold);
 	{
-		int			 i;
+		int			 arg_index;
 		Log("Arguments: ");
-		for (i = 1; i < argc; i++)
+		for (arg_index = 1; arg_index < argc; arg_index++)
 		{
-			if (strchr(argv[i], ' '))
+			if (strchr(argv[arg_index], ' '))
 			{
-				Log("\"%s\" ", argv[i]);
+				Log("\"%s\" ", argv[arg_index]);
 			}
 			else
 			{
-				Log("%s ", argv[i]);
+				Log("%s ", argv[arg_index]);
 			}
 		}
 		Log("\n");

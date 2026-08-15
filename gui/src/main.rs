@@ -10,17 +10,19 @@ mod update;
 mod widgets;
 
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use eframe::egui;
 use egui::{Align, Layout, RichText};
+use fs2::FileExt;
 
 use options::{always_rules, Options, Preset, VisMatrix, VisQuality};
 use projects::{FileEntry, FileKind, Library, Project};
-use runner::{Job, LineKind, Msg, Stage, STAGES};
-use update::Release;
+use runner::{CompilePlan, Job, LineKind, Msg, RunOutcome, Stage, STAGES};
 use theme::*;
+use update::Release;
 use widgets::*;
 
 // ---------------------------------------------------------------- tabs
@@ -70,6 +72,9 @@ struct Checks {
     map_ok: bool,
     tools_key: String,
     tools_ok: bool,
+    plan_key: String,
+    plan_errors: Vec<String>,
+    checked_at: Option<Instant>,
     /// The tools folder in use is not the one shipped beside this executable,
     /// and the shipped one is newer. Updating the app does not touch a folder
     /// the user pointed somewhere else, so the compile would silently keep
@@ -87,7 +92,7 @@ struct App {
     run_since: Option<Instant>,
     done: HashMap<&'static str, StageState>,
     total_secs: Option<f64>,
-    last_ok: Option<bool>,
+    last_outcome: Option<RunOutcome>,
     status: String,
     checks: Checks,
     log_filter: String,
@@ -124,19 +129,21 @@ struct App {
     /// is ignored: updating on startup is pointless if yesterday's check still
     /// counts.
     startup_check_done: bool,
-    /// Whatever the check in flight finds should be installed without asking.
-    /// Only ever set for the launch check.
-    update_install_when_found: bool,
-    /// Release to install, and how many frames to wait first. The download
-    /// blocks the UI thread, so the update window gets a frame to paint itself
-    /// before everything stops.
-    pending_auto_install: Option<(Release, u8)>,
+    update_install: Option<update::Install>,
     installing: bool,
 }
 
 impl Default for App {
     fn default() -> Self {
-        let mut opts = load_profile().unwrap_or_default();
+        let mut startup_errors = Vec::new();
+        let mut opts = match load_profile() {
+            Ok(Some(opts)) => opts,
+            Ok(None) => Options::default(),
+            Err(error) => {
+                startup_errors.push(error);
+                Options::default()
+            }
+        };
         if opts.tools_dir.trim().is_empty() {
             if let Some(d) = detect_tools_dir() {
                 opts.tools_dir = d;
@@ -148,11 +155,14 @@ impl Default for App {
 
         // Come back to whatever project was open, with its options, so the
         // window opens ready to compile.
-        let lib = Library::load(&library_path().unwrap_or_default());
-        let active = lib
-            .active
-            .as_deref()
-            .and_then(|name| lib.index_of(name));
+        let lib = match load_library() {
+            Ok(lib) => lib,
+            Err(error) => {
+                startup_errors.push(error);
+                Library::default()
+            }
+        };
+        let active = lib.active.as_deref().and_then(|name| lib.index_of(name));
         if let Some(i) = active {
             opts = lib.projects[i].opts.clone();
             if opts.tools_dir.trim().is_empty() {
@@ -161,9 +171,13 @@ impl Default for App {
                 }
             }
         }
-        let status = match active {
-            Some(i) => format!("Proyecto '{}' cargado.", lib.projects[i].name),
-            None => String::from("Elige un .map y la carpeta de herramientas."),
+        let status = if startup_errors.is_empty() {
+            match active {
+                Some(i) => format!("Proyecto '{}' cargado.", lib.projects[i].name),
+                None => String::from("Elige un .map y la carpeta de herramientas."),
+            }
+        } else {
+            startup_errors.join(" | ")
         };
 
         Self {
@@ -176,7 +190,7 @@ impl Default for App {
             run_since: None,
             done: HashMap::new(),
             total_secs: None,
-            last_ok: None,
+            last_outcome: None,
             status,
             checks: Checks::default(),
             log_filter: String::new(),
@@ -205,8 +219,7 @@ impl Default for App {
             update_status: String::new(),
             update_window: false,
             startup_check_done: false,
-            update_install_when_found: false,
-            pending_auto_install: None,
+            update_install: None,
             installing: false,
         }
     }
@@ -214,28 +227,92 @@ impl Default for App {
 
 // ---------------------------------------------------------------- profile
 
-fn profile_path() -> Option<PathBuf> {
+fn legacy_state_path(name: &str) -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("resdhlt-gui.json")))
+        .and_then(|path| path.parent().map(|dir| dir.join(name)))
 }
 
-fn load_profile() -> Option<Options> {
-    let path = profile_path()?;
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
+fn state_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .map(|dir| dir.join("ReSDHLT").join(name))
+        .or_else(|| legacy_state_path(name))
+}
+
+fn migrate_legacy_state(name: &str, destination: &Path) -> Result<(), String> {
+    if destination.exists() {
+        return Ok(());
+    }
+    let Some(legacy) = legacy_state_path(name) else {
+        return Ok(());
+    };
+    if legacy == destination || !legacy.is_file() {
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(&legacy)
+        .map_err(|error| format!("no pude migrar {}: {error}", legacy.display()))?;
+    projects::atomic_write(destination, &text)
+        .map_err(|error| format!("no pude migrar a {}: {error}", destination.display()))
+}
+
+fn profile_path() -> Option<PathBuf> {
+    state_path("resdhlt-gui.json")
+}
+
+fn load_profile() -> Result<Option<Options>, String> {
+    let path = profile_path().ok_or("no pude determinar dónde leer las preferencias")?;
+    migrate_legacy_state("resdhlt-gui.json", &path)?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|error| format!("{} está corrupto: {error}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("no pude leer {}: {error}", path.display())),
+    }
 }
 
 fn library_path() -> Option<PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("resdhlt-projects.json")))
+    state_path("resdhlt-projects.json")
+}
+
+struct AppInstanceLock {
+    file: File,
+}
+
+impl Drop for AppInstanceLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+fn acquire_app_instance_lock(path: &Path) -> Result<AppInstanceLock, String> {
+    let parent = path.parent().ok_or("ruta de lock sin carpeta")?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| format!("no pude abrir {}: {error}", path.display()))?;
+    file.try_lock_exclusive().map_err(|_| {
+        "ReSDHLT ya está abierto. Usa la ventana existente para evitar perder proyectos."
+            .to_string()
+    })?;
+    Ok(AppInstanceLock { file })
+}
+
+fn load_library() -> Result<Library, String> {
+    let path = library_path().ok_or("no pude determinar dónde leer los proyectos")?;
+    migrate_legacy_state("resdhlt-projects.json", &path)?;
+    Library::load_checked(&path)
 }
 
 fn save_profile(opts: &Options) -> Result<(), String> {
     let path = profile_path().ok_or("no pude determinar dónde guardar")?;
     let text = serde_json::to_string_pretty(opts).map_err(|e| e.to_string())?;
-    std::fs::write(path, text).map_err(|e| e.to_string())
+    projects::atomic_write(&path, &text)
 }
 
 // ---------------------------------------------------------------- helpers
@@ -303,7 +380,10 @@ fn copy_bundled_tools(from: &Path, to: &Path) -> Result<usize, String> {
             continue;
         }
         std::fs::copy(entry.path(), to.join(entry.file_name())).map_err(|e| {
-            format!("no pude copiar {}: {e}", entry.file_name().to_string_lossy())
+            format!(
+                "no pude copiar {}: {e}",
+                entry.file_name().to_string_lossy()
+            )
         })?;
         copied += 1;
     }
@@ -423,16 +503,18 @@ impl App {
                         self.running_stage = None;
                         self.stage_since = None;
                     }
-                    Msg::Finished(total, ok) => {
+                    Msg::Finished(total, outcome) => {
                         self.total_secs = Some(total);
-                        self.last_ok = Some(ok);
+                        self.last_outcome = Some(outcome);
                         self.running_stage = None;
                         self.stage_since = None;
                         self.run_since = None;
-                        self.status = if ok {
-                            format!("Listo en {}", fmt_secs(total))
-                        } else {
-                            "Terminó con errores".to_string()
+                        self.status = match outcome {
+                            RunOutcome::Succeeded => format!("Listo en {}", fmt_secs(total)),
+                            RunOutcome::Failed => "Terminó con errores".to_string(),
+                            RunOutcome::Cancelled => {
+                                format!("Cancelado después de {}", fmt_secs(total))
+                            }
                         };
                         finished = true;
                     }
@@ -448,11 +530,8 @@ impl App {
 
     /// Once on launch, and once a day after that while the app stays open.
     ///
-    /// The launch check ignores the daily throttle and installs what it finds
-    /// on its own: someone who opens the compiler should be compiling with the
-    /// current tools, not with whatever they had when they last let a check
-    /// through. A check found later, with the app already open and possibly a
-    /// compile in progress, only opens the window and waits to be told.
+    /// The launch check ignores the daily throttle, but installation always
+    /// requires an explicit click in the release window.
     fn maybe_check_updates(&mut self) {
         const DAY: u64 = 24 * 60 * 60;
         if !self.lib.check_updates || self.update_check.is_some() || self.update_found.is_some() {
@@ -460,7 +539,6 @@ impl App {
         }
         if !self.startup_check_done {
             self.startup_check_done = true;
-            self.update_install_when_found = true;
             self.start_update_check(false);
             return;
         }
@@ -493,21 +571,9 @@ impl App {
         self.update_check = None;
         match msg {
             update::Msg::Available(release) => {
-                let auto = std::mem::take(&mut self.update_install_when_found);
-                // Never yank the binaries out from under a running compile.
-                let auto = auto && self.job.is_none();
-                self.update_status = if auto {
-                    format!("Actualizando a {}...", release.tag)
-                } else {
-                    format!("Hay una versión nueva: {}", release.tag)
-                };
+                self.update_status = format!("Hay una versión nueva: {}", release.tag);
                 self.status = self.update_status.clone();
-                // Either way the window opens: it names the version and shows
-                // the progress, so an automatic update is never a mystery.
                 self.update_window = true;
-                if auto {
-                    self.pending_auto_install = Some((release.clone(), 2));
-                }
                 self.update_found = Some(release);
             }
             update::Msg::UpToDate => {
@@ -543,10 +609,14 @@ impl App {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new(format!("{} -> {}", update::Version::current(), release.version))
-                            .color(TEXT)
-                            .strong()
-                            .size(15.0),
+                        RichText::new(format!(
+                            "{} -> {}",
+                            update::Version::current(),
+                            release.version
+                        ))
+                        .color(TEXT)
+                        .strong()
+                        .size(15.0),
                     );
                     chip(ui, &release.tag, ACCENT);
                 });
@@ -596,7 +666,15 @@ impl App {
                     .min_size(egui::vec2(170.0, 30.0))
                     .fill(ACCENT_DEEP)
                     .stroke(egui::Stroke::new(1.0_f32, ACCENT));
-                    if ui.add_enabled(!self.installing, btn).clicked() {
+                    if ui
+                        .add_enabled(!self.installing && self.job.is_none(), btn)
+                        .on_hover_text(if self.job.is_some() {
+                            "Cancela o espera la compilación antes de actualizar."
+                        } else {
+                            "Descargar e instalar esta versión."
+                        })
+                        .clicked()
+                    {
                         install = true;
                     }
                     if ui.button("Ahora no").clicked() {
@@ -620,18 +698,31 @@ impl App {
             self.update_window = false;
         }
         if install {
-            self.pending_auto_install = None;
-            self.do_install(ctx, &release);
+            self.do_install(&release);
         }
     }
 
-    /// Downloads and hands over to the swapper, then quits so it can replace
-    /// the files. Blocks the UI thread for the length of the download, which is
-    /// why the automatic path lets the window paint first.
-    fn do_install(&mut self, ctx: &egui::Context, release: &Release) {
+    /// Downloads and stages in a worker. `drain_install` closes the app only
+    /// after the swap helper is ready.
+    fn do_install(&mut self, release: &Release) {
+        if self.job.is_some() || self.installing {
+            self.update_status = "Cancela o espera la compilación antes de actualizar.".to_string();
+            return;
+        }
         self.installing = true;
         self.update_status = "Descargando...".to_string();
-        match update::install(release) {
+        self.update_install = Some(update::install_async(release.clone()));
+    }
+
+    fn drain_install(&mut self, ctx: &egui::Context) {
+        let Some(install) = &self.update_install else {
+            return;
+        };
+        let Ok(result) = install.rx.try_recv() else {
+            return;
+        };
+        self.update_install = None;
+        match result {
             Ok(()) => {
                 // The helper is waiting for this process to exit before it
                 // can replace the files.
@@ -649,20 +740,6 @@ impl App {
                 self.update_window = true;
             }
         }
-    }
-
-    /// Runs the automatic install once the update window has had a frame or two
-    /// to appear.
-    fn drain_auto_install(&mut self, ctx: &egui::Context) {
-        let Some((release, waits)) = self.pending_auto_install.take() else {
-            return;
-        };
-        if waits > 0 {
-            self.pending_auto_install = Some((release, waits - 1));
-            ctx.request_repaint();
-            return;
-        }
-        self.do_install(ctx, &release);
     }
 
     // ---------------- projects ----------------
@@ -778,32 +855,82 @@ impl App {
         if !force && !stale && dir == self.files_dir {
             return;
         }
-        self.files = dir.as_deref().map(projects::scan_folder).unwrap_or_default();
+        self.files = dir
+            .as_deref()
+            .map(projects::scan_folder)
+            .unwrap_or_default();
 
         self.files_dir = dir;
         self.files_at = Some(Instant::now());
     }
 
     fn refresh_checks(&mut self) {
-        if self.checks.map_key != self.opts.map_path {
+        let periodic = self
+            .checks
+            .checked_at
+            .map(|at| at.elapsed().as_secs() >= 2)
+            .unwrap_or(true);
+        let tools_key = format!(
+            "{}|{}{}{}{}",
+            self.opts.tools_dir,
+            self.opts.run_csg as u8,
+            self.opts.run_bsp as u8,
+            self.opts.run_vis as u8,
+            self.opts.run_rad as u8
+        );
+        let plan_key = format!(
+            "{}|{}|{}|{}|{}|{}{}{}{}|{}|{}|{}|{}",
+            self.opts.map_path,
+            self.opts.tools_dir,
+            self.opts.output_dir,
+            self.opts.project_name,
+            self.opts.organize_output as u8,
+            self.opts.run_csg as u8,
+            self.opts.run_bsp as u8,
+            self.opts.run_vis as u8,
+            self.opts.run_rad as u8,
+            self.opts.csg_extra,
+            self.opts.bsp_extra,
+            self.opts.vis_extra,
+            self.opts.rad_extra
+        );
+        if periodic || self.checks.map_key != self.opts.map_path {
             self.checks.map_key = self.opts.map_path.clone();
             self.checks.map_ok = !self.opts.map_path.trim().is_empty()
                 && Path::new(self.opts.map_path.trim()).is_file();
         }
-        if self.checks.tools_key != self.opts.tools_dir {
-            self.checks.tools_key = self.opts.tools_dir.clone();
+        if periodic || self.checks.tools_key != tools_key {
+            self.checks.tools_key = tools_key;
+            let dir = Path::new(self.opts.tools_dir.trim());
             self.checks.tools_ok = !self.opts.tools_dir.trim().is_empty()
-                && has_tools(Path::new(self.opts.tools_dir.trim()));
+                && STAGES.iter().all(|stage| {
+                    let enabled = match stage {
+                        Stage::Csg => self.opts.run_csg,
+                        Stage::Bsp => self.opts.run_bsp,
+                        Stage::Vis => self.opts.run_vis,
+                        Stage::Rad => self.opts.run_rad,
+                    };
+                    !enabled
+                        || dir.join(format!("{}.exe", stage.exe())).is_file()
+                        || dir.join(stage.exe()).is_file()
+                });
             self.checks.tools_stale = self
                 .checks
                 .tools_ok
                 .then(|| stale_against_bundled(Path::new(self.opts.tools_dir.trim())))
                 .flatten();
         }
+        if periodic || self.checks.plan_key != plan_key {
+            self.checks.plan_key = plan_key;
+            self.checks.plan_errors = runner::validation_errors(&self.opts);
+        }
+        if periodic {
+            self.checks.checked_at = Some(Instant::now());
+        }
     }
 
     fn can_run(&self) -> bool {
-        self.job.is_none() && self.checks.map_ok && self.checks.tools_ok
+        self.job.is_none() && !self.installing && self.checks.plan_errors.is_empty()
     }
 
     fn enabled_stages(&self) -> usize {
@@ -837,14 +964,28 @@ impl App {
     }
 
     fn start(&mut self) {
+        self.opts.normalize_paths();
+        let plan = match CompilePlan::new(self.opts.clone()) {
+            Ok(plan) => plan,
+            Err(errors) => {
+                self.status = errors
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "No se puede iniciar la compilación.".to_string());
+                self.log
+                    .extend(errors.into_iter().map(|error| (LineKind::Error, error)));
+                self.last_outcome = Some(RunOutcome::Failed);
+                return;
+            }
+        };
         // Persist before every run, so a crash mid-compile cannot lose settings.
         let _ = save_profile(&self.opts);
         self.log.clear();
         self.done.clear();
         self.total_secs = None;
-        self.last_ok = None;
+        self.last_outcome = None;
         self.run_since = Some(Instant::now());
-        self.job = Some(runner::start(self.opts.clone()));
+        self.job = Some(runner::start(plan));
         // The project should hold what was actually compiled, even if the
         // window never gets closed cleanly afterwards.
         self.sync_active_project();
@@ -1012,8 +1153,10 @@ impl App {
                             // just whatever label happens to be under the
                             // cursor, and the hover highlight makes it obvious
                             // that the thing is clickable at all.
-                            let resp = ui
-                                .allocate_response(egui::vec2(cell_w, cell_h), egui::Sense::click());
+                            let resp = ui.allocate_response(
+                                egui::vec2(cell_w, cell_h),
+                                egui::Sense::click(),
+                            );
                             let hovered = resp.hovered();
                             let fill = if is_selected {
                                 ACCENT_DEEP
@@ -1083,9 +1226,7 @@ impl App {
                                                 |ui| {
                                                     ui.add(
                                                         egui::Label::new(
-                                                            RichText::new(map)
-                                                                .color(MUTED)
-                                                                .small(),
+                                                            RichText::new(map).color(MUTED).small(),
                                                         )
                                                         .truncate()
                                                         .selectable(false),
@@ -1100,13 +1241,11 @@ impl App {
                                                 ui.add(
                                                     egui::Label::new(
                                                         RichText::new(name)
-                                                            .color(
-                                                                if is_selected || is_active {
-                                                                    egui::Color32::WHITE
-                                                                } else {
-                                                                    TEXT
-                                                                },
-                                                            )
+                                                            .color(if is_selected || is_active {
+                                                                egui::Color32::WHITE
+                                                            } else {
+                                                                TEXT
+                                                            })
                                                             .strong(),
                                                     )
                                                     .truncate()
@@ -1128,7 +1267,9 @@ impl App {
                             let _ = resp.on_hover_text(if age.is_empty() {
                                 "Click para elegirlo · doble click para abrirlo".to_string()
                             } else {
-                                format!("Usado {age}. Click para elegirlo, doble click para abrirlo.")
+                                format!(
+                                    "Usado {age}. Click para elegirlo, doble click para abrirlo."
+                                )
                             });
                         }
                     });
@@ -1181,17 +1322,26 @@ impl App {
                     if self.lib.name_taken(&wanted, Some(sel)) {
                         self.status = format!("Ya hay un proyecto llamado '{wanted}'.");
                     } else {
+                        // Sorting invalidates every numeric index, not just the
+                        // one being renamed. Preserve both identities by name
+                        // and resolve them again after the sort.
+                        let active_name = self.active.map(|index| {
+                            if index == sel {
+                                wanted.clone()
+                            } else {
+                                self.lib.projects[index].name.clone()
+                            }
+                        });
                         self.lib.projects[sel].name = wanted.clone();
                         self.lib.projects[sel].opts.project_name = wanted.clone();
                         if self.active == Some(sel) {
                             self.opts.project_name = wanted.clone();
                         }
                         self.lib.sort_by_name();
-                        let moved = self.lib.index_of(&wanted);
-                        if self.active == Some(sel) {
-                            self.active = moved;
-                        }
-                        self.selected = moved;
+                        self.active = active_name
+                            .as_deref()
+                            .and_then(|name| self.lib.index_of(name));
+                        self.selected = self.lib.index_of(&wanted);
                         self.rename_buf = None;
                         self.status = format!("Renombrado a '{wanted}'.");
                         self.save_library();
@@ -1294,7 +1444,6 @@ impl App {
                 .small(),
             );
         });
-
     }
 
     /// What is sitting in the project's folder right now: the compile's output,
@@ -1334,11 +1483,8 @@ impl App {
 
         card(ui, "Carpeta del proyecto", &subtitle, |ui| {
             let path_text = dir.display().to_string();
-            ui.add(
-                egui::Label::new(RichText::new(&path_text).color(MUTED).small())
-                    .truncate(),
-            )
-            .on_hover_text(&path_text);
+            ui.add(egui::Label::new(RichText::new(&path_text).color(MUTED).small()).truncate())
+                .on_hover_text(&path_text);
             ui.add_space(6.0);
 
             let mut do_refresh = false;
@@ -1413,7 +1559,11 @@ impl App {
                     .unwrap_or("")
                     .to_string();
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("Renombrar {old_name}:")).color(TEXT).small());
+                    ui.label(
+                        RichText::new(format!("Renombrar {old_name}:"))
+                            .color(TEXT)
+                            .small(),
+                    );
                     let w = (ui.available_width() - 170.0).max(120.0);
                     let r = ui.add(
                         egui::TextEdit::singleline(buf)
@@ -1442,8 +1592,17 @@ impl App {
             // item that acts on the first click.
             let mut confirmed_delete: Option<PathBuf> = None;
             if let Some(path) = self.file_delete.clone() {
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
-                let is_source = same_file(&path, Path::new(self.opts.map_path.trim()));
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?")
+                    .to_string();
+                let source_map = self
+                    .selected
+                    .and_then(|index| self.lib.projects.get(index))
+                    .map(|project| project.opts.map_path.as_str())
+                    .unwrap_or(self.opts.map_path.as_str());
+                let is_source = same_file(&path, Path::new(source_map.trim()));
                 egui::Frame::none()
                     .fill(ERR.linear_multiply(0.18))
                     .stroke(egui::Stroke::new(1.0_f32, ERR))
@@ -1476,7 +1635,11 @@ impl App {
                 ui.add_space(6.0);
             }
             if let Some(path) = confirmed_delete {
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?")
+                    .to_string();
                 self.status = match std::fs::remove_file(&path) {
                     Ok(()) => format!("{name} borrado."),
                     Err(e) => format!("No pude borrar {name}: {e}"),
@@ -1604,8 +1767,11 @@ impl App {
                     // right-aligned cells of their own so they line up down the
                     // list instead of drifting with the text length.
                     let mid = resp.rect.center().y;
-                    ui.painter()
-                        .circle_filled(egui::pos2(resp.rect.left() + 12.0, mid), 3.5, color);
+                    ui.painter().circle_filled(
+                        egui::pos2(resp.rect.left() + 12.0, mid),
+                        3.5,
+                        color,
+                    );
 
                     let size_w = 66.0;
                     let age_w = 86.0;
@@ -1636,9 +1802,7 @@ impl App {
                                 },
                                 |ui| {
                                     ui.set_min_height(rect.height());
-                                    ui.add(
-                                        egui::Label::new(text).truncate().selectable(false),
-                                    );
+                                    ui.add(egui::Label::new(text).truncate().selectable(false));
                                 },
                             );
                         });
@@ -1655,7 +1819,9 @@ impl App {
                     cell(
                         size_rect,
                         Align::Max,
-                        RichText::new(projects::fmt_size(f.size)).color(MUTED).small(),
+                        RichText::new(projects::fmt_size(f.size))
+                            .color(MUTED)
+                            .small(),
                     );
                     if let Some(t) = f.modified {
                         cell(
@@ -1777,8 +1943,24 @@ impl App {
             self.status = format!("Ya existe {wanted} en esa carpeta.");
             return;
         }
+        let selected_source = self.selected.filter(|index| {
+            self.lib
+                .projects
+                .get(*index)
+                .map(|project| same_file(from, Path::new(project.opts.map_path.trim())))
+                .unwrap_or(false)
+        });
         match std::fs::rename(from, &to) {
             Ok(()) => {
+                if let Some(index) = selected_source {
+                    let new_path = to.display().to_string();
+                    self.lib.projects[index].opts.map_path = new_path.clone();
+                    if self.active == Some(index) {
+                        self.opts.map_path = new_path;
+                    }
+                    self.dirty_since = Some(Instant::now());
+                    self.checks.checked_at = None;
+                }
                 self.status = format!(
                     "{} renombrado a {wanted}.",
                     from.file_name().and_then(|n| n.to_str()).unwrap_or("?")
@@ -1984,7 +2166,8 @@ impl App {
                  Si aun así faltan texturas, se leen las que el mapa usa de verdad y se abre \
                  el índice de cada .wad de tus carpetas para ver cuál las tiene: se cargan \
                  sólo los que aportan algo. Podés tener mil WADs en la carpeta; entran los \
-                 que hacen falta y nada más. Tope de 127, que es el máximo de CSG.\n\n\
+                 que hacen falta y nada más. Tope de 500, dejando margen bajo el límite \
+                 de 512 de este fork.\n\n\
                  La lista resultante se le pasa a CSG como -wadcfgfile, que hace que ignore \
                  la clave del mapa. Tu .map no se modifica y no hace falta carpeta de \
                  salida. Lo que no aparezca se avisa en el log en vez de matar el compilado.",
@@ -2009,44 +2192,50 @@ impl App {
             }
         });
 
-        card(ui, "Preset", "un punto de partida; después ajusta lo que quieras", |ui| {
-            ui.horizontal(|ui| {
-                let n = 3.0;
-                let w = ((ui.available_width() - ui.spacing().item_spacing.x * (n - 1.0))
-                    / n)
-                    .max(90.0);
-                for p in [Preset::Draft, Preset::Recommended, Preset::Release] {
-                    let active = p.is_active(&self.opts);
-                    let btn = egui::Button::new(
-                        RichText::new(p.label())
-                            .color(if active { egui::Color32::WHITE } else { TEXT })
-                            .strong(),
-                    )
-                    .min_size(egui::vec2(w, 30.0))
-                    .fill(if active { ACCENT_DEEP } else { CARD_HI })
-                    .stroke(egui::Stroke::new(
-                        1.0_f32,
-                        if active { ACCENT } else { LINE },
-                    ));
-                    if ui.add(btn).on_hover_text(p.summary()).clicked() {
-                        p.apply(&mut self.opts);
-                        self.status = format!("Preset '{}' aplicado.", p.label());
+        card(
+            ui,
+            "Preset",
+            "un punto de partida; después ajusta lo que quieras",
+            |ui| {
+                ui.horizontal(|ui| {
+                    let n = 3.0;
+                    let w = ((ui.available_width() - ui.spacing().item_spacing.x * (n - 1.0)) / n)
+                        .max(90.0);
+                    for p in [Preset::Draft, Preset::Recommended, Preset::Release] {
+                        let active = p.is_active(&self.opts);
+                        let btn = egui::Button::new(
+                            RichText::new(p.label())
+                                .color(if active { egui::Color32::WHITE } else { TEXT })
+                                .strong(),
+                        )
+                        .min_size(egui::vec2(w, 30.0))
+                        .fill(if active { ACCENT_DEEP } else { CARD_HI })
+                        .stroke(egui::Stroke::new(
+                            1.0_f32,
+                            if active { ACCENT } else { LINE },
+                        ));
+                        if ui.add(btn).on_hover_text(p.summary()).clicked() {
+                            p.apply(&mut self.opts);
+                            self.status = format!("Preset '{}' aplicado.", p.label());
+                        }
                     }
-                }
-            });
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(Preset::Recommended.summary())
-                    .color(MUTED)
-                    .small(),
-            );
-        });
+                });
+                ui.add_space(6.0);
+                let active_summary = [Preset::Draft, Preset::Recommended, Preset::Release]
+                    .into_iter()
+                    .find(|preset| preset.is_active(&self.opts))
+                    .map(Preset::summary)
+                    .unwrap_or(
+                        "Configuración personalizada: no coincide exactamente con ningún preset.",
+                    );
+                ui.label(RichText::new(active_summary).color(MUTED).small());
+            },
+        );
 
         card(ui, "Etapas", "puedes saltar las que ya ejecutaste", |ui| {
             ui.horizontal(|ui| {
                 let n = 4.0;
-                let w = ((ui.available_width() - ui.spacing().item_spacing.x * (n - 1.0))
-                    / n)
+                let w = ((ui.available_width() - ui.spacing().item_spacing.x * (n - 1.0)) / n)
                     .max(70.0);
                 let stages = [
                     (Stage::Csg, &mut self.opts.run_csg),
@@ -2069,6 +2258,14 @@ impl App {
                     }
                 }
             });
+            if self.enabled_stages() == 0 {
+                hint(
+                    ui,
+                    m,
+                    "Activa al menos una etapa. Una ejecución vacía no produce nada.",
+                    ERR,
+                );
+            }
         });
 
         card(ui, "Rendimiento y salida", "", |ui| {
@@ -2130,28 +2327,9 @@ impl App {
             ui.checkbox(&mut self.show_command, "Mostrar");
             if self.show_command {
                 ui.add_space(4.0);
-                let map = if self.opts.map_path.trim().is_empty() {
-                    "<mapa>".to_string()
-                } else {
-                    self.opts.map_path.trim().to_string()
-                };
-                let lines = [
-                    (Stage::Csg, self.opts.run_csg, self.opts.csg_args()),
-                    (Stage::Bsp, self.opts.run_bsp, self.opts.bsp_args()),
-                    (Stage::Vis, self.opts.run_vis, self.opts.vis_args()),
-                    (Stage::Rad, self.opts.run_rad, self.opts.rad_args()),
-                ];
-                let mut text = String::new();
-                for (stage, on, args) in lines {
-                    if !on {
-                        continue;
-                    }
-                    text.push_str(&format!(
-                        "{} {} \"{}\"\n",
-                        stage.exe(),
-                        args.join(" "),
-                        map
-                    ));
+                let mut text = CompilePlan::preview(&self.opts);
+                if text.is_empty() {
+                    text = "(ninguna etapa seleccionada)".to_string();
                 }
                 ui.label(RichText::new(text.trim_end()).monospace().color(MUTED));
                 if ui.button("Copiar").clicked() {
@@ -2400,38 +2578,63 @@ impl App {
                     Some("1024"),
                     |ui| slider_u32(ui, m, &mut self.opts.maxnodesize, 64..=4096, 0.0),
                 );
+                toggle_row(
+                    ui,
+                    m,
+                    "Optimizar atlas de luz",
+                    "Activa -lmoptimize. Reordena las caras para desperdiciar menos espacio \
+                     en las páginas de lightmap. Puede reducir páginas ocupadas sin cambiar \
+                     la geometría ni la calidad de iluminación.",
+                    Some("-lmoptimize"),
+                    &mut self.opts.lmoptimize,
+                );
             },
         );
 
-        card(ui, "Atajos de prueba", "no los uses para un compilado final", |ui| {
-            toggle_row(
-                ui,
-                m,
-                "Solo buscar leaks",
-                "Corta BSP en cuanto termina de buscar leaks. Sirve para saber en segundos \
+        card(
+            ui,
+            "Atajos de prueba",
+            "no los uses para un compilado final",
+            |ui| {
+                toggle_row(
+                    ui,
+                    m,
+                    "Solo buscar leaks",
+                    "Corta BSP en cuanto termina de buscar leaks. Sirve para saber en segundos \
                  si el mapa está sellado, pero no produce un mapa jugable.",
-                None,
-                &mut self.opts.leakonly,
-            );
-            toggle_row(
-                ui,
-                m,
-                "Sin t-junctions",
-                "Saltea el arreglo de t-junctions. Más rápido, pero vas a ver grietas de \
+                    None,
+                    &mut self.opts.leakonly,
+                );
+                toggle_row(
+                    ui,
+                    m,
+                    "Encontrar todos los leaks",
+                    "Activa -allleaks. Si el mapa está abierto, BSP continúa el relevamiento y \
+                 marca todos los agujeros que encuentre en vez de detenerse en el primero. \
+                 Útil para corregir varias fugas en una sola pasada.",
+                    None,
+                    &mut self.opts.allleaks,
+                );
+                toggle_row(
+                    ui,
+                    m,
+                    "Sin t-junctions",
+                    "Saltea el arreglo de t-junctions. Más rápido, pero vas a ver grietas de \
                  luz entre caras. Solo para pruebas.",
-                None,
-                &mut self.opts.notjunc,
-            );
-            toggle_row(
-                ui,
-                m,
-                "Sin clipping hull",
-                "No genera la geometría de colisión. El mapa carga pero el jugador \
+                    None,
+                    &mut self.opts.notjunc,
+                );
+                toggle_row(
+                    ui,
+                    m,
+                    "Sin clipping hull",
+                    "No genera la geometría de colisión. El mapa carga pero el jugador \
                  atraviesa las paredes. Solo para mirar geometría.",
-                None,
-                &mut self.opts.noclip,
-            );
-        });
+                    None,
+                    &mut self.opts.noclip,
+                );
+            },
+        );
 
         self.ui_extra(ui, "BSP");
     }
@@ -2454,15 +2657,9 @@ impl App {
                             .width(m.ctrl_w)
                             .selected_text(self.opts.vis_quality.label())
                             .show_ui(ui, |ui| {
-                                for q in
-                                    [VisQuality::Fast, VisQuality::Normal, VisQuality::Full]
-                                {
-                                    ui.selectable_value(
-                                        &mut self.opts.vis_quality,
-                                        q,
-                                        q.label(),
-                                    )
-                                    .on_hover_text(q.help());
+                                for q in [VisQuality::Fast, VisQuality::Normal, VisQuality::Full] {
+                                    ui.selectable_value(&mut self.opts.vis_quality, q, q.label())
+                                        .on_hover_text(q.help());
                                 }
                             });
                     },
@@ -2628,6 +2825,59 @@ impl App {
         });
 
         card(ui, "Avanzado", "", |ui| {
+            toggle_row(
+                ui,
+                m,
+                "Aceleración GPU",
+                "Activa el backend Vulkan de RAD para el gather directo y las transferencias \
+                 compatibles. Si una fase o entidad no está soportada, RAD informa el motivo \
+                 y vuelve a CPU. En mapas con pocas luces la GPU puede no ser más rápida; \
+                 compara el perfil antes de dejarla fija.",
+                Some("Vulkan"),
+                &mut self.opts.gpu,
+            );
+            if self.opts.gpu {
+                toggle_row(
+                    ui,
+                    m,
+                    "Selección automática",
+                    "RAD mide cada fase antes de abrir Vulkan. Usa CPU en trabajos pequeños, \
+                     donde copiar datos cuesta más que calcularlos, y GPU al superar el umbral.",
+                    Some("recomendado"),
+                    &mut self.opts.gpu_auto,
+                );
+                toggle_row(
+                    ui,
+                    m,
+                    "Gather directo",
+                    "Permite que Vulkan calcule las luces directas compatibles. Entidades o \
+                     modelos no soportados vuelven a CPU sin cambiar el resultado.",
+                    Some("-gpu-gather"),
+                    &mut self.opts.gpu_gather,
+                );
+                toggle_row(
+                    ui,
+                    m,
+                    "Transferencias Sparse",
+                    "Permite que Vulkan calcule los factores entre parches de la matriz Sparse. \
+                     Los rebotes consumen luego esos mismos factores con la ruta de referencia.",
+                    Some("-gpu-transfers"),
+                    &mut self.opts.gpu_transfers,
+                );
+                row(
+                    ui,
+                    m,
+                    "Adaptador GPU",
+                    "Índice del dispositivo Vulkan que RAD debe usar. -1 elige \
+                     automáticamente; usa un número solo si tienes varias GPU y sabes el \
+                     índice que imprime RAD.",
+                    Some("-1 = automático"),
+                    |ui| {
+                        ui.spacing_mut().slider_width = (m.ctrl_w - 78.0).max(90.0);
+                        ui.add(egui::Slider::new(&mut self.opts.gpu_adapter, -1..=15));
+                    },
+                );
+            }
             row(
                 ui,
                 m,
@@ -2640,8 +2890,7 @@ impl App {
                         .width(m.ctrl_w)
                         .selected_text(self.opts.vismatrix.label())
                         .show_ui(ui, |ui| {
-                            for mm in [VisMatrix::Normal, VisMatrix::Sparse, VisMatrix::Off]
-                            {
+                            for mm in [VisMatrix::Normal, VisMatrix::Sparse, VisMatrix::Off] {
                                 ui.selectable_value(&mut self.opts.vismatrix, mm, mm.label())
                                     .on_hover_text(mm.help());
                             }
@@ -2653,17 +2902,13 @@ impl App {
                 m,
                 "Motor pre-25 aniv.",
                 "Baja el umbral de recorte de luz de 255 a 188.\n\n\
-                 QUÉ CAMBIA: el motor anterior a la actualización del 25 aniversario no \
-                 maneja valores de luz por encima de ~188. Si compilas sin esto y alguien \
-                 juega en un cliente antiguo, las zonas más brillantes se ven rotas: \
-                 quemadas o con el color dado vuelta.\n\n\
-                 Al revés el error es mucho menor: un mapa compilado con -pre25 visto en \
-                 el cliente nuevo solo se ve un poco menos brillante en los puntos más \
-                 claros.\n\n\
-                 Como en la práctica casi nadie usa el cliente del 25 aniversario, y el \
-                 error es asimétrico, viene ACTIVADO por defecto. Desactívalo solo si \
-                 sabes que todos tus jugadores están actualizados.",
-                Some("casi siempre sí"),
+                 QUÉ CAMBIA: limita antes las zonas muy brillantes para conservar el \
+                 comportamiento esperado por motores anteriores al aniversario 25. Viene \
+                 activado para mantener el default histórico de ReSDHLT.\n\n\
+                 No todos los clientes y forks renderizan el límite igual. Antes de \
+                 publicar, compara una zona brillante con el cliente y servidor reales de \
+                 tu comunidad; desactívalo si tu objetivo confirmado es el motor nuevo.",
+                Some("compatibilidad"),
                 &mut self.opts.pre25,
             );
             toggle_row(
@@ -2705,13 +2950,17 @@ impl App {
         card(ui, &format!("Parámetros extra para {which}"), "", |ui| {
             ui.add(
                 egui::TextEdit::singleline(field)
-                    .hint_text("se pasan tal cual, separados por espacios")
+                    .hint_text("admite comillas: -lights \"C:\\Mis mapas\\x.rad\"")
                     .desired_width(f32::INFINITY),
             )
             .on_hover_text(
                 "Para flags que no están en la interfaz. Se agregan al final de la línea \
-                 de comandos sin validar.",
+                 de comandos. Las comillas agrupan rutas con espacios; una comilla sin \
+                 cerrar bloquea la compilación y muestra el error.",
             );
+            if let Some(error) = options::parse_extra_args(field).err() {
+                ui.label(RichText::new(error).color(ERR).small());
+            }
         });
     }
 
@@ -2814,9 +3063,7 @@ impl App {
             .show(ui, |ui| {
                 let mut shown = 0usize;
                 for (kind, text) in &self.log {
-                    if self.only_problems
-                        && !matches!(kind, LineKind::Error | LineKind::Warning)
-                    {
+                    if self.only_problems && !matches!(kind, LineKind::Error | LineKind::Warning) {
                         continue;
                     }
                     if !needle.is_empty() && !text.to_ascii_lowercase().contains(&needle) {
@@ -2903,8 +3150,9 @@ impl App {
         let bar = egui::ProgressBar::new(frac)
             .desired_height(6.0)
             .rounding(3.0)
-            .fill(match self.last_ok {
-                Some(false) => ERR,
+            .fill(match self.last_outcome {
+                Some(RunOutcome::Failed) => ERR,
+                Some(RunOutcome::Cancelled) => WARN,
                 _ => ACCENT,
             });
         ui.add(bar);
@@ -2930,7 +3178,9 @@ impl App {
                 );
             } else if ui
                 .add(egui::Button::new(RichText::new("sin proyecto").color(MUTED).small()).small())
-                .on_hover_text("Guarda lo que tienes cargado como proyecto para volver a él después.")
+                .on_hover_text(
+                    "Guarda lo que tienes cargado como proyecto para volver a él después.",
+                )
                 .clicked()
             {
                 self.tab = Tab::Projects;
@@ -2966,10 +3216,18 @@ impl App {
                     }
                     let _ = btn.on_hover_text(if enabled {
                         "Compilar ahora (F5)"
+                    } else if self.enabled_stages() == 0 {
+                        "Activa al menos una etapa."
                     } else if !self.checks.map_ok {
                         "Falta un .map válido."
+                    } else if !self.opts.extra_args_errors().is_empty() {
+                        "Corrige las comillas de los parámetros extra."
                     } else {
-                        "La carpeta de herramientas no tiene sdHLCSG."
+                        self.checks
+                            .plan_errors
+                            .first()
+                            .map(String::as_str)
+                            .unwrap_or("Revisa la configuración de la compilación.")
                     });
                 }
 
@@ -3011,10 +3269,19 @@ impl App {
 
     fn ui_footer(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let color = match self.last_ok {
-                Some(true) => OK,
-                Some(false) => ERR,
-                None => MUTED,
+            let lower = self.status.to_ascii_lowercase();
+            let color = if lower.starts_with("listo") || lower.contains("guardad") {
+                OK
+            } else if lower.contains("cancel") {
+                WARN
+            } else if lower.contains("error")
+                || lower.contains("falló")
+                || lower.contains("no pude")
+                || lower.starts_with("falta")
+            {
+                ERR
+            } else {
+                MUTED
             };
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let mut check_now = false;
@@ -3034,7 +3301,10 @@ impl App {
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(self.update_check.is_none(), egui::Button::new("Buscar ahora"))
+                        .add_enabled(
+                            self.update_check.is_none(),
+                            egui::Button::new("Buscar ahora"),
+                        )
                         .clicked()
                     {
                         check_now = true;
@@ -3042,12 +3312,11 @@ impl App {
                     }
                     let mut auto = self.lib.check_updates;
                     if ui
-                        .checkbox(&mut auto, "Actualizar sola al abrir")
+                        .checkbox(&mut auto, "Buscar actualizaciones al abrir")
                         .on_hover_text(
-                            "Al abrir la app se busca versión nueva y, si la hay, se instala \
-                             y la app se reinicia sola. Con la app ya abierta se vuelve a \
-                             mirar una vez al día, y ahí solo avisa: nunca se actualiza con \
-                             un compilado en curso.",
+                            "Al abrir la app se busca una versión nueva. Si existe, se \
+                             muestra la release y tú decides si instalarla. Nunca se \
+                             actualiza durante un compilado ni sin confirmación.",
                         )
                         .changed()
                     {
@@ -3104,6 +3373,9 @@ impl eframe::App for App {
     /// eframe calls this when the window closes. Preferences are saved here as
     /// well as on every compile, so the button is only a manual extra.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(mut job) = self.job.take() {
+            job.cancel_and_wait();
+        }
         let _ = save_profile(&self.opts);
         self.sync_active_project();
         self.save_library();
@@ -3116,33 +3388,30 @@ impl eframe::App for App {
         self.maybe_check_updates();
         self.drain_update_check();
         self.ui_update_window(ctx);
-        self.drain_auto_install(ctx);
-        self.handle_drops(ctx);
+        self.drain_install(ctx);
+        if self.job.is_none() && !self.installing {
+            self.handle_drops(ctx);
+        }
 
         if (self.opts.ui_scale - self.applied_scale).abs() > 0.001 {
             self.applied_scale = self.opts.ui_scale;
             ctx.set_zoom_factor(self.opts.ui_scale);
         }
 
-        if self.job.is_some() {
+        if self.job.is_some() || self.installing {
             // Keep painting while output streams in and the timers run.
             ctx.request_repaint_after(std::time::Duration::from_millis(80));
-        } else if self.update_check.is_some() || self.lib.check_updates {
-            // Idle, egui sleeps until something happens, and nothing ever
-            // would: the reply from the check thread is not an input event, and
-            // an app left open for days would never reach its daily check.
-            ctx.request_repaint_after(std::time::Duration::from_secs(30));
+        } else {
+            // Files can disappear or tools can be replaced outside the app.
+            // Wake often enough for the cached preflight to notice without
+            // stat'ing every file on every frame.
+            ctx.request_repaint_after(std::time::Duration::from_secs(2));
         }
 
         // Keyboard: F5 compiles, Esc cancels.
-        ctx.input(|i| {
-            if i.key_pressed(egui::Key::F5) && self.can_run() {
-                Some(())
-            } else {
-                None
-            }
-        })
-        .map(|_| self.start());
+        if ctx.input(|input| input.key_pressed(egui::Key::F5)) && self.can_run() {
+            self.start();
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if let Some(j) = &self.job {
                 j.cancel();
@@ -3189,6 +3458,7 @@ impl eframe::App for App {
         // Its own side panel takes that space instead, so the folder explorer
         // is a tall column that shows everything at once.
         let show_log = self.tab != Tab::Projects;
+        let editing_enabled = self.job.is_none() && !self.installing;
         if self.tab == Tab::Projects {
             let w = (ctx.screen_rect().width() * 0.34).clamp(340.0, 560.0);
             egui::SidePanel::right("project_files_panel")
@@ -3201,7 +3471,9 @@ impl eframe::App for App {
                 .default_width(w)
                 .min_width(300.0)
                 .max_width((ctx.screen_rect().width() * 0.5).max(360.0))
-                .show(ctx, |ui| self.ui_project_files(ui));
+                .show(ctx, |ui| {
+                    ui.add_enabled_ui(editing_enabled, |ui| self.ui_project_files(ui));
+                });
         }
         if show_log && wide {
             let w = (ctx.screen_rect().width() * 0.36).clamp(300.0, 560.0);
@@ -3242,16 +3514,18 @@ impl eframe::App for App {
                             CONTENT_MAX_W
                         };
                         centered_column_w(ui, max_w, |ui| {
-                            let m = Metrics::for_width(ui.available_width() - 28.0);
-                            match self.tab {
-                                Tab::Projects => self.ui_projects(ui, &m),
-                                Tab::Compile => self.ui_compile(ui, &m),
-                                Tab::Csg => self.ui_csg(ui, &m),
-                                Tab::Bsp => self.ui_bsp(ui, &m),
-                                Tab::Vis => self.ui_vis(ui, &m),
-                                Tab::Rad => self.ui_rad(ui, &m),
-                                Tab::Advice => self.ui_advice(ui),
-                            }
+                            ui.add_enabled_ui(editing_enabled, |ui| {
+                                let m = Metrics::for_width(ui.available_width() - 28.0);
+                                match self.tab {
+                                    Tab::Projects => self.ui_projects(ui, &m),
+                                    Tab::Compile => self.ui_compile(ui, &m),
+                                    Tab::Csg => self.ui_csg(ui, &m),
+                                    Tab::Bsp => self.ui_bsp(ui, &m),
+                                    Tab::Vis => self.ui_vis(ui, &m),
+                                    Tab::Rad => self.ui_rad(ui, &m),
+                                    Tab::Advice => self.ui_advice(ui),
+                                }
+                            });
                         });
                     });
             });
@@ -3273,6 +3547,20 @@ fn window_icon() -> egui::IconData {
 }
 
 fn main() -> eframe::Result<()> {
+    let instance_path = state_path("resdhlt-gui.lock")
+        .unwrap_or_else(|| std::env::temp_dir().join("resdhlt-gui.lock"));
+    let _instance_lock = match acquire_app_instance_lock(&instance_path) {
+        Ok(lock) => lock,
+        Err(error) => {
+            rfd::MessageDialog::new()
+                .set_title("ReSDHLT ya está abierto")
+                .set_description(&error)
+                .set_level(rfd::MessageLevel::Warning)
+                .show();
+            return Ok(());
+        }
+    };
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])
@@ -3300,6 +3588,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_second_gui_instance_cannot_take_the_state_lock() {
+        let root = std::env::temp_dir().join(format!("resdhlt-app-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("gui.lock");
+        let first = acquire_app_instance_lock(&path).unwrap();
+        assert!(acquire_app_instance_lock(&path).is_err());
+        drop(first);
+        assert!(acquire_app_instance_lock(&path).is_ok());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn copying_the_bundled_tools_overwrites_the_old_ones() {
         let work = std::env::temp_dir().join("resdhlt-tools-copy-test");
         let _ = std::fs::remove_dir_all(&work);
@@ -3318,9 +3618,18 @@ mod tests {
         let copied = copy_bundled_tools(&from, &to).unwrap();
 
         assert_eq!(copied, 2, "solo los archivos, no la subcarpeta");
-        assert_eq!(std::fs::read_to_string(to.join("sdHLCSG.exe")).unwrap(), "nuevo");
-        assert_eq!(std::fs::read_to_string(to.join("sdhlt.fgd")).unwrap(), "nuevo");
-        assert_eq!(std::fs::read_to_string(to.join("mis_wads.cfg")).unwrap(), "mío");
+        assert_eq!(
+            std::fs::read_to_string(to.join("sdHLCSG.exe")).unwrap(),
+            "nuevo"
+        );
+        assert_eq!(
+            std::fs::read_to_string(to.join("sdhlt.fgd")).unwrap(),
+            "nuevo"
+        );
+        assert_eq!(
+            std::fs::read_to_string(to.join("mis_wads.cfg")).unwrap(),
+            "mío"
+        );
 
         let _ = std::fs::remove_dir_all(&work);
     }
@@ -3334,12 +3643,3 @@ mod tests {
         }
     }
 }
-
-
-
-
-
-
-
-
-

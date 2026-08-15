@@ -9,7 +9,7 @@
 //     For example, the command line
 //            tools\hlrad.exe "My Maps\mymap" -extra -texchop 64
 //       is converted into 5 parameters:
-//            "<hlrad>"        (the first parameter will always be replaced by the program name)
+//            "<sdHLRAD>"      (the first parameter will always be replaced by the program name)
 //            "My Maps\mymap"
 //            "-extra"
 //            "-texchop"
@@ -38,7 +38,7 @@
 // 
 // HLCSG:
 //   -onlyents
-//   -wadautodetect
+//   -nowadautodetect
 //   -nowadtextures
 //   -wadinclude #
 //   -wadcfgfile #
@@ -74,36 +74,30 @@
 
 
 
-#ifndef <ripent>              // CSG\BSP\VIS\RAD
-  #ifndef -high
-    #ifndef -low
-      #define -low
-    #endif
-  #endif
+#ifndef <sdRIPENT>            // CSG\BSP\VIS\RAD
+  // Normal priority is the default. Use -low or -high explicitly when wanted.
   #ifndef -console 0
   //#define -estimate
   #endif
 #endif
 
-#ifdef <hlcsg>                // CSG
-  #ifndef -wadautodetect
-    #define -wadautodetect
-  #endif
+#ifdef <sdHLCSG>              // CSG
+  // WAD auto-detection is already enabled by default; -nowadautodetect disables it.
 #endif
 
-#ifdef <hlbsp>                // BSP
+#ifdef <sdHLBSP>              // BSP
   #ifndef -chart
     #define -chart
   #endif
 #endif
 
-#ifdef <hlvis>                // VIS
+#ifdef <sdHLVIS>              // VIS
   #ifndef -full
   //#define -full
   #endif
 #endif
 
-#ifdef <hlrad>                // RAD
+#ifdef <sdHLRAD>              // RAD
   #ifdef -sparse
     #undef -sparse
     #define -vismatrix sparse
@@ -114,6 +108,6 @@
   #endif
 #endif
 
-#ifdef <ripent>               // RIPENT
+#ifdef <sdRIPENT>             // RIPENT
 #endif
 

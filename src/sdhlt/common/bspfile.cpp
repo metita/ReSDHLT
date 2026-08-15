@@ -806,7 +806,7 @@ void DoAllocBlock (lightmapblock_t *blocks, int w, int h)
 	// code from Quake
 	int i, j;
 	int best, best2;
-	int x, y;
+	int x = 0, y = 0;
 	if (w < 1 || h < 1)
 	{
 		Error ("DoAllocBlock: internal error.");
@@ -1769,37 +1769,37 @@ void            UnparseEntities()
 	extern bool g_nolightopt;
 	if (!g_nolightopt)
 	{
-		int i, j;
+		int light_i, light_j;
 		int count = 0;
 		bool *lightneedcompare = (bool *)malloc (g_numentities * sizeof (bool));
 		hlassume (lightneedcompare != NULL, assume_NoMemory);
 		memset (lightneedcompare, 0, g_numentities * sizeof(bool));
-		for (i = g_numentities - 1; i > -1; i--)
+		for (light_i = g_numentities - 1; light_i > -1; light_i--)
 		{
-			entity_t *ent = &g_entities[i];
+			entity_t *ent = &g_entities[light_i];
 			const char *classname = ValueForKey (ent, "classname");
 			const char *targetname = ValueForKey (ent, "targetname");
 			int style = IntForKey (ent, "style");
 			if (!targetname[0] || strcmp (classname, "light") && strcmp (classname, "light_spot") && strcmp (classname, "light_environment"))
 				continue;
-			for (j = i + 1; j < g_numentities; j++)
+			for (light_j = light_i + 1; light_j < g_numentities; light_j++)
 			{
-				if (!lightneedcompare[j])
+				if (!lightneedcompare[light_j])
 					continue;
-				entity_t *ent2 = &g_entities[j];
+				entity_t *ent2 = &g_entities[light_j];
 				const char *targetname2 = ValueForKey (ent2, "targetname");
 				int style2 = IntForKey (ent2, "style");
 				if (style == style2 && !strcmp (targetname, targetname2))
 					break;
 			}
-			if (j < g_numentities)
+			if (light_j < g_numentities)
 			{
 				DeleteKey (ent, "targetname");
 				count++;
 			}
 			else
 			{
-				lightneedcompare[i] = true;
+				lightneedcompare[light_i] = true;
 			}
 		}
 		if (count > 0)
