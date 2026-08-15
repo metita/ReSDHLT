@@ -154,12 +154,12 @@ char* FlipSlashes(char* string)
 	char* ptr = string;
 	if(SYSTEM_SLASH_CHAR == '\\')
 	{
-		while(ptr = strchr(ptr,'/'))
+		while((ptr = strchr(ptr,'/')) != nullptr)
 		{ *ptr = SYSTEM_SLASH_CHAR; }
 	}
 	else
 	{
-		while(ptr = strchr(ptr,'\\'))
+		while((ptr = strchr(ptr,'\\')) != nullptr)
 		{ *ptr = SYSTEM_SLASH_CHAR; }
 	}
 	return string;
@@ -209,7 +209,7 @@ void ExtractFile(const char* const path, char* dest)
 	int extension_pos, directory_pos;
 	getFilePositions(path,&extension_pos,&directory_pos);
 
-	int length = strlen(path);
+	int length = (int)strlen(path);
 
 	length -= directory_pos + 1;
 
@@ -221,7 +221,7 @@ void ExtractFileBase(const char* const path, char* dest)
 {
 	int extension_pos, directory_pos;
 	getFilePositions(path,&extension_pos,&directory_pos);
-	int length = extension_pos == -1 ? strlen(path) : extension_pos;
+	int length = extension_pos == -1 ? (int)strlen(path) : extension_pos;
 
 	length -= directory_pos + 1;
 
@@ -235,7 +235,7 @@ void ExtractFileExtension(const char* const path, char* dest)
 	getFilePositions(path,&extension_pos,&directory_pos);
 	if(extension_pos != -1)
 	{
-		int length = strlen(path) - extension_pos;
+		int length = (int)strlen(path) - extension_pos;
 	    memcpy(dest,path+extension_pos,length); //include extension '.'
 	    dest[length] = 0;
 	}

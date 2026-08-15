@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Strike 1.6.
 
 ### Changed
+- Build hygiene: cleaned the first `/W4` warning tranche in the shared file,
+  logging, BSP and CSG paths (assignment-in-condition, signed/unsigned loop
+  bounds, shadowed locals and proven initialization cases). The opt-in
+  `SDHLT_WARNINGS_AS_ERRORS=ON` build remains intentionally staged: legacy RAD,
+  VIS and RIPENT warnings still need their own parity-reviewed pass.
 - RAD/Vulkan: immutable gather and form-factor scene buffers now use host-visible
   staging plus device-local storage. Sparse form-factor dispatches have two
   independent command-buffer/fence slots, so the next pair batch is submitted

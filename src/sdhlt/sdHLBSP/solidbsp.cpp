@@ -70,9 +70,6 @@ static int      FaceSide(face_t* in, const dplane_t* const split
     // axial planes are fast
     if (split->type <= last_axial)
     {
-        vec_t           splitGtEp = split->dist + ON_EPSILON;   // Invariant moved out of loop
-        vec_t           splitLtEp = split->dist - ON_EPSILON;   // Invariant moved out of loop
-
         for (i = 0, p = in->pts[0] + split->type; i < in->numpoints; i++, p += 3)
         {
 			dot = *p - split->dist;
@@ -157,7 +154,7 @@ surfacetree_t;
 
 void BuildSurfaceTree_r (surfacetree_t *tree, surfacetreenode_t *node)
 {
-	node->size = node->leaffaces->size ();
+		node->size = (int)node->leaffaces->size ();
 	node->size_discardable = 0;
 	if (node->size == 0)
 	{
@@ -396,7 +393,7 @@ static surface_t* ChooseMidPlaneFromList(surface_t* surfaces, const vec3_t mins,
 										 , int detaillevel
 										 )
 {
-    int             j, l;
+    int             l;
     surface_t*      p;
     surface_t*      bestsurface;
     vec_t           bestvalue;
@@ -517,8 +514,9 @@ static surface_t* ChoosePlaneFromList(surface_t* surfaces, const vec3_t mins, co
 									  , int detaillevel
 									  )
 {
+	(void)mins;
+	(void)maxs;
 	surface_t*      p;
-	surface_t*      p2;
 	surface_t*      bestsurface;
 	vec_t           bestvalue;
 	vec_t           value;
@@ -1156,7 +1154,7 @@ static void     LinkLeafFaces(surface_t* planelist, node_t* leafnode)
 {
     face_t*         f;
     surface_t*      surf;
-    int             rank, r;
+    int             rank, r = -1;
 
     rank = -1;
     for (surf = planelist; surf; surf = surf->next)
@@ -1480,7 +1478,7 @@ static bool     CalcNodeBounds(node_t* node
         }
         next_portal = p->next[side];
 
-        for (i = 0; i < p->winding->m_NumPoints; i++)
+        for (i = 0; i < (int)p->winding->m_NumPoints; i++)
         {
             for (j = 0; j < 3; j++)
             {

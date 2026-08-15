@@ -212,7 +212,7 @@ static void     WritePortalFile_r(const node_t* const node)
                     fprintf(pf, "%u %i %i ", w->m_NumPoints, p->nodes[0]->visleafnum, p->nodes[1]->visleafnum);
                 }
 
-                for (i = 0; i < w->m_NumPoints; i++)
+                for (i = 0; i < (int)w->m_NumPoints; i++)
                 {
                     fprintf(pf, "(%f %f %f) ", w->m_Points[i][0], w->m_Points[i][1], w->m_Points[i][2]);
                 }
@@ -226,7 +226,7 @@ static void     WritePortalFile_r(const node_t* const node)
 					VectorMA (center, -0.5, p->plane.normal, center2);
 					fprintf (pf_view, "%5.2f %5.2f %5.2f\n", from[0], from[1], from[2]);
 					fprintf (pf_view, "%5.2f %5.2f %5.2f\n", center1[0], center1[1], center1[2]);
-					for (i = 0; i < w->m_NumPoints; i++)
+					for (i = 0; i < (int)w->m_NumPoints; i++)
 					{
 						vec_t *p1, *p2;
 						p1 = w->m_Points[i];

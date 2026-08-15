@@ -1262,8 +1262,8 @@ void CollectBrinks_r (bclipnode_t *node, int &numbrinks, bbrink_t **brinks)
 						brinks[numbrinks]->edge = ei->e;
 						for (int i = 0; i < brinks[numbrinks]->numnodes; i++)
 						{
-							bbrinknode_t *node = &(*brinks[numbrinks]->nodes)[i];
-							if (node->isleaf && !node->clipnode->isleaf)
+							bbrinknode_t *brink_node = &(*brinks[numbrinks]->nodes)[i];
+							if (brink_node->isleaf && !brink_node->clipnode->isleaf)
 							{
 								PrintOnce ("CollectBrinks_r: internal error: not leaf");
 								hlassume (false, assume_first);
