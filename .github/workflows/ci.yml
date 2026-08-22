@@ -2,9 +2,6 @@
 # See: https://github.com/actions/starter-workflows/blob/main/ci/cmake-single-platform.yml
 name: build
 
-env:
-  SCCACHE_GHA_ENABLED: "true"
-
 on:
   push:
   pull_request:
@@ -12,16 +9,9 @@ on:
 jobs:
   gui:
     runs-on: windows-latest
-    env:
-      RUSTC_WRAPPER: sccache
 
     steps:
     - uses: actions/checkout@v4
-
-    - name: Enable compiler cache
-      uses: mozilla-actions/sccache-action@v0.0.11
-      with:
-        version: "v0.16.0"
 
     - name: Install Rust quality components
       run: rustup component add rustfmt clippy
@@ -73,12 +63,6 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Enable compiler cache
-      if: runner.os == 'Linux'
-      uses: mozilla-actions/sccache-action@v0.0.11
-      with:
-        version: "v0.16.0"
-
     - name: Set reusable strings
       # Turn repeated input strings (such as the build output directory) into step outputs. These step outputs can be used throughout the workflow file.
       id: strings
@@ -120,10 +104,4 @@ jobs:
     - name: Archiving
       # Default Build Artifact zipper does not retain file permission.
       run: 7z a ReSDHLT-${{ matrix.os }}-${{ matrix.c_compiler }}.zip package/ReSDHLT
-
-    - name: Upload a Build Artifact
-      uses: actions/upload-artifact@v4.3.1
-      with:
-        name: ReSDHLT-${{ matrix.os }}-${{ matrix.c_compiler }}
-        path: ReSDHLT-${{ matrix.os }}-${{ matrix.c_compiler }}.zip
           

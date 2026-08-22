@@ -6,10 +6,6 @@
 # change nothing for users: a release only exists when a tag says so.
 name: release
 
-env:
-  SCCACHE_GHA_ENABLED: "true"
-  RUSTC_WRAPPER: "sccache"
-
 on:
   push:
     tags:
@@ -30,11 +26,6 @@ jobs:
         with:
           arch: x64
 
-      - name: Enable compiler cache
-        uses: mozilla-actions/sccache-action@v0.0.11
-        with:
-          version: "v0.16.0"
-
       - name: Check that the tag matches the GUI version
         shell: pwsh
         run: |
@@ -49,15 +40,6 @@ jobs:
           }
 
       - uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            gui/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('gui/Cargo.lock') }}
 
       - name: Build and test portable and AVX2 tools
         shell: pwsh
