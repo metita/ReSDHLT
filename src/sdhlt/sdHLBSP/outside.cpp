@@ -110,6 +110,41 @@ static bool     g_leak_hashole = false;
 static std::vector< leaksite_t > g_leaksites;
 static std::vector< node_t * > g_leakfrontier;
 
+// A portal narrower than ON_EPSILON is a slit between two brushes that the editor
+// meant to touch (one side at 2079.98, the other at 2080). Node portals are cut
+// finer than ON_EPSILON (see SplitNodePortals), which makes such slits real portals;
+// the fills below must still treat them as closed, as they did when the cut was
+// coarse enough to never produce them, or a map that always compiled would leak.
+static vec_t    PortalWidth (const portal_t *p)
+{
+	const Winding *w = p->winding;
+	vec_t narrowest = 1e30;
+	for (unsigned int i = 0; i < w->m_NumPoints; i++)
+	{
+		vec3_t edge, across;
+		VectorSubtract (w->m_Points[(i + 1) % w->m_NumPoints], w->m_Points[i], edge);
+		if (VectorNormalize (edge) < NORMAL_EPSILON)
+		{
+			continue;
+		}
+		CrossProduct (p->plane.normal, edge, across);
+		vec_t widest = 0;
+		for (unsigned int j = 0; j < w->m_NumPoints; j++)
+		{
+			vec3_t d;
+			VectorSubtract (w->m_Points[j], w->m_Points[i], d);
+			widest = qmax (widest, (vec_t)fabs (DotProduct (d, across)));
+		}
+		narrowest = qmin (narrowest, widest);
+	}
+	return narrowest < 1e29? narrowest: 0; // no usable edge: a degenerate speck
+}
+
+static bool     IsSlitPortal (const portal_t *p)
+{
+	return PortalWidth (p) < ON_EPSILON;
+}
+
 static void     WindingCenter (const portal_t *p, trailpoint_t &out)
 {
 	p->winding->getCenter (out.p);
@@ -148,7 +183,10 @@ static void     MarkOutsideLeafs_r (node_t *l)
 	for (p = l->portals; p;)
 	{
 		int s = (p->nodes[0] == l);
-		MarkOutsideLeafs_r (p->nodes[s]);
+		if (!IsSlitPortal (p))
+		{
+			MarkOutsideLeafs_r (p->nodes[s]);
+		}
 		p = p->next[!s];
 	}
 }
@@ -306,6 +344,11 @@ static bool     BuildShortestLeakTrail (node_t *occupied, const vec3_t startpos)
 		{
 			int side = (p->nodes[0] == l);
 			node_t *nb = p->nodes[side];
+			if (IsSlitPortal (p))
+			{
+				p = p->next[!side];
+				continue;
+			}
 			trailpoint_t cp;
 			WindingCenter (p, cp);
 			vec3_t seg;
@@ -538,7 +581,7 @@ static bool     RecursiveFillOutside(node_t* l, const bool fill)
     {
         s = (p->nodes[0] == l);
 
-        if (RecursiveFillOutside(p->nodes[s], fill))
+        if (!IsSlitPortal(p) && RecursiveFillOutside(p->nodes[s], fill))
         {                                                  // leaked, so stop filling
             return true;
         }
@@ -1127,7 +1170,10 @@ void			MarkOccupied_r (node_t* node)
 		for (p = node->portals; p; p = p->next[!s])
 		{
 			s = (p->nodes[0] == node);
-			MarkOccupied_r (p->nodes[s]);
+			if (!IsSlitPortal (p))
+			{
+				MarkOccupied_r (p->nodes[s]);
+			}
 		}
 	}
 }
