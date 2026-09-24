@@ -505,7 +505,7 @@ fn wad_textures(path: &Path) -> Option<HashSet<String>> {
     f.read_exact(&mut dir).ok()?;
 
     let mut out = HashSet::with_capacity(count);
-    for entry in dir.chunks_exact(32) {
+    for entry in dir.as_chunks::<32>().0 {
         let raw = &entry[16..32];
         let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
         if let Ok(name) = std::str::from_utf8(&raw[..end]) {
