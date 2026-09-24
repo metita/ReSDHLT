@@ -1,6 +1,8 @@
 #include "vis.h"
 #include <algorithm>
+#include <cfloat>
 #include <climits>
+#include <cmath>
 #include <condition_variable>
 #include <mutex>
 #include <set>
@@ -421,6 +423,28 @@ inline static void AddPlane(pstack_t* const stack, const plane_t* const split)
 #endif
 
 // =====================================================================================
+//  MinSeparatorLength2
+//      The smallest float x with sqrt(x) >= ON_EPSILON. sqrt is correctly rounded and
+//      so monotonic, which makes "x < this" exactly "sqrt(x) < ON_EPSILON".
+// =====================================================================================
+static float    MinSeparatorLength2()
+{
+    float           x = (float)(ON_EPSILON * ON_EPSILON);
+
+    while (sqrt((double)x) < ON_EPSILON)
+    {
+        x = nextafterf(x, FLT_MAX);
+    }
+    while (sqrt((double)nextafterf(x, 0.0f)) >= ON_EPSILON)
+    {
+        x = nextafterf(x, 0.0f);
+    }
+    return x;
+}
+
+static const float g_minseparatorlength2 = MinSeparatorLength2();
+
+// =====================================================================================
 //  SeparatorVerdict
 //      Decides a ClipToSeperators candidate without normalizing its plane.
 //
@@ -438,11 +462,13 @@ inline static void AddPlane(pstack_t* const stack, const plane_t* const split)
 static inline int SeparatorVerdict(
     const double (*src)[3], const int ns, const int i, const int l,
     const double (*pas)[3], const int np, const int j,
-    const vec3_t n, const double length, const double slack, bool* const fliptest)
+    const vec3_t n, const double length2, const double slack, bool* const fliptest)
 {
+    // Compared squared so no sqrt is needed: |e| > c * length <=> e^2 > c^2 * length2.
+    // The rounding this adds is ~1e-15 relative, far inside the factor 2 in slack.
     const double    nx = n[0], ny = n[1], nz = n[2];
-    const double    clear = (ON_EPSILON + slack) * length; // |e| beyond this: |d| > ON_EPSILON
-    const double    on = (ON_EPSILON - slack) * length;    // |e| below this: |d| < ON_EPSILON
+    const double    clear2 = (ON_EPSILON + slack) * (ON_EPSILON + slack) * length2; // beyond: |d| > ON_EPSILON
+    const double    on2 = slack < ON_EPSILON ? (ON_EPSILON - slack) * (ON_EPSILON - slack) * length2 : -1; // below: |d| < ON_EPSILON
     const double    base = pas[j][0] * nx + pas[j][1] * ny + pas[j][2] * nz;
     int             k;
 
@@ -454,17 +480,13 @@ static inline int SeparatorVerdict(
             continue;
         }
         const double e = src[k][0] * nx + src[k][1] * ny + src[k][2] * nz - base;
-        if (e < -clear)
+        const double e2 = e * e;
+        if (e2 > clear2)
         {
-            *fliptest = false;
+            *fliptest = e > 0;
             break;
         }
-        if (e > clear)
-        {
-            *fliptest = true;
-            break;
-        }
-        if (!(fabs(e) < on))
+        if (!(e2 < on2))
         {
             return 0;
         }
@@ -485,15 +507,16 @@ static inline int SeparatorVerdict(
             continue;
         }
         const double e = sign * (pas[k][0] * nx + pas[k][1] * ny + pas[k][2] * nz - base);
-        if (e < -clear)
+        const double e2 = e * e;
+        if (e2 > clear2)
         {
-            return -1;                                     // points on negative side
-        }
-        if (e > clear)
-        {
+            if (e < 0)
+            {
+                return -1;                                 // points on negative side
+            }
             front++;
         }
-        else if (!(fabs(e) < on))
+        else if (!(e2 < on2))
         {
             unsure = true;                                 // could still be on the negative side
         }
@@ -575,19 +598,21 @@ inline static winding_t* ClipToSeperators(
             VectorSubtract(pass->points[j], source->points[i], v2);
             CrossProduct(v1, v2, plane.normal);
 
-            // What VectorNormalize computes, split so the divides can be skipped.
-            const double length = sqrt((double)DotProduct(plane.normal, plane.normal));
-            if (length < ON_EPSILON)
+            // VectorNormalize split up so the sqrt and the divides are only paid
+            // for candidates that get past SeparatorVerdict.
+            const vec_t length2 = DotProduct(plane.normal, plane.normal);
+            if (length2 < g_minseparatorlength2)
             {
-                continue;
+                continue;                                  // sqrt(length2) < ON_EPSILON
             }
             const int verdict = filter
-                ? SeparatorVerdict(srcd, numpoints, i, l, pasd, pass->numpoints, j, plane.normal, length, slack, &fliptest)
+                ? SeparatorVerdict(srcd, numpoints, i, l, pasd, pass->numpoints, j, plane.normal, length2, slack, &fliptest)
                 : 0;
             if (verdict < 0)
             {
                 continue;
             }
+            const double length = sqrt((double)length2);
             plane.normal[0] /= length;
             plane.normal[1] /= length;
             plane.normal[2] /= length;
