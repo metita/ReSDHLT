@@ -570,8 +570,12 @@ static void FixNonPlanarBrushes()
 			continue;
 		}
 
-		// the sides move to the end of the array; the old slots are left unused
+		// The new sides go to the end of the array. The old ones stay for the clip
+		// hulls: players collide with the brush as before, and the extra sides of a
+		// triangulated face would add clipnodes a map near MAX_MAP_CLIPNODES lacks.
 		hlassume(g_numbrushsides + (int)newsides.size() <= MAX_MAP_SIDES, assume_MAX_MAP_SIDES);
+		b->clipfirstside = b->firstside;
+		b->clipnumsides = b->numsides;
 		b->firstside = g_numbrushsides;
 		b->numsides = (int)newsides.size();
 		for (size_t x = 0; x < newsides.size(); x++)
@@ -605,6 +609,8 @@ static void ParseBrush(entity_t* mapent)
     b = &g_mapbrushes[g_nummapbrushes]; //Get next brush slot
     g_nummapbrushes++; //Increment the global brush counter, we are adding a new brush
     b->firstside = g_numbrushsides; //Set the first side of the brush to current global side count20
+    b->clipfirstside = 0;
+    b->clipnumsides = 0;
 	b->originalentitynum = g_numparsedentities; //Record original entity number brush belongs to
 	b->originalbrushnum = g_numparsedbrushes; //Record original brush number
     b->entitynum = g_numentities - 1; //Set brush entity number to last created entity

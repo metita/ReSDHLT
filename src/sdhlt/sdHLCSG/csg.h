@@ -163,6 +163,10 @@ typedef struct brush_s
 
     int             firstside;
     int             numsides;
+    // sides the clip hulls expand from when they differ from the drawn ones
+    // (FixNonPlanarBrushes); clipnumsides 0 means the same sides
+    int             clipfirstside;
+    int             clipnumsides;
 
     unsigned int    noclip; // !!!FIXME: this should be a flag bitfield so we can use it for other stuff (ie. is this a detail brush...)
 	unsigned int	cliphull;

@@ -1302,6 +1302,19 @@ void CreateBrush(const int brushnum) //--vluzacn
 		return;
 	}
 
+	// clip hulls of a rebuilt non-planar brush expand from its original sides
+	brushhull_t drawnhull0 = b->hulls[0];
+	const int drawnfirstside = b->firstside;
+	const int drawnnumsides = b->numsides;
+	if (b->clipnumsides)
+	{
+		b->firstside = b->clipfirstside;
+		b->numsides = b->clipnumsides;
+		b->hulls[0].faces = NULL;
+		MakeBrushPlanes(b);
+		MakeHullFaces(b, &b->hulls[0]);
+	}
+
 	if (b->cliphull)
 	{
 		for (h = 1; h < NUM_HULLS; h++)
@@ -1313,17 +1326,26 @@ void CreateBrush(const int brushnum) //--vluzacn
 			}
 		}
         b->contents = CONTENTS_SOLID;
-		b->hulls[0].faces = NULL;
+		drawnhull0.faces = NULL;
 	}
-	else
+	else if (!b->noclip)
 	{
-		if (b->noclip)
-			return;
 		for (h = 1; h < NUM_HULLS; h++)
 		{
 			ExpandBrush(b, h);
 			MakeHullFaces(b, &b->hulls[h]);
 		}
+	}
+
+	if (b->clipnumsides)
+	{
+		b->hulls[0] = drawnhull0;
+		b->firstside = drawnfirstside;
+		b->numsides = drawnnumsides;
+	}
+	else if (b->cliphull)
+	{
+		b->hulls[0].faces = NULL;
 	}
 }
 hullbrush_t *CreateHullBrush (const brush_t *b)

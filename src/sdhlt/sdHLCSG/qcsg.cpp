@@ -1361,6 +1361,8 @@ void WriteBSP(const char* const name)
     newbrush->brushnum = g_nummapbrushes - mapent->firstbrush;
     newbrush->firstside = g_numbrushsides;
     newbrush->numsides = b->numsides;
+    newbrush->clipfirstside = b->clipfirstside;
+    newbrush->clipnumsides = b->clipnumsides;
     newbrush->contents = CONTENTS_CLIP;
     newbrush->noclip = 0;
 
