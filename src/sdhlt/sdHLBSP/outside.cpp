@@ -612,6 +612,17 @@ static node_t*  ClearOutFaces_r(node_t* node)
             }
         }
 
+        // A node whose portal was clipped away still owns faces that open leafs list
+        // in their marksurfaces. That happens when its plane lies within ON_EPSILON of
+        // an ancestor's plane over the whole node, typically two neighbouring faces
+        // left almost coplanar by vertex manipulation. Collapsing it dropped those
+        // faces from the tree, and the player saw through the wall.
+        if (!node->valid && node->faces)
+        {
+            c_falsenodes++;
+            return node;
+        }
+
         if (!node->valid)
         {
 			// Here leaks memory. --vluzacn

@@ -291,6 +291,14 @@ degenerate faces and surface area:
 python3 scripts/bspcheck.py yourmap.bsp
 ```
 
+`scripts/holecheck.py` casts rays through the compiled world and reports spots
+where the player would see through a wall. With `--map` it aims at every
+visible brush face of the source map:
+
+```sh
+python3 scripts/holecheck.py yourmap.bsp --map yourmap.map
+```
+
 ## Credits
 
 This fork exists because other people did the hard part first.

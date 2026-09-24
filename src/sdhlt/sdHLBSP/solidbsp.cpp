@@ -1150,6 +1150,63 @@ const char*     ContentsToString(int contents)
         return "UNKNOWN";
     }
 }
+static vec_t    FaceArea(const face_t* const f)
+{
+    vec3_t          total;
+    vec3_t          d1, d2, cross;
+
+    VectorClear(total);
+    for (int i = 2; i < f->numpoints; i++)
+    {
+        VectorSubtract(f->pts[i - 1], f->pts[0], d1);
+        VectorSubtract(f->pts[i], f->pts[0], d2);
+        CrossProduct(d1, d2, cross);
+        VectorAdd(total, cross, total);
+    }
+    return 0.5 * VectorLength(total);
+}
+
+// =====================================================================================
+//  ResolveAmbiguousRank
+//      A leaf whose bounding faces disagree on its contents used to take the highest
+//      rank, so SOLID always won. The disagreement comes from CSG slivers: two brush
+//      faces on planes that differ by more than DIR_EPSILON yet stay within ON_EPSILON
+//      of each other over the whole face, which is what vertex manipulation produces
+//      with off-grid points. The sliver is a thin strip, the real face around it is
+//      large, and letting the strip win turned the air in front of the real face into
+//      solid: the face was never drawn and the player saw through the wall.
+//      Pick instead the contents that covers most of the leaf's boundary.
+// =====================================================================================
+static int      ResolveAmbiguousRank(surface_t* planelist, const int highestrank)
+{
+    vec_t           area[13] = {0};                        // one per RankForContents value
+
+    for (surface_t* surf = planelist; surf; surf = surf->next)
+    {
+        if (!surf->onnode)
+        {
+            continue;
+        }
+        for (face_t* f = surf->faces; f; f = f->next)
+        {
+            if (f->detaillevel)
+            {
+                continue;
+            }
+            area[RankForContents(f->contents)] += FaceArea(f);
+        }
+    }
+    int best = highestrank;
+    for (int r = 0; r < 13; r++)
+    {
+        if (area[r] > area[best])
+        {
+            best = r;
+        }
+    }
+    return best;
+}
+
 static void     LinkLeafFaces(surface_t* planelist, node_t* leafnode)
 {
     face_t*         f;
@@ -1201,13 +1258,15 @@ static void     LinkLeafFaces(surface_t* planelist, node_t* leafnode)
 	}
 	if (surf)
 	{
+		const int highestrank = rank;
+		rank = ResolveAmbiguousRank (planelist, rank);
 		entity_t *ent = EntityForModel (g_nummodels - 1);
 		if (g_nummodels - 1 != 0 && ent == &g_entities[0])
 		{
 			ent = NULL;
 		}
-		Warning ("Ambiguous leafnode content ( %s and %s ) at (%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f) in hull %d of model %d (entity: classname \"%s\", origin \"%s\", targetname \"%s\")", 
-			ContentsToString (ContentsForRank(r)), ContentsToString (ContentsForRank(rank)), 
+		Warning ("Ambiguous leafnode content ( %s and %s, using %s ) at (%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f) in hull %d of model %d (entity: classname \"%s\", origin \"%s\", targetname \"%s\")",
+			ContentsToString (ContentsForRank(r)), ContentsToString (ContentsForRank(highestrank)), ContentsToString (ContentsForRank(rank)),
 			leafnode->mins[0], leafnode->mins[1], leafnode->mins[2], leafnode->maxs[0], leafnode->maxs[1], leafnode->maxs[2], 
 			g_hullnum, g_nummodels - 1, 
 			(ent? ValueForKey (ent, "classname"): "unknown"), 
@@ -1343,6 +1402,13 @@ static void     MakeNodePortal(node_t* node)
     AddPortalToNodes(new_portal, node->children[0], node->children[1]);
 }
 
+// Portals are cut with a much finer tolerance than ON_EPSILON. When a node's plane
+// runs within ON_EPSILON of the portal (neighbouring faces left almost coplanar by
+// vertex manipulation), the whole portal used to be handed to one child, so the thin
+// empty leaf in front of the real face lost its only link to the rest of the map.
+// FillInside then filled it and the face in front of it disappeared.
+#define PORTAL_SPLIT_EPSILON 0.001
+
 // =====================================================================================
 //  SplitNodePortals
 //      Move or split the portals that bound node so that the node's children have portals instead of node.
@@ -1385,7 +1451,7 @@ static void     SplitNodePortals(node_t *node)
         RemovePortalFromNode(p, p->nodes[1]);
 
         // cut the portal into two portals, one on each side of the cut plane
-        p->winding->Divide(*plane, &frontwinding, &backwinding);
+        p->winding->Divide(*plane, &frontwinding, &backwinding, PORTAL_SPLIT_EPSILON);
 
 		if (!frontwinding && !backwinding)
 		{

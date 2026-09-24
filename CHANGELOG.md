@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- BSP: faces built with vertex manipulation no longer vanish in game while the
+  editor shows a closed solid. Neighbouring faces left on planes that differ by
+  more than CSG merges, yet stay within `ON_EPSILON` of each other, made three
+  things go wrong: a node whose portal was clipped away was collapsed together
+  with the visible face on it; the portal between the room and the thin empty
+  leaf in front of such a face went to the wrong child, so `FillInside` filled
+  that leaf; and an ambiguous leaf always became SOLID because of a CSG sliver.
+  Nodes that still own faces are kept, node portals are split with a 0.001
+  tolerance, and an ambiguous leaf takes the contents covering most of its
+  boundary. On 32 generated vertex-manipulated maps the see-through spots went
+  from 469 (13 maps) to 28 (2 maps, both with sub-unit deformation); three
+  real maps compile to the same geometry as before.
+
+### Added
+- `scripts/holecheck.py`: ray-casts a compiled BSP and reports see-through
+  holes, optionally aiming at every visible face of the source `.map`.
+
 ## [0.10.0] - 2026-09-24
 
 ### Fixed

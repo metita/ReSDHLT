@@ -858,11 +858,11 @@ void Winding::Divide(const dplane_t& split, Winding** front, Winding** back
         dot = DotProduct(m_Points[i], split.normal);
         dot -= split.dist;
         dists[i] = dot;
-        if (dot > ON_EPSILON)
+        if (dot > epsilon)
         {
             sides[i] = SIDE_FRONT;
         }
-        else if (dot < -ON_EPSILON)
+        else if (dot < -epsilon)
         {
             sides[i] = SIDE_BACK;
         }
