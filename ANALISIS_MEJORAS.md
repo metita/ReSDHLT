@@ -176,6 +176,12 @@ las caras a `.p0`–`.p3` en orden de finalización. Ambos índices llegan a BSP
 mapas ahora compilan idénticos dos veces seguidas, y el resultado coincide byte a byte con el baseline
 monohilo previo.
 
+**Actualización (septiembre 2026):** VIS `-full` tampoco era determinista en mapas medianos
+(`zm_azteca` daba dos `.bsp` distintos con 12 hilos). Ahora cualquier cantidad de hilos produce el
+mismo `.bsp` que `-threads 1`, en Windows y en Linux. `CSGBrush` volvió a correr en paralelo sin
+perder el determinismo, y la tabla de planos de CSG dejó de ser O(N²). Detalle y mediciones en
+`docs/BENCHMARKS.md` §8.
+
 ## 5. Qué queda por hacer
 
 | # | Mejora | Área | Por qué no se hizo |

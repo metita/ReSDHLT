@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- VIS: `-full` output no longer depends on thread timing. A portal pruned with
+  the visbits of whichever portals other threads had finished, so two identical
+  multithreaded compiles could write different `.bsp` files. Every thread count
+  now writes the same `.bsp` as `-threads 1` (verified on 13 maps, Windows and
+  Linux).
+
+### Changed
+- VIS: portals flow in a fixed order and a waiting thread helps finish the
+  portal it waits for by running subtrees of its recursion. Near-linear scaling
+  (5.98x on 12 threads for a 6334-portal map).
+- VIS: separator candidates are decided without normalizing the plane when the
+  result is certain within twice the rounding error bound, the degenerate-normal
+  test no longer needs a `sqrt`, `ChopWinding` counts sides without branches and
+  the bitset loops work 64 bits at a time. About 20% less work per flow on one
+  thread; output byte-identical.
+- CSG: plane lookups use a hash on the quantized normal instead of scanning
+  every plane (same plane numbers), and `CSGBrush` runs on all threads with
+  per-brush output buffers written in brush order (same `.p`/`.b` files).
+  CSG is 1.3x to 2.4x faster on the maps measured.
+
 ## [0.9.0] - 2026-08-15
 Fork of seedee/SDHLT focused on compile performance and map FPS for Counter-Strike 1.6.
 

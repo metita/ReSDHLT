@@ -410,7 +410,8 @@ Descubierto al armar el baseline de regresión. Dos corridas del **mismo binario
 | visibility | 1509 bytes | 1505 bytes | −4 |
 
 **Aislamiento por etapa.** Fijando CSG en 1 hilo pero dejando VIS multihilo, el output es
-byte-idéntico. O sea **VIS y RAD ya son independientes del orden**; toda la variación venía de CSG:
+byte-idéntico. En estos tres mapas toda la variación venía de CSG (ojo: la conclusión de entonces,
+"VIS ya es independiente del orden", resultó falsa para `-full` en mapas medianos; ver §8):
 
 - `FindIntPlane()` agrega al arreglo global de planos bajo lock: el hilo que gana define el índice del
   plano. El código original incluso trae el comentario *"BUG: there might be some multithread issue
@@ -452,6 +453,91 @@ Reemplazar los backends Win32/pthread por `std::thread` (723 → 448 líneas), v
 
 Más los tests unitarios: autodetección = `nproc`, `-threads 5000` clampeado sin crash, y 200.000
 unidades de trabajo despachadas exactamente una vez con 1/2/4/16/64 hilos.
+
+## 8. CSG y VIS: determinismo total y velocidad (septiembre 2026)
+
+Entorno: Windows 11, MSVC 19.44, **Ryzen 5 5600G (6 núcleos / 12 hilos)**, escritorio con ~12% de
+carga de fondo. Corpus: 13 mapas reales de CS 1.6 (los tres de arriba más `ar_azteca`,
+`ar_old_azteca`, `ar_crazyjump`, `ar_namekusein_zg`, `ar_pokemon`, `fp_icy_island`,
+`fp_squidgame_thno`, `zm_azteca`, `zm_eichen_v2`, `zm_mini_dust`). Tiempos: mínimo de corridas
+**intercaladas** A/B.
+
+### 8.1 VIS `-full` no era determinista ❌ → arreglado ✅
+
+Dos corridas idénticas de `zm_azteca` con 12 hilos daban `.bsp` distintos. La causa estaba en
+`RecursiveLeafFlow`: para podar, un portal usaba los `visbits` finales de los portales que *ya habían
+terminado* y `mightsee` de los demás, así que el resultado dependía de qué hilo llegaba primero. Con
+`-fast` o sin `-full` no se nota; con `-full` en mapas medianos, sí.
+
+**Arreglo:** los portales se procesan en un orden fijo (menos `mightsee` primero, el mismo orden que
+elegía el scan original) y cada portal poda solo con portales de rango menor, esperándolos si hace
+falta. Es exactamente lo que hace un solo hilo, así que **cualquier cantidad de hilos produce el mismo
+`.bsp` que `-threads 1`**. Verificado en los 13 mapas con 2, 5 y 12 hilos, y en Linux (GCC 15).
+
+Esperar tenía un costo: en `fp_squidgame_thno` (6334 portales) la mitad del tiempo de hilo quedaba
+ociosa y VIS pasaba de ~36 s a ~50 s. Se resolvió con un scheduler: el hilo que espera un portal
+ejecuta subárboles de la recursión de ese portal, que su dueño publica solo cuando hay hilos con
+hambre. Partir un flujo así no cambia el resultado: un subárbol solo marca leafs de su propio
+`mightsee` y solo se poda cuando todos ya están marcados.
+
+Escalado resultante (squidgame, `-full`): 2 hilos 1.95×, 5 hilos 3.84×, 12 hilos 5.98×.
+
+Barrido que descartó relajar la regla (usar `visbits` solo de portales W rangos atrás):
+
+| W | tiempo | CPU | salida |
+|---|---|---|---|
+| 0 (exacto) | 48 s (sin scheduler) | 283 s | = 1 hilo |
+| 48 | 43.5 s | 355 s | distinta |
+| 200 | 40.7 s | 396 s | distinta |
+| ∞ (solo `mightsee`) | 97.1 s | 820 s | distinta |
+
+La poda con `visbits` ahorra la mitad del trabajo; no vale cambiar la salida por lo poco que se gana.
+
+### 8.2 VIS: menos trabajo por flujo ✅
+
+Perfilado con un sampler propio (Windows, sin instalar nada): `ClipToSeperators` ~55% del cómputo y la
+normalización del plano candidato sola ~22%; `ChopWinding` ~35%.
+
+| Cambio | `zm_azteca -full`, 1 hilo |
+|---|---|
+| original | 3.90 s |
+| bitsets de 64 bits en una pasada (`long` es de 32 bits en Windows) | 3.76 s |
+| `ChopWinding` sin saltos (73% de las llamadas dejan la winding entera) | 3.62 s |
+| `SeparatorVerdict`: decidir candidatos sin normalizar | 3.20 s |
+| `sqrt` solo para candidatos que se normalizan | 3.14 s |
+
+`SeparatorVerdict` clasifica los puntos en `double` sobre el producto cruz crudo y solo decide cuando el
+punto está más lejos de los umbrales `ON_EPSILON` que el doble de la cota de error de redondeo
+combinada (17u por la mayor norma L1). Un build de verificación recalculó el test exacto en cada
+candidato que el filtro decidió: **cero discrepancias** en los 13 mapas (más de mil millones de
+candidatos). Los indecisos (0.4 a 1.7%) usan el test original.
+
+Descartado con medición: un prefiltro que *sumaba* un test de "pass a ambos lados" antes del original
+atrapaba solo el 23% de los candidatos y hacía VIS un 13% más lento.
+
+Con los 12 hilos ocupados, el SMT esconde buena parte de la latencia de `sqrt` y divisiones, y la
+ganancia se achica: squidgame con 6 hilos pasó de 44.0 s a 42.5 s (mediana 49.4 → 45.4 s), y con 12 hilos
+queda a la par del original no determinista. Lo que se ganó ahí es que la salida ahora es reproducible.
+
+### 8.3 CSG: tabla de planos indexada y `CSGBrush` en paralelo ✅
+
+- `FindIntPlane` comparaba cada búsqueda contra todos los planos (O(N²)). Ahora usa buckets por normal
+  cuantizada a 1/2048; la prueba de coincidencia es la misma y gana el menor índice, así que la
+  numeración no cambia.
+- `CSGBrush` corría en un hilo porque las caras se escribían en orden de finalización. Ahora cada brush
+  formatea sus caras en un buffer propio (el `fprintf` era lo caro) y se escriben en orden de brush.
+
+CSG completo, 12 hilos, salida idéntica a la anterior en los 13 mapas:
+
+| Mapa | antes | ahora |
+|---|---|---|
+| fp_squidgame_thno | 0.48 s | 0.20 s |
+| zm_eichen_v2 | 0.31 s | 0.15 s |
+| zm_azteca | 0.21 s | 0.09 s |
+| ar_azteca | 0.13 s | 0.06 s |
+
+`CreateBrush` sigue en un hilo: ahí el orden de creación decide qué plano queda como representante de
+cada grupo, y cambiarlo cambiaría el `.bsp`.
 
 ## Cómo reproducir
 
