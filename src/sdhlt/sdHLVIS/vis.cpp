@@ -28,6 +28,7 @@
 #ifdef ZHLT_NETVIS
 #include "zlib.h"
 #endif
+#include <algorithm>
 #include <string>
 #include <fstream> //FixPrt
 #include <vector> //FixPrt
@@ -43,6 +44,8 @@ int             g_numportals = 0;
 unsigned        g_portalleafs = 0;
 
 portal_t*       g_portals;
+std::atomic<bool>* g_portaldone;
+static portal_t** g_portalorder;                           // portals by flow rank
 
 leaf_t*         g_leafs;
 int				*g_leafstarts;
@@ -337,21 +340,27 @@ static int      AllPortalsDone()
 // =====================================================================================
 static portal_t* GetNextPortal()
 {
+#ifndef ZHLT_NETVIS
+    // SortPortals already put the portals in the order the old per-call scan
+    // produced one at a time under the global lock.
+    const int       work = GetThreadWork();
+    portal_t*       p;
+
+    if (work == -1)
+    {
+        return NULL;
+    }
+    p = g_portalorder[work];
+    p->status = stat_working;
+    return p;
+#else
     int             j;
     portal_t*       p;
     portal_t*       tp;
     int             min;
 
-#ifdef ZHLT_NETVIS
     if (g_vismode == VIS_MODE_SERVER)
     {
-#else
-    {
-        if (GetThreadWork() == -1)
-        {
-            return NULL;
-        }
-#endif
         ThreadLock();
 
         min = 99999;
@@ -363,9 +372,7 @@ static portal_t* GetNextPortal()
             {
                 min = tp->nummightsee;
                 p = tp;
-#ifdef ZHLT_NETVIS
                 g_visportalindex = j;
-#endif
             }
         }
 
@@ -378,7 +385,6 @@ static portal_t* GetNextPortal()
 
         return p;
     }
-#ifdef ZHLT_NETVIS
     else                                                   // AS CLIENT
     {
         while (getWorkFromClientQueue() == WAITING_FOR_PORTAL_INDEX)
@@ -388,7 +394,8 @@ static portal_t* GetNextPortal()
             g_idletime += delay;                           // This is the only point where the portal work goes idle, so its easy to add up just how idle it is.
             if (!isConnectedToServer())
             {
-                Error("Unexepected disconnect from server(1)\n");
+                Error("Unexepected disconnect from server(1)
+");
             }
             NetvisSleep(delay);
         }
@@ -430,15 +437,22 @@ static void     LeafThread(int unused)
 
     while (1)
     {
+        // Queued subtrees belong to portals already in flight, which later
+        // portals wait on, so they come before starting a new portal.
+        if (RunQueuedFlowTask())
+        {
+            continue;
+        }
         if (!(p = GetNextPortal()))
         {
-            return;
+            break;
         }
 
         PortalFlow(p);
 
         Verbose("portal:%4i  mightsee:%4i  cansee:%4i\n", (int)(p - g_portals), p->nummightsee, p->numcansee);
     }
+    HelpUntilAllPortalsDone();
 }
 #endif //!ZHLT_NETVIS
 
@@ -698,6 +712,7 @@ static void     CalcPortalVis()
 #ifdef ZHLT_NETVIS
     LeafThread(0);
 #else
+    InitPortalFlow(g_numportals * 2);
     NamedRunThreadsOn(g_numportals * 2, g_estimate, LeafThread);
 #endif
 }
@@ -770,6 +785,36 @@ static void     CalcVis()
 
 #ifndef ZHLT_NETVIS
 
+// =====================================================================================
+//  SortPortals
+//      Fixes the order portals are flowed in: fewest mightsee first, ties by index, which
+//      is the order the old GetNextPortal scan picked them in. Later portals prune with
+//      the visbits of earlier ones.
+// =====================================================================================
+static void     SortPortals()
+{
+    const int       numportals = g_numportals * 2;
+    int             i;
+
+    g_portalorder = (portal_t**)malloc(numportals * sizeof(portal_t*));
+    hlassume(g_portalorder != NULL, assume_NoMemory);
+    for (i = 0; i < numportals; i++)
+    {
+        g_portalorder[i] = &g_portals[i];
+    }
+    std::stable_sort(g_portalorder, g_portalorder + numportals,
+        [](const portal_t* a, const portal_t* b) { return a->nummightsee < b->nummightsee; });
+    for (i = 0; i < numportals; i++)
+    {
+        g_portalorder[i]->rank = i;
+    }
+
+    g_portaldone = new std::atomic<bool>[numportals];
+    for (i = 0; i < numportals; i++)
+    {
+        g_portaldone[i].store(false, std::memory_order_relaxed);
+    }
+}
 
 // AJM: MVD
 // =====================================================================================
@@ -835,6 +880,8 @@ static void     CalcVis()
 //		SetupVisBlockLeafs();
 
 		NamedRunThreadsOn(g_numportals * 2, g_estimate, BasePortalVis);
+
+		SortPortals();
 
 //		if(g_numvisblockers)
 //			NamedRunThreadsOn(g_numvisblockers, g_estimate, BlockVis);

@@ -1,4 +1,213 @@
 #include "vis.h"
+#include <algorithm>
+#include <climits>
+#include <condition_variable>
+#include <mutex>
+#include <set>
+
+// =====================================================================================
+//  Flow scheduling
+//
+//  Portals are flowed in rank order and a portal prunes with the final visbits of
+//  every lower ranked portal, so it may have to wait for one another thread is still
+//  flowing. Measured on a 6334 portal map that left half of all thread time idle.
+//
+//  A waiting thread therefore helps: the thread flowing a portal publishes subtrees of
+//  its recursion as tasks while someone is hungry, and waiters run them. Splitting a
+//  flow like this cannot change its result: a subtree only ever marks leafs in its own
+//  mightsee, and it is only skipped when all of those are already marked, so the order
+//  the subtrees run in does not matter.
+//
+//  Deadlock freedom: while waiting for portal P a thread only runs tasks of portals
+//  ranked at most P. Those never wait on anything the waiting thread holds.
+// =====================================================================================
+typedef struct flowtask_s
+{
+    int             rank;                                  // rank of the portal being flowed
+    int             leafnum;
+    threaddata_t*   thread;
+    pstack_t        frame;                                 // private copy of the parent frame
+} flowtask_t;
+
+// Nested help grows the stack of the helping thread; stop helping past this depth.
+#define MAX_FLOW_NESTING 3
+
+static std::mutex g_flowmutex;                             // guards everything below
+static std::condition_variable g_flowcv;                   // task queued, portal done, flow joined
+static std::vector<flowtask_t*> g_flowtasks;               // heap, lowest rank on top
+static std::multiset<int> g_hungry;                        // rank limits of idle threads
+static int      g_portalsleft;
+static std::atomic<int> g_hungrylimit(-1);                 // highest rank an idle thread accepts
+static std::atomic<int> g_numhungry(0);
+static std::atomic<int> g_numflowtasks(0);
+static thread_local int t_nesting;
+
+static void     RunFlowTask(flowtask_t* t);
+
+static bool     FlowTaskAfter(const flowtask_t* a, const flowtask_t* b)
+{
+    return a->rank > b->rank;
+}
+
+static void     UpdateHungry()
+{
+    g_numhungry.store((int)g_hungry.size(), std::memory_order_relaxed);
+    g_hungrylimit.store(g_hungry.empty() ? -1 : *g_hungry.rbegin(), std::memory_order_relaxed);
+}
+
+static flowtask_t* PopFlowTask()
+{
+    std::pop_heap(g_flowtasks.begin(), g_flowtasks.end(), FlowTaskAfter);
+    flowtask_t*     t = g_flowtasks.back();
+    g_flowtasks.pop_back();
+    g_numflowtasks.fetch_sub(1, std::memory_order_relaxed);
+    return t;
+}
+
+// Called with g_flowmutex held. Runs queued tasks ranked at most `limit` until `done`.
+template <typename Done>
+static void     HelpUntil(std::unique_lock<std::mutex>& lock, const int limit, Done done)
+{
+    while (!done())
+    {
+        if (!g_flowtasks.empty() && g_flowtasks.front()->rank <= limit && t_nesting < MAX_FLOW_NESTING)
+        {
+            flowtask_t* t = PopFlowTask();
+            lock.unlock();
+            RunFlowTask(t);
+            lock.lock();
+            continue;
+        }
+        std::multiset<int>::iterator it = g_hungry.insert(limit);
+        UpdateHungry();
+        g_flowcv.wait(lock);
+        g_hungry.erase(it);
+        UpdateHungry();
+    }
+}
+
+// =====================================================================================
+//  TrySpawnFlow
+//      Queues the recursion into `leafnum` instead of running it, if an idle thread
+//      would pick it up. `stack` is the frame the recursion reads as prevstack.
+// =====================================================================================
+static bool     TrySpawnFlow(const int leafnum, threaddata_t* const thread, const pstack_t* const stack)
+{
+    const int       rank = thread->base->rank;
+
+    if (g_hungrylimit.load(std::memory_order_relaxed) < rank
+        || g_numflowtasks.load(std::memory_order_relaxed) >= g_numhungry.load(std::memory_order_relaxed))
+    {
+        return false;
+    }
+    // The copy uses fixed windings; an unusually large original portal stays inline.
+    if (stack->source->numpoints > MAX_POINTS_ON_FIXED_WINDING
+        || (stack->pass && stack->pass->numpoints > MAX_POINTS_ON_FIXED_WINDING))
+    {
+        return false;
+    }
+
+    flowtask_t*     t = (flowtask_t*)malloc(sizeof(flowtask_t));
+    hlassume(t != NULL, assume_NoMemory);
+    t->rank = rank;
+    t->leafnum = leafnum;
+    t->thread = thread;
+    // Only the fields the recursion reads from its prevstack. source and pass may
+    // point into frames that are gone by the time the task runs, so copy them.
+    t->frame.head = stack->head;
+    t->frame.portalplane = stack->portalplane;
+    memcpy(t->frame.mightsee, stack->mightsee, g_bitbytes);
+    t->frame.windings[0].numpoints = stack->source->numpoints;
+    memcpy(t->frame.windings[0].points, stack->source->points, stack->source->numpoints * sizeof(vec3_t));
+    t->frame.source = &t->frame.windings[0];
+    t->frame.pass = NULL;
+    if (stack->pass)
+    {
+        t->frame.windings[1].numpoints = stack->pass->numpoints;
+        memcpy(t->frame.windings[1].points, stack->pass->points, stack->pass->numpoints * sizeof(vec3_t));
+        t->frame.pass = &t->frame.windings[1];
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_flowmutex);
+        thread->pending++;
+        g_flowtasks.push_back(t);
+        std::push_heap(g_flowtasks.begin(), g_flowtasks.end(), FlowTaskAfter);
+        g_numflowtasks.fetch_add(1, std::memory_order_relaxed);
+    }
+    g_flowcv.notify_all();
+    return true;
+}
+
+// =====================================================================================
+//  WaitForPortal
+//      Blocks until a lower ranked portal has final visbits, helping with it meanwhile.
+// =====================================================================================
+static void     WaitForPortal(const portal_t* const p)
+{
+    const std::atomic<bool>& done = g_portaldone[p - g_portals];
+
+    if (done.load(std::memory_order_acquire))
+    {
+        return;
+    }
+    std::unique_lock<std::mutex> lock(g_flowmutex);
+    HelpUntil(lock, p->rank, [&done] { return done.load(std::memory_order_acquire); });
+}
+
+// =====================================================================================
+//  MarkPortalDone
+// =====================================================================================
+static void     MarkPortalDone(const portal_t* const p)
+{
+    {
+        // Under the mutex so a waiter cannot test the flag, miss this store and then
+        // sleep through the notification.
+        std::lock_guard<std::mutex> lock(g_flowmutex);
+        g_portaldone[p - g_portals].store(true, std::memory_order_release);
+        g_portalsleft--;
+    }
+    g_flowcv.notify_all();
+}
+
+// =====================================================================================
+//  InitPortalFlow / RunQueuedFlowTask / HelpUntilAllPortalsDone
+//      Used by LeafThread.
+// =====================================================================================
+void            InitPortalFlow(const int numportals)
+{
+    g_portalsleft = numportals;
+}
+
+bool            RunQueuedFlowTask()
+{
+    std::unique_lock<std::mutex> lock(g_flowmutex);
+
+    if (g_flowtasks.empty())
+    {
+        return false;
+    }
+    flowtask_t*     t = PopFlowTask();
+    lock.unlock();
+    RunFlowTask(t);
+    return true;
+}
+
+void            HelpUntilAllPortalsDone()
+{
+    std::unique_lock<std::mutex> lock(g_flowmutex);
+    HelpUntil(lock, INT_MAX, [] { return g_portalsleft == 0; });
+}
+
+// Leafs are marked by every thread working on the same portal.
+static inline void AtomicOrByte(byte* const dst, const byte bits)
+{
+#ifdef _MSC_VER
+    _InterlockedOr8((volatile char*)dst, (char)bits);
+#else
+    __atomic_fetch_or(dst, bits, __ATOMIC_RELAXED);
+#endif
+}
 
 // =====================================================================================
 //  CheckStack
@@ -371,7 +580,7 @@ inline static winding_t* ClipToSeperators(
 //      Flood fill through the leafs
 //      If src_portal is NULL, this is the originating leaf
 // =====================================================================================
-inline static void     RecursiveLeafFlow(const int leafnum, const threaddata_t* const thread, const pstack_t* const prevstack)
+static void     RecursiveLeafFlow(const int leafnum, threaddata_t* const thread, const pstack_t* const prevstack)
 {
     pstack_t        stack;
     leaf_t*         leaf;
@@ -384,12 +593,11 @@ inline static void     RecursiveLeafFlow(const int leafnum, const threaddata_t* 
     {
         const unsigned offset = leafnum >> 3;
         const unsigned bit = (1 << (leafnum & 7));
-    
+
         // mark the leaf as visible
         if (!(thread->leafvis[offset] & bit))
         {
-            thread->leafvis[offset] |= bit;
-            thread->base->numcansee++;
+            AtomicOrByte(&thread->leafvis[offset], (byte)bit);
         }
     }
 
@@ -437,48 +645,41 @@ inline static void     RecursiveLeafFlow(const int leafnum, const threaddata_t* 
 
         // if the portal can't see anything we haven't allready seen, skip it
         {
-            long* test;
+            const uint64_t* test;
 
-            if (p->status == stat_done)
+            // Use the final visbits of every portal flowed earlier in the
+            // sorted order and mightsee for the rest. That is exactly what a
+            // single thread sees; racing on "whichever portal happens to be
+            // done by now" made -full output depend on thread timing.
+            if (p->rank < thread->base->rank)
             {
-                test = (long*)p->visbits;
+                WaitForPortal(p);
+                test = (const uint64_t*)p->visbits;
             }
             else
             {
-                test = (long*)p->mightsee;
+                test = (const uint64_t*)p->mightsee;
             }
-    
-            {
-                const int bitlongs = g_bitlongs;
 
-                {
-                    long* prevmight = (long*)prevstack->mightsee;
-                    long* might = (long*)stack.mightsee;
-                
-                    unsigned j;
-                    for (j = 0; j < bitlongs; j++, test++, might++, prevmight++)
-                    {
-                        (*might) = (*prevmight) & (*test);
-                    }
-                }
-        
-                {
-                    long* might = (long*)stack.mightsee;
-                    long* vis = (long*)thread->leafvis;
-                    unsigned j;
-                    for (j = 0; j < bitlongs; j++, might++, vis++)
-                    {
-                        if ((*might) & ~(*vis))
-                        {
-                            break;
-                        }
-                    }
-            
-                    if (j == g_bitlongs)
-                    {                                                  // can't see anything new
-                        continue;
-                    }
-                }
+            // 64 bits at a time (long is 32 bits on Windows), and one pass
+            // instead of building the whole set before testing it. g_bitbytes
+            // is a multiple of 8. leafvis may be growing under other threads
+            // flowing the same portal; a stale read only skips less.
+            const uint64_t* prevmight = (const uint64_t*)prevstack->mightsee;
+            const uint64_t* vis = (const uint64_t*)thread->leafvis;
+            uint64_t*       might = (uint64_t*)stack.mightsee;
+            uint64_t        unseen = 0;
+            const unsigned  bitquads = g_bitbytes / 8;
+
+            for (unsigned j = 0; j < bitquads; j++)
+            {
+                const uint64_t m = prevmight[j] & test[j];
+                might[j] = m;
+                unseen |= m & ~vis[j];
+            }
+            if (!unseen)
+            {
+                continue;                                  // can't see anything new
             }
         }
 
@@ -515,7 +716,10 @@ inline static void     RecursiveLeafFlow(const int leafnum, const threaddata_t* 
 
         if (!prevstack->pass)
         {                                                  // the second leaf can only be blocked if coplanar
-            RecursiveLeafFlow(p->leaf, thread, &stack);
+            if (!TrySpawnFlow(p->leaf, thread, &stack))
+            {
+                RecursiveLeafFlow(p->leaf, thread, &stack);
+            }
             continue;
         }
 
@@ -577,7 +781,10 @@ inline static void     RecursiveLeafFlow(const int leafnum, const threaddata_t* 
         }
 
         // flow through it for real
-        RecursiveLeafFlow(p->leaf, thread, &stack);
+        if (!TrySpawnFlow(p->leaf, thread, &stack))
+        {
+            RecursiveLeafFlow(p->leaf, thread, &stack);
+        }
     }
 
 #ifdef RVIS_LEVEL_2
@@ -588,6 +795,25 @@ inline static void     RecursiveLeafFlow(const int leafnum, const threaddata_t* 
     }
 #endif
 #endif
+}
+
+// =====================================================================================
+//  RunFlowTask
+// =====================================================================================
+static void     RunFlowTask(flowtask_t* t)
+{
+    threaddata_t*   thread = t->thread;
+
+    t_nesting++;
+    RecursiveLeafFlow(t->leafnum, thread, &t->frame);
+    t_nesting--;
+    free(t);
+    {
+        // The owner may return and release `thread` as soon as this reaches zero.
+        std::lock_guard<std::mutex> lock(g_flowmutex);
+        thread->pending--;
+    }
+    g_flowcv.notify_all();
 }
 
 // =====================================================================================
@@ -611,16 +837,29 @@ void            PortalFlow(portal_t* p)
     data.pstack_head.portal = p;
     data.pstack_head.source = p->winding;
     data.pstack_head.portalplane = &p->plane;
-    for (i = 0; i < g_bitlongs; i++)
-    {
-        ((long*)data.pstack_head.mightsee)[i] = ((long*)p->mightsee)[i];
-    }
+    memcpy(data.pstack_head.mightsee, p->mightsee, g_bitbytes);
     RecursiveLeafFlow(p->leaf, &data, &data.pstack_head);
+
+    {
+        // Subtrees handed to other threads must finish before the visbits are final.
+        std::unique_lock<std::mutex> lock(g_flowmutex);
+        HelpUntil(lock, p->rank, [&data] { return data.pending == 0; });
+    }
+
+    p->numcansee = 0;
+    for (i = 0; i < g_portalleafs; i++)
+    {
+        if (p->visbits[i >> 3] & (1 << (i & 7)))
+        {
+            p->numcansee++;
+        }
+    }
 
 #ifdef ZHLT_NETVIS
     p->fromclient = g_clientid;
 #endif
     p->status = stat_done;
+    MarkPortalDone(p);
 #ifdef ZHLT_NETVIS
     Flag_VIS_DONE_PORTAL(g_visportalindex);
 #endif

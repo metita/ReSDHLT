@@ -18,6 +18,8 @@
 #include "zones.h"
 #include "cmdlinecfg.h"
 
+#include <atomic>
+#include <cstdint>
 #include <vector>
 #include <unordered_map>
 
@@ -78,6 +80,7 @@ typedef struct
     byte*           mightsee;
     unsigned        nummightsee;
     int             numcansee;
+    int             rank;                                  // position in the flow order, see SortPortals
 #ifdef ZHLT_NETVIS
     int             fromclient;                            // which client did this come from
 #endif
@@ -135,6 +138,7 @@ typedef struct
     //      byte            fullportal[MAX_PORTALS/8];              // bit string
     portal_t*       base;
     pstack_t        pstack_head;
+    int             pending;                               // subtrees queued for other threads (flow.cpp mutex)
 } threaddata_t;
 
 
@@ -190,6 +194,11 @@ extern leafinfo_t *g_leafinfos;
 extern portal_t*g_portals;
 extern leaf_t*  g_leafs;
 
+// Set (release) once a portal's visbits are final. A portal only reads the
+// visbits of portals ranked before it, waiting for them if needed, so the
+// result is the same for any thread count.
+extern std::atomic<bool>* g_portaldone;
+
 
 extern byte*    g_uncompressed;
 extern unsigned g_bitbytes;
@@ -206,6 +215,9 @@ extern void		MaxDistVis(int threadnum);
 //extern void		PostMaxDistVis(int threadnum);
 
 extern void     PortalFlow(portal_t* p);
+extern void     InitPortalFlow(int numportals);
+extern bool     RunQueuedFlowTask();
+extern void     HelpUntilAllPortalsDone();
 extern void     CalcAmbientSounds();
 
 #ifdef ZHLT_NETVIS

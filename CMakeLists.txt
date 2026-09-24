@@ -430,6 +430,13 @@ if (MSVC)
         PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols")
 endif()
 
+if (MSVC)
+    # VIS recurses one ~5 KB frame per leaf of a portal flow, and a flow thread
+    # that waits runs other flows on top of its own stack. Reserve the 8 MB a
+    # Linux thread gets by default instead of the 1 MB Windows default.
+    target_link_options(VIS PRIVATE /STACK:8388608)
+endif()
+
 if (SDHLT_ARCH_FLAGS)
     target_compile_options(RAD PRIVATE ${SDHLT_ARCH_FLAGS})
     if (SDHLT_ARCH_ALL)
