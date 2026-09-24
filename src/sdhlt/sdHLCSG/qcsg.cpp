@@ -13,7 +13,12 @@
     
 */
 
-#include "csg.h" 
+#include "csg.h"
+#include <atomic>
+#include <cstdarg>
+#include <string>
+#include <utility>
+#include <vector>
 #ifdef SYSTEM_WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h> //--vluzacn
@@ -29,13 +34,51 @@
 
 */
 
-static FILE*    out[NUM_HULLS]; // pointer to each of the hull out files (.p0, .p1, ect.)  
+static FILE*    out[NUM_HULLS]; // pointer to each of the hull out files (.p0, .p1, ect.)
 static FILE*    out_view[NUM_HULLS];
 static FILE*    out_detailbrush[NUM_HULLS];
-static int      c_tiny;        
-static int      c_tiny_clip;
-static int      c_outfaces;
+static std::atomic<int> c_tiny;
+static std::atomic<int> c_tiny_clip;
+static std::atomic<int> c_outfaces;
 static int      c_csgfaces;
+
+// Output of one brush while CSGBrush runs on several threads. The brushes are
+// written out in brush order afterwards, so the .p0-.p3/.b0-.b3 files are the
+// same as a single thread writes them.
+typedef struct
+{
+    std::string     faces[NUM_HULLS];                      // .p0-.p3 text
+    std::string     detail[NUM_HULLS];                     // .b0-.b3 text
+    std::vector<std::pair<int, vec_t> > areas;             // texinfo, area for the texture report
+    int             csgfaces;
+} brushoutput_t;
+
+static thread_local brushoutput_t* t_brushoutput;          // NULL: write straight to the files
+
+// printf into a std::string; same formatting as fprintf.
+static void     AppendF(std::string& s, const char* const format, ...)
+{
+    char            buf[256];
+    va_list         args;
+
+    va_start(args, format);
+    const int       n = vsnprintf(buf, sizeof(buf), format, args);
+    va_end(args);
+    if (n < 0)
+    {
+        Error("AppendF: formatting failed");
+    }
+    if (n < (int)sizeof(buf))
+    {
+        s.append(buf, n);
+        return;
+    }
+    std::vector<char> big(n + 1);
+    va_start(args, format);
+    vsnprintf(big.data(), big.size(), format, args);
+    va_end(args);
+    s.append(big.data(), n);
+}
 BoundingBox     world_bounds;
 
 
@@ -296,6 +339,26 @@ void            WriteFace(const int hull, const bface_t* const f
     unsigned int    i;
     Winding*        w;
 
+    if (t_brushoutput)
+    {
+        brushoutput_t*  o = t_brushoutput;
+        std::string&    s = o->faces[hull];
+
+        w = f->w;
+        if (!hull)
+        {
+            o->csgfaces++;
+            o->areas.push_back(std::make_pair(f->texinfo, w->getArea()));
+        }
+        AppendF(s, "%i %i %i %i %u\n", detaillevel, f->planenum, f->texinfo, f->contents, w->m_NumPoints);
+        for (i = 0; i < w->m_NumPoints; i++)
+        {
+            AppendF(s, "%5.8f %5.8f %5.8f\n", w->m_Points[i][0], w->m_Points[i][1], w->m_Points[i][2]);
+        }
+        s += "\n";
+        return;
+    }
+
     ThreadLock();
     if (!hull)
         c_csgfaces++;
@@ -349,6 +412,22 @@ void            WriteFace(const int hull, const bface_t* const f
 }
 void WriteDetailBrush (int hull, const bface_t *faces)
 {
+	if (t_brushoutput)
+	{
+		std::string &s = t_brushoutput->detail[hull];
+		s += "0\n";
+		for (const bface_t *f = faces; f; f = f->next)
+		{
+			Winding *w = f->w;
+			AppendF (s, "%i %u\n", f->planenum, w->m_NumPoints);
+			for (int i = 0; i < (int)w->m_NumPoints; i++)
+			{
+				AppendF (s, "%5.8f %5.8f %5.8f\n", w->m_Points[i][0], w->m_Points[i][1], w->m_Points[i][2]);
+			}
+		}
+		s += "-1 -1\n";
+		return;
+	}
 	ThreadLock ();
 	fprintf (out_detailbrush[hull], "0\n");
 	for (const bface_t *f = faces; f; f = f->next)
@@ -1404,6 +1483,52 @@ static void     CheckForNoClip()
 // =====================================================================================
 
 
+// =====================================================================================
+//  CSGBrushesBuffered
+//      CSGBrush for brushes 0..numbrushes-1 on all threads. Each brush formats its faces
+//      into its own buffer (the formatting is most of the cost), then the buffers are
+//      written in brush order, so the output does not depend on the thread count.
+// =====================================================================================
+static brushoutput_t* g_brushoutputs;
+
+static void     CSGBrushBuffered(int brushnum)
+{
+    t_brushoutput = &g_brushoutputs[brushnum];
+    CSGBrush(brushnum);
+    t_brushoutput = NULL;
+}
+
+static void     CSGBrushesBuffered(const int numbrushes)
+{
+    int             i, hull;
+
+    g_brushoutputs = new brushoutput_t[numbrushes];
+    RunThreadsOnIndividual(numbrushes, g_estimate, CSGBrushBuffered);
+    for (i = 0; i < numbrushes; i++)
+    {
+        brushoutput_t*  o = &g_brushoutputs[i];
+
+        for (hull = 0; hull < NUM_HULLS; hull++)
+        {
+            if (!o->detail[hull].empty())
+            {
+                fwrite(o->detail[hull].data(), 1, o->detail[hull].size(), out_detailbrush[hull]);
+            }
+            if (!o->faces[hull].empty())
+            {
+                fwrite(o->faces[hull].data(), 1, o->faces[hull].size(), out[hull]);
+            }
+        }
+        for (const std::pair<int, vec_t>& a : o->areas)
+        {
+            AccumulateTextureArea(a.first, a.second);
+        }
+        c_csgfaces += o->csgfaces;
+    }
+    delete[] g_brushoutputs;
+    g_brushoutputs = NULL;
+}
+
 static void     ProcessModels()
 {
     int             i, j;
@@ -1457,7 +1582,15 @@ static void     ProcessModels()
         if (i == 0) // if its worldspawn....
         {
             Log("%s\n", Localize("CSGBrush:"));
-            RunCsgPhase(g_entities[i].numbrushes, CSGBrush);
+            if (g_viewsurface)
+            {
+                // Debug output that alternates between faces; keep the old path.
+                RunCsgPhase(g_entities[i].numbrushes, CSGBrush);
+            }
+            else
+            {
+                CSGBrushesBuffered(g_entities[i].numbrushes);
+            }
             CheckFatal();
         }
         else
@@ -2369,9 +2502,9 @@ int             main(const int argc_input, char** argv_input)
     ProcessModels();
 
     Verbose("%5i csg faces\n", c_csgfaces);
-    Verbose("%5i used faces\n", c_outfaces);
-    Verbose("%5i tiny faces\n", c_tiny);
-    Verbose("%5i tiny clips\n", c_tiny_clip);
+    Verbose("%5i used faces\n", c_outfaces.load());
+    Verbose("%5i tiny faces\n", c_tiny.load());
+    Verbose("%5i tiny clips\n", c_tiny_clip.load());
 
     // close hull files 
     for (i = 0; i < NUM_HULLS; i++)

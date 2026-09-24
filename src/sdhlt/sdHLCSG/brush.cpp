@@ -1,5 +1,9 @@
 #include "csg.h"
 
+#include <cstdint>
+#include <unordered_map>
+#include <vector>
+
 plane_t         g_mapplanes[MAX_INTERNAL_MAP_PLANES];
 int             g_nummapplanes;
 hullshape_t		g_defaulthulls[NUM_HULLS];
@@ -10,41 +14,149 @@ hullshape_t		g_hullshapes[MAX_HULLSHAPES];
 
 
 // =====================================================================================
-//  FindIntPlane, fast version (replacement by KGP)
-//	This process could be optimized by placing the planes in a (non hash-) set and using
-//	half of the inner loop check below as the comparator; I'd expect the speed gain to be
-//	very large given the change from O(N^2) to O(NlogN) to build the set of planes.
+//  Plane lookup index
+//      FindIntPlane used to test every existing plane, so building the plane table was
+//      O(N^2). Planes are now bucketed by their normal quantized to 1/2048. A plane that
+//      matches a lookup has every normal component within DIR_EPSILON of the query's, so
+//      it sits in one of the buckets that query +-2*DIR_EPSILON spans: at most two per
+//      axis, since 4*DIR_EPSILON is under one cell. The match test is the original one
+//      and the lowest matching index wins, which is the plane the linear scan returned,
+//      so plane numbers do not change.
 // =====================================================================================
+#define PLANE_HASH_SCALE 2048.0
 
+static std::unordered_map<uint64_t, std::vector<int> > g_planehash;
+static std::vector<int> g_planeunhashed;                   // planes whose normal is not in the index
+
+static inline bool PlaneHashable(const vec_t* const normal)
+{
+    // Normals are unit vectors; anything else (NaN included) takes the linear scan.
+    return fabs(normal[0]) <= 1.5 && fabs(normal[1]) <= 1.5 && fabs(normal[2]) <= 1.5;
+}
+
+static inline int PlaneHashCell(const vec_t v)
+{
+    return (int)floor(v * PLANE_HASH_SCALE);
+}
+
+static inline uint64_t PlaneHashKey(const int x, const int y, const int z)
+{
+    return ((uint64_t)(x + 8192) << 42) | ((uint64_t)(y + 8192) << 21) | (uint64_t)(z + 8192);
+}
+
+static void     PlaneHashInsert(const int planenum)
+{
+    const vec_t*    normal = g_mapplanes[planenum].normal;
+
+    if (PlaneHashable(normal))
+    {
+        g_planehash[PlaneHashKey(PlaneHashCell(normal[0]), PlaneHashCell(normal[1]), PlaneHashCell(normal[2]))].push_back(planenum);
+    }
+    else
+    {
+        g_planeunhashed.push_back(planenum);
+    }
+}
+
+static inline bool PlaneMatches(const vec_t* const normal, const vec_t* const origin, const int planenum)
+{
+    vec_t           t;
+
+    if (-DIR_EPSILON < (t = normal[0] - g_mapplanes[planenum].normal[0]) && t < DIR_EPSILON &&
+        -DIR_EPSILON < (t = normal[1] - g_mapplanes[planenum].normal[1]) && t < DIR_EPSILON &&
+        -DIR_EPSILON < (t = normal[2] - g_mapplanes[planenum].normal[2]) && t < DIR_EPSILON )
+    {
+        t = DotProduct (origin, g_mapplanes[planenum].normal) - g_mapplanes[planenum].dist;
+
+        if (-DIST_EPSILON < t && t < DIST_EPSILON)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Lowest numbered plane matching normal/origin, or -1.
+static int      LookupPlane(const vec_t* const normal, const vec_t* const origin)
+{
+    int             best = -1;
+    int             i;
+
+    if (!PlaneHashable(normal))
+    {
+        for (i = 0; i < g_nummapplanes; i++)
+        {
+            if (PlaneMatches(normal, origin, i))
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    for (const int planenum : g_planeunhashed)
+    {
+        if (PlaneMatches(normal, origin, planenum))
+        {
+            best = planenum;
+            break;
+        }
+    }
+
+    int             lo[3], hi[3];
+    for (i = 0; i < 3; i++)
+    {
+        lo[i] = PlaneHashCell(normal[i] - 2 * DIR_EPSILON);
+        hi[i] = PlaneHashCell(normal[i] + 2 * DIR_EPSILON);
+    }
+    for (int x = lo[0]; x <= hi[0]; x++)
+    {
+        for (int y = lo[1]; y <= hi[1]; y++)
+        {
+            for (int z = lo[2]; z <= hi[2]; z++)
+            {
+                std::unordered_map<uint64_t, std::vector<int> >::const_iterator it = g_planehash.find(PlaneHashKey(x, y, z));
+                if (it == g_planehash.end())
+                {
+                    continue;
+                }
+                // Each bucket is in increasing plane order.
+                for (const int planenum : it->second)
+                {
+                    if (best != -1 && planenum >= best)
+                    {
+                        break;
+                    }
+                    if (PlaneMatches(normal, origin, planenum))
+                    {
+                        best = planenum;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    return best;
+}
+
+// =====================================================================================
+//  FindIntPlane
+//      Returns the plane matching normal/origin, adding it (and its flip) if needed.
+//      The whole lookup runs under the lock: the old version scanned without it while
+//      other threads appended, which vluzacn flagged as a possible multithread issue.
+// =====================================================================================
 int FindIntPlane(const vec_t* const normal, const vec_t* const origin)
 {
     int             returnval;
     plane_t*        p;
     plane_t         temp;
-    vec_t           t;
-
-	returnval = 0;
-
-	find_plane:
-	for( ; returnval < g_nummapplanes; returnval++)
-	{
-		// BUG: there might be some multithread issue --vluzacn
-		if(	-DIR_EPSILON < (t = normal[0] - g_mapplanes[returnval].normal[0]) && t < DIR_EPSILON &&
-			-DIR_EPSILON < (t = normal[1] - g_mapplanes[returnval].normal[1]) && t < DIR_EPSILON &&
-			-DIR_EPSILON < (t = normal[2] - g_mapplanes[returnval].normal[2]) && t < DIR_EPSILON )
-		{
-			t = DotProduct (origin, g_mapplanes[returnval].normal) - g_mapplanes[returnval].dist;
-
-			if (-DIST_EPSILON < t && t < DIST_EPSILON)
-			{ return returnval; }
-		}
-	}
 
 	ThreadLock();
-	if(returnval != g_nummapplanes) // make sure we don't race
+	returnval = LookupPlane(normal, origin);
+	if (returnval != -1)
 	{
 		ThreadUnlock();
-		goto find_plane; //check to see if other thread added plane we need
+		return returnval;
 	}
 
     // create new planes - double check that we have room for 2 planes
@@ -84,12 +196,12 @@ int FindIntPlane(const vec_t* const normal, const vec_t* const origin)
 	else
 	{ returnval = g_nummapplanes; }
 
+	PlaneHashInsert(g_nummapplanes);
+	PlaneHashInsert(g_nummapplanes + 1);
 	g_nummapplanes += 2;
 	ThreadUnlock();
 	return returnval;
 }
-
-
 
 int PlaneFromPoints(const vec_t* const p0, const vec_t* const p1, const vec_t* const p2)
 {
