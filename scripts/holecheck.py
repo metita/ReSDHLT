@@ -10,11 +10,13 @@ yet stay within ON_EPSILON of each other, and sdHLBSP used to lose the face.
 bspcheck.py cannot see it, because every face that IS in the BSP is valid.
 
 How: rays are cast through hull 0 of the world model. Where a ray first enters
-solid or sky, some world face must lie on that node plane, cover the hit point
-and face the viewer. If none does, that spot is a hole.
+solid or sky, a face the engine draws (one listed by a non-solid leaf) must face
+the viewer and cross the ray there, on that node plane or a hair behind it: two
+nearly coplanar faces can leave the solid boundary on one plane and the drawn
+face on the other, which looks fine in game. If none does, that spot is a hole.
 
-With a .map, rays start just in front of random points on the visible world
-brush faces and aim back at them, so every face gets tested. Without one, rays
+With a .map, rays start just in front of random points on the visible
+worldspawn and func_detail brush faces and aim back at them, so every face gets tested. Without one, rays
 start at random empty points. Faces the compiler removes on purpose (NULL,
 SKIP, CLIP, BEVEL, sky) show up as holes in the second mode; the first one
 does not aim at them, though a ray can still graze one near an edge.
@@ -34,7 +36,7 @@ from collections import defaultdict
 CONTENTS_EMPTY, CONTENTS_SOLID, CONTENTS_SKY = -1, -2, -6
 LUMP_PLANES, LUMP_TEXTURES, LUMP_VERTEXES, LUMP_NODES = 1, 2, 3, 5
 LUMP_TEXINFO, LUMP_FACES, LUMP_LEAFS, LUMP_EDGES = 6, 7, 10, 12
-LUMP_SURFEDGES, LUMP_MODELS = 13, 14
+LUMP_MARKSURFACES, LUMP_SURFEDGES, LUMP_MODELS = 11, 13, 14
 TOOL_TEXTURES = ("NULL", "SKIP", "CLIP", "BEVEL", "ORIGIN", "HINT", "SOLIDHINT",
                  "BEVELHINT", "AAATRIGGER", "BOUNDINGBOX", "CONTENT", "SKY")
 
@@ -97,6 +99,45 @@ class Bsp:
                 e = edges[abs(se)]
                 pts.append(vertexes[e[0] if se >= 0 else e[1]])
             self.faces[planenum].append((side, pts, names[texinfo[ti][8]]))
+        # faces the engine can draw: listed by a non-solid leaf's marksurfaces
+        marks = arr(LUMP_MARKSURFACES, "<H")
+        drawn = set()
+        for lf in self.leafs:
+            if lf[0] != CONTENTS_SOLID:
+                for k in range(lf[8], lf[8] + lf[9]):
+                    drawn.add(marks[k][0])
+        self.drawn = []
+        for fi in range(model[14], model[14] + model[15]):
+            if fi not in drawn:
+                continue
+            planenum, side, firstedge, numedges = faces[fi][:4]
+            pts = []
+            for k in range(numedges):
+                se = surfedges[firstedge + k][0]
+                e = edges[abs(se)]
+                pts.append(vertexes[e[0] if se >= 0 else e[1]])
+            pl = self.planes[planenum]
+            n = tuple(-c for c in pl[:3]) if side else pl[:3]
+            d = -pl[3] if side else pl[3]
+            lo = tuple(min(q[i] for q in pts) for i in range(3))
+            hi = tuple(max(q[i] for q in pts) for i in range(3))
+            self.drawn.append((n, d, pts, lo, hi))
+
+    def covered_render(self, p, direction, reach=0.5, tol=0.1):
+        """Some drawable face, facing the viewer, crosses the ray within reach of p."""
+        for n, d, pts, lo, hi in self.drawn:
+            if any(p[i] < lo[i] - reach or p[i] > hi[i] + reach for i in range(3)):
+                continue
+            den = dot(direction, n)
+            if den >= 0:
+                continue
+            t = (d - dot(p, n)) / den
+            if abs(t) > reach:
+                continue
+            q = tuple(p[i] + direction[i] * t for i in range(3))
+            if inside(q, pts, tol):
+                return True
+        return False
 
     def contents(self, p):
         n = self.head
@@ -162,22 +203,29 @@ POINT = re.compile(r"\(\s*([-\d.eE+]+)\s+([-\d.eE+]+)\s+([-\d.eE+]+)\s*\)")
 
 
 def map_world_faces(path):
-    """Visible world brush faces of a .map as (polygon, outward normal)."""
+    """Visible brush faces of worldspawn and func_detail (both end up in the world
+    model) as (polygon, outward normal)."""
     brushes, sides, depth, entity = [], None, 0, -1
+    ent_brushes, classname = [], ""
     for line in open(path, encoding="latin-1"):
         s = line.strip()
         if s == "{":
             depth += 1
             if depth == 1:
                 entity += 1
+                ent_brushes, classname = [], ""
             elif depth == 2:
                 sides = []
             continue
         if s == "}":
-            if depth == 2 and entity == 0:
-                brushes.append(sides)
+            if depth == 2:
+                ent_brushes.append(sides)
+            elif depth == 1 and classname in ("worldspawn", "func_detail"):
+                brushes.extend(ent_brushes)
             depth -= 1
             continue
+        if depth == 1 and s.startswith('"classname"'):
+            classname = s.split('"')[3]
         if depth == 2 and s.startswith("("):
             pts = [tuple(float(c) for c in m) for m in POINT.findall(s)[:3]]
             rest = s[s.rfind(")") + 1:].split()
@@ -272,6 +320,8 @@ def main():
         hits += 1
         p, planenum, side = hit
         result = bsp.covered(p, planenum, side)
+        if result != "ok" and bsp.covered_render(p, tuple(c / size for c in d)):
+            result = "ok"
         if result == "hole":
             holes.append((p, planenum, origin))
         elif result == "backface":

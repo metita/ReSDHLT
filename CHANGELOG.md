@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- BSP: maps that compiled with 0.10.0 could leak with 0.10.1, so no portal file
+  and no VIS. The finer portal cut of 0.10.1 turned slits between brushes the
+  editor meant to touch (2079.98 against 2080) into real portals, and the
+  outside fill went through them. Portals narrower than `ON_EPSILON` are closed
+  again for the outside fill, the leak trail and `FillInside`.
+- CSG: brushes with non-planar faces left by vertex manipulation are rebuilt as
+  the solid the editor shows. A `.map` face is three points, so CSG used to
+  build a different solid, up to a unit off, and see-through seams opened
+  between neighbouring brushes. For J.A.C.K. and Hammer maps the brush becomes
+  the convex hull of the points it writes, plus any corner it never writes,
+  snapped to the vertex a neighbouring brush writes when the plane intersection
+  put it a fraction of a unit away. Brushes whose points fit their planes are
+  untouched. `-noconvexfix` turns it off.
+
+### Changed
+- `scripts/holecheck.py` counts a spot as covered when any face the engine
+  draws crosses the ray there, not only faces on the node plane, and aims at
+  `func_detail` faces too. The 28 spots reported for 0.10.1 were such cases.
+
 ## [0.10.1] - 2026-09-24
 
 ### Fixed

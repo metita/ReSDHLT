@@ -2,6 +2,13 @@
 
 #include "csg.h"
 
+#include <algorithm>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+struct vec3_array { vec3_t v; };
+
 int             g_nummapbrushes;
 brush_t         g_mapbrushes[MAX_MAP_BRUSHES];
 
@@ -141,6 +148,446 @@ static bool CheckForInvisible(entity_t* mapent)
 
 	return false;
 }
+// =====================================================================================
+//  FixNonPlanarBrushes
+//      A .map face is three points, but after vertex manipulation J.A.C.K. (and Hammer)
+//      keep faces with four or more vertices that are no longer planar. The editor draws
+//      the solid those vertices span; CSG intersected the planes of three points per face
+//      and got a different solid, shifted by up to a unit, so neighbouring brushes no
+//      longer met and the player saw through the seams.
+//      These editors write real vertices, so the solid the editor shows is recovered as
+//      the convex hull of:
+//        - every point the brush writes, and
+//        - every corner of the plane intersection that the brush never writes. Such a
+//          corner is the editor vertex when the faces around it are planar; when they are
+//          not, it lands a fraction of a unit off, next to the vertex a neighbouring brush
+//          does write (the editor moved them together), and it is snapped there.
+//      A brush is rebuilt only if a written point lies outside another face's plane or a
+//      corner had to be snapped, so planar brushes and other editors are untouched. Each
+//      hull face takes the texture of the original face that shares most of its points.
+// =====================================================================================
+bool g_convexfix = DEFAULT_CONVEXFIX;
+static int g_numconvexfixed = 0;
+
+#define CONVEXFIX_MAXPOINTS    64
+#define CONVEXFIX_HULL_EPSILON 0.01
+#define CONVEXFIX_SNAP         0.75  // how far a corner may sit from the shared vertex
+#define CONVEXFIX_MAXMOVE      1.0   // how far the rebuilt solid may move any corner
+#define CONVEXFIX_CELL         8.0
+
+static bool SidePlane(const side_t* s, vec3_t normal, vec_t* dist)
+{
+	vec3_t v1, v2;
+	VectorSubtract(s->planepts[0], s->planepts[1], v1);
+	VectorSubtract(s->planepts[2], s->planepts[1], v2);
+	CrossProduct(v1, v2, normal);
+	if (!VectorNormalize(normal))
+	{
+		return false;
+	}
+	*dist = DotProduct(normal, s->planepts[0]);
+	return true;
+}
+
+static void AddUniquePoint(std::vector<vec3_array>& pts, const vec_t* p)
+{
+	for (const vec3_array& q : pts)
+	{
+		vec3_t delta;
+		VectorSubtract(q.v, p, delta);
+		if (VectorLength(delta) < 0.01)
+		{
+			return;
+		}
+	}
+	vec3_array a;
+	VectorCopy(p, a.v);
+	pts.push_back(a);
+}
+
+// Convex hull of pts as brush sides; textures come from the closest original side.
+static bool BuildHullSides(const std::vector<vec3_array>& pts, const side_t* sides, const int numsides,
+	std::vector<side_t>& newsides)
+{
+	const int n = (int)pts.size();
+	if (n < 4 || n > CONVEXFIX_MAXPOINTS)
+	{
+		return false;
+	}
+	std::vector<vec3_array> normals(numsides);
+	std::vector<vec_t> dists(numsides);
+	for (int i = 0; i < numsides; i++)
+	{
+		if (!SidePlane(&sides[i], normals[i].v, &dists[i]))
+		{
+			return false;
+		}
+	}
+	// a facet is a plane with every point on or behind it; the points within
+	// CONVEXFIX_HULL_EPSILON of it form one face, so a face bent by less than that stays
+	// a single side instead of two sides CSG would merge into one plane
+	std::vector<std::vector<int>> facets;
+	for (int i = 0; i < n; i++)
+	for (int j = i + 1; j < n; j++)
+	for (int k = j + 1; k < n; k++)
+	{
+		vec3_t e1, e2, normal;
+		VectorSubtract(pts[j].v, pts[i].v, e1);
+		VectorSubtract(pts[k].v, pts[i].v, e2);
+		CrossProduct(e1, e2, normal);
+		if (VectorNormalize(normal) < 1e-6)
+		{
+			continue;
+		}
+		vec_t dist = DotProduct(normal, pts[i].v);
+		int front = 0, back = 0;
+		std::vector<int> on;
+		for (int m = 0; m < n; m++)
+		{
+			vec_t d = DotProduct(pts[m].v, normal) - dist;
+			if (d > CONVEXFIX_HULL_EPSILON) front++;
+			else if (d < -CONVEXFIX_HULL_EPSILON) back++;
+			else on.push_back(m);
+		}
+		if (front && back)
+		{
+			continue;
+		}
+		if (front)
+		{
+			VectorSubtract(vec3_origin, normal, normal);
+		}
+		if (std::find(facets.begin(), facets.end(), on) != facets.end())
+		{
+			continue;
+		}
+		facets.push_back(on);
+
+		// the largest triangle of the face defines its plane most precisely
+		int a = on[0], bb = on[1], c = on[2];
+		vec_t best = -1;
+		for (size_t x = 0; x < on.size(); x++)
+		for (size_t y = x + 1; y < on.size(); y++)
+		for (size_t z = y + 1; z < on.size(); z++)
+		{
+			vec3_t f1, f2, cr;
+			VectorSubtract(pts[on[y]].v, pts[on[x]].v, f1);
+			VectorSubtract(pts[on[z]].v, pts[on[x]].v, f2);
+			CrossProduct(f1, f2, cr);
+			vec_t area = VectorLength(cr);
+			if (area > best)
+			{
+				best = area;
+				a = on[x]; bb = on[y]; c = on[z];
+			}
+		}
+		side_t s;
+		VectorCopy(pts[a].v, s.planepts[0]);
+		VectorCopy(pts[bb].v, s.planepts[1]);
+		VectorCopy(pts[c].v, s.planepts[2]);
+		vec3_t sn;
+		vec_t sd;
+		if (!SidePlane(&s, sn, &sd))
+		{
+			return false;
+		}
+		if (DotProduct(sn, normal) < 0)
+		{
+			VectorCopy(pts[c].v, s.planepts[0]);
+			VectorCopy(pts[a].v, s.planepts[2]);
+			SidePlane(&s, sn, &sd);
+		}
+
+		int bestside = 0, bestcount = -1;
+		vec_t bestdot = -2;
+		for (int si = 0; si < numsides; si++)
+		{
+			int count = 0;
+			for (int q = 0; q < 3; q++)
+			{
+				if (fabs(DotProduct(sides[si].planepts[q], sn) - sd) <= ON_EPSILON)
+				{
+					count++;
+				}
+			}
+			vec_t dot = DotProduct(normals[si].v, sn);
+			if (count > bestcount || (count == bestcount && dot > bestdot))
+			{
+				bestcount = count;
+				bestdot = dot;
+				bestside = si;
+			}
+		}
+		s.td = sides[bestside].td;
+		s.bevel = sides[bestside].bevel;
+		newsides.push_back(s);
+	}
+	if (newsides.size() < 4)
+	{
+		return false;
+	}
+	// Sides FindIntPlane would give the same plane, or a plane and its flip, stop the
+	// compile as coplanar faces. It snaps near-axial normals and compares within
+	// DIR_EPSILON and DIST_EPSILON; twice those here keeps well clear of it.
+	for (size_t x = 0; x < newsides.size(); x++)
+	{
+		vec3_t nx; vec_t dx;
+		SidePlane(&newsides[x], nx, &dx);
+		for (size_t y = x + 1; y < newsides.size(); y++)
+		{
+			vec3_t ny; vec_t dy;
+			SidePlane(&newsides[y], ny, &dy);
+			for (int sign = -1; sign <= 1; sign += 2)
+			{
+				if (fabs(nx[0] - sign * ny[0]) < 2 * DIR_EPSILON && fabs(nx[1] - sign * ny[1]) < 2 * DIR_EPSILON
+					&& fabs(nx[2] - sign * ny[2]) < 2 * DIR_EPSILON
+					&& fabs(DotProduct(newsides[y].planepts[0], nx) - dx) < 2 * ON_EPSILON)
+				{
+					return false;
+				}
+			}
+		}
+	}
+	return true;
+}
+
+// Corners of the solid the planes of the brush's sides enclose.
+static bool PlaneCorners(const side_t* sides, const int numsides, std::vector<vec3_array>& corners)
+{
+	std::vector<vec3_array> normals(numsides);
+	std::vector<vec_t> dists(numsides);
+	for (int i = 0; i < numsides; i++)
+	{
+		if (!SidePlane(&sides[i], normals[i].v, &dists[i]))
+		{
+			return false;
+		}
+	}
+	for (int i = 0; i < numsides; i++)
+	{
+		Winding w(normals[i].v, dists[i]);
+		bool left = true;
+		for (int j = 0; j < numsides && left; j++)
+		{
+			if (j == i)
+			{
+				continue;
+			}
+			vec3_t flipped;
+			VectorSubtract(vec3_origin, normals[j].v, flipped);
+			left = w.Chop(flipped, -dists[j], NORMAL_EPSILON);
+		}
+		if (!left)
+		{
+			continue;
+		}
+		for (unsigned int k = 0; k < w.m_NumPoints; k++)
+		{
+			AddUniquePoint(corners, w.m_Points[k]);
+		}
+	}
+	return corners.size() >= 4;
+}
+
+static long long ConvexFixCell(const vec_t* p)
+{
+	long long x = (long long)floor(p[0] / CONVEXFIX_CELL) & 0x1fffff;
+	long long y = (long long)floor(p[1] / CONVEXFIX_CELL) & 0x1fffff;
+	long long z = (long long)floor(p[2] / CONVEXFIX_CELL) & 0x1fffff;
+	return (x << 42) | (y << 21) | z;
+}
+
+static void FixNonPlanarBrushes()
+{
+	if (!g_convexfix)
+	{
+		return;
+	}
+	const char* generator = ValueForKey(&g_entities[0], "_generator");
+	if (!strstr(generator, "J.A.C.K") && !strstr(generator, "Hammer"))
+	{
+		return;
+	}
+
+	// every point any brush writes, to find the vertex a corner was meant to share
+	std::unordered_map<long long, std::vector<std::pair<int, vec3_array>>> written;
+	for (int bi = 0; bi < g_nummapbrushes; bi++)
+	{
+		const brush_t* b = &g_mapbrushes[bi];
+		for (int i = 0; i < b->numsides; i++)
+		{
+			for (int k = 0; k < 3; k++)
+			{
+				vec3_array p;
+				VectorCopy(g_brushsides[b->firstside + i].planepts[k], p.v);
+				written[ConvexFixCell(p.v)].push_back(std::make_pair(bi, p));
+			}
+		}
+	}
+
+	for (int bi = 0; bi < g_nummapbrushes; bi++)
+	{
+		brush_t* b = &g_mapbrushes[bi];
+		const side_t* sides = &g_brushsides[b->firstside];
+		const int numsides = b->numsides;
+		if (numsides < 4)
+		{
+			continue;
+		}
+		bool skip = false;
+		for (int i = 0; i < numsides; i++)
+		{
+			if (sides[i].td.txcommand)
+			{
+				skip = true;
+			}
+		}
+		std::vector<vec3_array> own;
+		for (int i = 0; i < numsides; i++)
+		{
+			for (int k = 0; k < 3; k++)
+			{
+				AddUniquePoint(own, sides[i].planepts[k]);
+			}
+		}
+		std::vector<vec3_array> corners;
+		if (skip || !PlaneCorners(sides, numsides, corners))
+		{
+			continue;
+		}
+
+		// a written point outside another side's plane: the faces are not planar
+		bool inconsistent = false;
+		for (int i = 0; i < numsides && !inconsistent; i++)
+		{
+			vec3_t ni; vec_t di;
+			SidePlane(&sides[i], ni, &di);
+			for (const vec3_array& p : own)
+			{
+				if (DotProduct(p.v, ni) - di > ON_EPSILON)
+				{
+					inconsistent = true;
+					break;
+				}
+			}
+		}
+
+		std::vector<vec3_array> pts = own;
+		bool snapped = false;
+		for (const vec3_array& c : corners)
+		{
+			vec_t nearown = 1e30;
+			for (const vec3_array& p : own)
+			{
+				vec3_t delta;
+				VectorSubtract(p.v, c.v, delta);
+				nearown = qmin(nearown, VectorLength(delta));
+			}
+			if (nearown < 0.01)
+			{
+				continue;
+			}
+			// closest vertex another brush writes
+			const vec3_array* best = NULL;
+			vec_t bestdist = CONVEXFIX_SNAP;
+			for (int dx = -1; dx <= 1; dx++)
+			for (int dy = -1; dy <= 1; dy++)
+			for (int dz = -1; dz <= 1; dz++)
+			{
+				vec3_t probe = {c.v[0] + dx * CONVEXFIX_CELL, c.v[1] + dy * CONVEXFIX_CELL, c.v[2] + dz * CONVEXFIX_CELL};
+				auto it = written.find(ConvexFixCell(probe));
+				if (it == written.end())
+				{
+					continue;
+				}
+				for (const auto& entry : it->second)
+				{
+					if (entry.first == bi)
+					{
+						continue;
+					}
+					vec3_t delta;
+					VectorSubtract(entry.second.v, c.v, delta);
+					vec_t d = VectorLength(delta);
+					if (d < bestdist)
+					{
+						bestdist = d;
+						best = &entry.second;
+					}
+				}
+			}
+			if (best && bestdist >= 0.01)
+			{
+				AddUniquePoint(pts, best->v);
+				snapped = true;
+			}
+			else if (!inconsistent)
+			{
+				// a corner the brush never writes but no neighbour disputes: keep it
+				AddUniquePoint(pts, c.v);
+			}
+		}
+		if (!inconsistent && !snapped)
+		{
+			continue;
+		}
+
+		std::vector<side_t> newsides;
+		if (!BuildHullSides(pts, sides, numsides, newsides))
+		{
+			continue;
+		}
+		// the rebuilt solid must stay close to the one the planes gave
+		std::vector<vec3_array> newcorners;
+		if (!PlaneCorners(newsides.data(), (int)newsides.size(), newcorners))
+		{
+			continue;
+		}
+		bool close = true;
+		for (const vec3_array& p : newcorners)
+		{
+			vec_t nearest = 1e30;
+			for (const vec3_array& q : corners)
+			{
+				vec3_t delta;
+				VectorSubtract(p.v, q.v, delta);
+				nearest = qmin(nearest, VectorLength(delta));
+			}
+			for (const vec3_array& q : own)
+			{
+				vec3_t delta;
+				VectorSubtract(p.v, q.v, delta);
+				nearest = qmin(nearest, VectorLength(delta));
+			}
+			if (nearest > CONVEXFIX_MAXMOVE)
+			{
+				close = false;
+				break;
+			}
+		}
+		if (!close)
+		{
+			continue;
+		}
+
+		// the sides move to the end of the array; the old slots are left unused
+		hlassume(g_numbrushsides + (int)newsides.size() <= MAX_MAP_SIDES, assume_MAX_MAP_SIDES);
+		b->firstside = g_numbrushsides;
+		b->numsides = (int)newsides.size();
+		for (size_t x = 0; x < newsides.size(); x++)
+		{
+			g_brushsides[g_numbrushsides++] = newsides[x];
+		}
+		g_numconvexfixed++;
+		Developer(DEVELOPER_LEVEL_MESSAGE, "Entity %i, Brush %i: non-planar faces, rebuilt from %i vertices as %i sides\n",
+			b->originalentitynum, b->originalbrushnum, (int)pts.size(), b->numsides);
+	}
+	if (g_numconvexfixed)
+	{
+		Log("%i brushes with non-planar faces rebuilt from their vertices\n", g_numconvexfixed);
+	}
+}
+
 // =====================================================================================
 //  ParseBrush
 //      parse a brush from script
@@ -1079,6 +1526,8 @@ void            LoadMapFile(const char* const filename)
 		g_numparsedentities++;
     }
 
+	FixNonPlanarBrushes();
+
 	// fold equivalent static brush entities together before anything starts
 	// counting entities or handing out models
 	MergeStaticEntities();
@@ -1108,5 +1557,5 @@ void            LoadMapFile(const char* const filename)
     Verbose("%5i map entities \n", g_numentities - num_engine_entities);
     Verbose("%5i engine entities\n", num_engine_entities);
 
-    // AJM: added in 
+    // AJM: added in
 }

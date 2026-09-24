@@ -1688,6 +1688,7 @@ static void     Usage()
     Log("    -nowadtextures   : Include all used textures into bsp\n");
     Log("    -wadinclude file : Include specific wad or directory into bsp\n");
     Log("    -noclip          : don't create clipping hull\n");
+    Log("    -noconvexfix     : keep non-planar brushes as the 3 points of each face say\n");
     
     Log("    -clipeconomy     : turn clipnode economy mode on\n");
 
@@ -1819,6 +1820,7 @@ static void     Settings()
     // HLCSG Specific Settings
 
     Log("noclip                [ %7s ] [ %7s ]\n", g_noclip          ? "on" : "off", DEFAULT_NOCLIP       ? "on" : "off");
+    Log("non-planar brush fix  [ %7s ] [ %7s ]\n", g_convexfix       ? "on" : "off", DEFAULT_CONVEXFIX    ? "on" : "off");
 
     Log("null texture stripping[ %7s ] [ %7s ]\n", g_bUseNullTex     ? "on" : "off", DEFAULT_NULLTEX      ? "on" : "off");
 
@@ -2039,6 +2041,10 @@ int             main(const int argc_input, char** argv_input)
         else if (!strcasecmp(argv[i], "-noclip"))
         {
             g_noclip = true;
+        }
+        else if (!strcasecmp(argv[i], "-noconvexfix"))
+        {
+            g_convexfix = false;
         }
         else if (!strcasecmp(argv[i], "-onlyents"))
         {
