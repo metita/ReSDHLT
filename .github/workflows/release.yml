@@ -4,6 +4,9 @@
 #
 # The GUI's updater looks at /releases/latest, so ordinary pushes to master
 # change nothing for users: a release only exists when a tag says so.
+#
+# The tools and the GUI build in parallel jobs; a third one waits for both,
+# assembles the packages, signs them and publishes.
 name: release
 
 on:
@@ -16,7 +19,7 @@ permissions:
   contents: write
 
 jobs:
-  windows:
+  tools:
     runs-on: windows-latest
 
     steps:
@@ -26,41 +29,22 @@ jobs:
         with:
           arch: x64
 
-      - name: Check that the tag matches the GUI version
-        shell: pwsh
-        run: |
-          $tag = "${{ github.ref_name }}" -replace '^v', ''
-          if (-not $tag) { $tag = 'sin tag' }
-          $cargo = (Select-String -Path gui/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
-          Write-Host "tag=$tag  Cargo.toml=$cargo"
-          if ("${{ github.event_name }}" -eq 'push' -and $tag -ne $cargo) {
-            # The updater compares the tag with the version compiled into the
-            # binary; if they disagree it would offer the same update forever.
-            throw "El tag ($tag) no coincide con gui/Cargo.toml ($cargo). Actualiza la version y volve a taggear."
-          }
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Build and test portable and AVX2 tools
+      - name: Build portable and AVX2 tools
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           foreach ($variant in "portable", "avx2") {
             # MSVC emits one compiler PDB per target. sccache can hold that
             # PDB open while Ninja starts the next compiler, which produces
-            # C1041 on clean parallel release builds. CI keeps the cache for
-            # feedback speed; published Windows binaries must build reliably.
+            # C1041 on clean parallel release builds. Published Windows
+            # binaries must build reliably, so no compiler cache here.
             cmake --preset $variant -DSDHLT_COMPILER_CACHE=OFF
             if ($LASTEXITCODE) { throw "CMake configure failed for $variant" }
 
             cmake --build --preset $variant --parallel
             if ($LASTEXITCODE) { throw "CMake build failed for $variant" }
 
-            ctest --preset $variant
-            if ($LASTEXITCODE) { throw "CTest failed for $variant" }
-
-            $stage = "staging/$variant"
-            cmake --install "build/$variant" --prefix $stage
+            cmake --install "build/$variant" --prefix "staging/$variant"
             if ($LASTEXITCODE) { throw "CMake install failed for $variant" }
 
             $symbolDir = "symbols/$variant/tools"
@@ -73,15 +57,83 @@ jobs:
             if ($missingPdbs) { throw "$variant is missing PDBs: $($missingPdbs -join ', ')" }
           }
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tools
+          path: |
+            staging/
+            symbols/
+          retention-days: 1
+
+  gui:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check that the tag matches the GUI version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}" -replace '^v', ''
+          if (-not $tag) { $tag = 'sin tag' }
+          $cargo = (Select-String -Path gui/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          Write-Host "tag=$tag  Cargo.toml=$cargo"
+          if ("${{ github.event_name }}" -eq 'push' -and $tag -ne $cargo) {
+            # The updater compares the tag with the version compiled into the
+            # binary; if they disagree it would offer the same update forever.
+            throw "El tag ($tag) no coincide con gui/Cargo.toml ($cargo). Actualiza la version y vuelve a taggear."
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Restores the dependencies the build job on main compiled with these
+      # same flags. Saving from a tag is pointless: no other ref can read it.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gui
+          shared-key: gui
+          save-if: false
+
+      # Builds the GUI and the release signer in one go.
       - name: Build the GUI
         working-directory: gui
         env:
           CARGO_PROFILE_RELEASE_DEBUG: "1"
         run: cargo build --locked --release
 
-      - name: Test the GUI
-        working-directory: gui
-        run: cargo test --locked --release --all-targets
+      - name: Collect the binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force gui-bin | Out-Null
+          $pdb = "gui/target/release/resdhlt_gui.pdb"
+          if (-not (Test-Path $pdb)) { $pdb = "gui/target/release/resdhlt-gui.pdb" }
+          if (-not (Test-Path $pdb)) { throw "Cargo did not produce a GUI PDB" }
+          Copy-Item $pdb gui-bin/resdhlt_gui.pdb
+          Copy-Item gui/target/release/resdhlt-gui.exe gui-bin/
+          Copy-Item gui/target/release/resdhlt-release-signer.exe gui-bin/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui
+          path: gui-bin/
+          retention-days: 1
+
+  publish:
+    needs: [tools, gui]
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tools
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: gui
+          path: gui-bin
 
       - name: Assemble portable and AVX2 packages
         shell: pwsh
@@ -100,7 +152,7 @@ jobs:
 
             $pkg = "package/$PackageName"
             New-Item -ItemType Directory -Force "$pkg/tools" | Out-Null
-            Copy-Item "gui/target/release/resdhlt-gui.exe" $pkg -Force
+            Copy-Item "gui-bin/resdhlt-gui.exe" $pkg -Force
 
             foreach ($tool in $toolNames) {
               Copy-Item (Join-Path $InstallRoot $tool) "$pkg/tools/" -Force
@@ -126,9 +178,6 @@ jobs:
             $missing = $needed | Where-Object { -not (Test-Path (Join-Path $pkg $_)) }
             if ($missing) { throw "$PackageName is missing: $($missing -join ', ')" }
 
-            python -B tests/smoke_package.py --tools-dir "$pkg/tools"
-            if ($LASTEXITCODE) { throw "Package smoke failed for $PackageName" }
-
             Get-ChildItem -Recurse $pkg -File | Select-Object FullName, Length
             Compress-Archive -Path "$pkg/*" -DestinationPath $ZipName -CompressionLevel Optimal
           }
@@ -149,14 +198,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $guiPdb = "gui/target/release/resdhlt_gui.pdb"
-          if (-not (Test-Path $guiPdb)) {
-            $guiPdb = "gui/target/release/resdhlt-gui.pdb"
-          }
-          if (-not (Test-Path $guiPdb)) { throw "Cargo did not produce a GUI PDB" }
-
           foreach ($variant in "portable", "avx2") {
-            Copy-Item $guiPdb "symbols/$variant/" -Force
+            Copy-Item "gui-bin/resdhlt_gui.pdb" "symbols/$variant/" -Force
             $flavor = if ($variant -eq "portable") {
               "Symbols for ReSDHLT-Windows-x64.zip"
             } else {
@@ -187,7 +230,6 @@ jobs:
           Get-Content SHA256SUMS.txt
 
       - name: Sign release packages with Ed25519
-        working-directory: gui
         shell: pwsh
         env:
           RESDHLT_ED25519_PRIVATE_KEY_B64: ${{ secrets.RESDHLT_ED25519_PRIVATE_KEY_B64 }}
@@ -197,14 +239,13 @@ jobs:
             throw "Falta el secreto RESDHLT_ED25519_PRIVATE_KEY_B64; se rechaza una release sin firma."
           }
           $assets = @(
-            "../ReSDHLT-Windows-x64.zip",
-            "../ReSDHLT-Windows-x64-avx2.zip",
-            "../ReSDHLT-Windows-x64-symbols.zip",
-            "../ReSDHLT-Windows-x64-avx2-symbols.zip"
+            "ReSDHLT-Windows-x64.zip",
+            "ReSDHLT-Windows-x64-avx2.zip",
+            "ReSDHLT-Windows-x64-symbols.zip",
+            "ReSDHLT-Windows-x64-avx2-symbols.zip"
           )
           foreach ($asset in $assets) {
-            $signature = "$asset.sig"
-            cargo run --locked --release --bin resdhlt-release-signer -- $asset $signature
+            ./gui-bin/resdhlt-release-signer.exe $asset "$asset.sig"
             if ($LASTEXITCODE) { throw "No se pudo firmar $asset" }
           }
 

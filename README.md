@@ -160,7 +160,15 @@ name at runtime.
 `gui/` is a dark theme compiler front end written in Rust with egui. Pick a map,
 pick a preset, press compile, watch the log. Every option carries a tooltip
 saying what it does and when to use it, and there is a tab summarising the
-recommendations that the benchmarks actually support.
+recommendations that the benchmarks actually support. Every flag this fork adds
+has a control there, ambient occlusion, soft shadows and the non-planar brush fix
+included.
+
+Its "Análisis" tab checks the compiled map after every successful compile, no
+Python needed: see-through holes, the areas with the most wpoly, faces covered
+by static entities or buried in walls, and broken geometry. Each finding has a
+coordinate to copy, and each list saves as a pointfile the editor loads like a
+leak trail.
 
 It updates itself from GitHub Releases. The check runs asynchronously on launch,
 but installation always requires an explicit click and is blocked while a
@@ -321,6 +329,10 @@ regenerating the embedded SPIR-V with `python scripts/gen_spirv.py`, which needs
 Some documents are in Spanish. That is what the people who use this fork read.
 
 ## Measuring your own changes
+
+The GUI's "Análisis" tab runs the same checks as `bspcheck.py`, `holecheck.py`,
+`wpolymap.py` and `hiddenfaces.py` below. The scripts stay for command-line use,
+on Linux or in a batch of maps.
 
 `scripts/compilebench.py` times a full CSG, BSP, VIS and RAD run and fingerprints
 every BSP lump, so a change can be shown not to alter the output:

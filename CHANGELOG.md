@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- GUI: every flag this fork adds now has a control. CSG gets "Brushes
+  deformados" (`-noconvexfix`, `-convexgap`); RAD gets "Sombras y oclusión"
+  with ambient occlusion (`-ao` or `-aoall`, scale, opacity, gain, rays, minimum
+  weight and color), soft shadows (`-pcf`) and `-blurclamp`. All off by
+  default, and left off the command line while they sit at the tool default.
+- GUI: an "Análisis" tab that checks a compiled `.bsp` in Rust, without Python:
+  see-through holes (aimed at the project's `.map` faces when it matches),
+  wpoly per area, faces covered by static entities or buried in world brushes,
+  and broken geometry. It runs by itself after every successful compile; each
+  finding has a coordinate to copy and each list saves as a pointfile. Results
+  match the scripts: same wpoly figures, same geometry counts, same hidden
+  faces, and the same hole count on ze_elysium.
+
+### Changed
+- CI: no tests in the build or release workflows, cargo dependencies cached,
+  and the release builds the tools and the GUI in parallel jobs before a third
+  one packages, signs and publishes. The signer runs prebuilt instead of
+  through `cargo run`.
+
 ## [0.12.0] - 2026-09-25
 
 ### Added

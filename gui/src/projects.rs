@@ -73,6 +73,9 @@ pub struct Library {
     /// is one request, not ten.
     #[serde(default)]
     pub last_update_check: u64,
+    /// Which checks the Análisis tab runs. Global, not per project.
+    #[serde(default)]
+    pub analysis: crate::analysis::Prefs,
 }
 
 fn yes() -> bool {
@@ -86,6 +89,7 @@ impl Default for Library {
             active: None,
             check_updates: true,
             last_update_check: 0,
+            analysis: crate::analysis::Prefs::default(),
         }
     }
 }

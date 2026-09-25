@@ -12,6 +12,15 @@ use serde::{Deserialize, Serialize};
 /// the portal file, the .p0-.p3 intermediates and the copied .map.
 pub const WORK_SUBDIR: &str = "intermedios";
 
+// Tool defaults. An option at its default is left off the command line, so
+// these must match sdHLCSG/qcsg.cpp and sdHLRAD/qrad.h.
+pub const DEFAULT_CONVEXGAP: f32 = 0.2;
+pub const DEFAULT_AO_SCALE: f32 = 32.0;
+pub const DEFAULT_AO_GAIN: f32 = 1.0;
+pub const DEFAULT_AO_LEVEL: u32 = 3;
+pub const DEFAULT_AO_MINWEIGHT: f32 = 0.045;
+pub const DEFAULT_AO_OPACITY: f32 = 1.0;
+
 /// Radiosity visibility matrix method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VisMatrix {
@@ -57,6 +66,42 @@ impl VisMatrix {
                  necesita. La RAM deja de ser un problema, pero es bastante más lento. \
                  Solo tiene sentido cuando los otros dos se quedan sin memoria.\n\n\
                  NO cambia la iluminación resultante."
+            }
+        }
+    }
+}
+
+/// Ray-traced ambient occlusion in RAD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AoMode {
+    Off,
+    /// `-ao`: seedee's AO, only on light gathered per sample.
+    Direct,
+    /// `-aoall`: the same occlusion on all light, texlights and bounces included.
+    All,
+}
+
+impl AoMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            AoMode::Off => "apagada",
+            AoMode::Direct => "solo luz directa (-ao)",
+            AoMode::All => "toda la luz (-aoall)",
+        }
+    }
+
+    pub fn help(self) -> &'static str {
+        match self {
+            AoMode::Off => "Sin oclusión ambiental. RAD escribe lo mismo que siempre.",
+            AoMode::Direct => {
+                "La AO de seedee/SDHLT: oscurece la luz de light, light_spot y \
+                 light_environment en rincones y junto a objetos. No toca la luz de las \
+                 texlights, así que un mapa iluminado con texlights casi no cambia."
+            }
+            AoMode::All => {
+                "La misma oclusión aplicada a toda la luz del punto, texlights y rebotes \
+                 incluidos. Es la que se nota en mapas iluminados con texlights. En \
+                 ze_elysium oscureció el 27% de las caras con un 4% más de tiempo de RAD."
             }
         }
     }
@@ -138,6 +183,10 @@ pub struct Options {
     pub mergesize: u32, // longest side a merged group may reach, 0 = no limit
     pub mergeblend: bool,
     pub texchart: bool,
+    /// Rebuild non-planar brushes (JACK vertex manipulation) as the editor shows them.
+    pub convexfix: bool,
+    /// Smallest editor/plane mismatch, in units, that triggers the rebuild.
+    pub convexgap: f32,
     pub csg_extra: String,
 
     // ---- BSP ----
@@ -183,6 +232,17 @@ pub struct Options {
     pub pre25: bool,
     pub nostudioshadow: bool,
     pub profile: bool,
+    pub ao: AoMode,
+    pub ao_scale: f32,
+    pub ao_gain: f32,
+    pub ao_level: u32,
+    pub ao_minweight: f32,
+    pub ao_opacity: f32,
+    pub ao_color: [u8; 3],
+    /// Shadow rays per axis for each sample and light; 1 = one hard test.
+    pub pcf: u32,
+    /// Bilateral limit on the subsample blend; 0 = off.
+    pub blurclamp: f32,
     pub rad_extra: String,
 
     // ---- interface ----
@@ -218,6 +278,8 @@ impl Default for Options {
             mergesize: 1024,
             mergeblend: false,
             texchart: false,
+            convexfix: true,
+            convexgap: DEFAULT_CONVEXGAP,
             csg_extra: String::new(),
 
             run_bsp: true,
@@ -256,6 +318,15 @@ impl Default for Options {
             pre25: true,
             nostudioshadow: false,
             profile: false,
+            ao: AoMode::Off,
+            ao_scale: DEFAULT_AO_SCALE,
+            ao_gain: DEFAULT_AO_GAIN,
+            ao_level: DEFAULT_AO_LEVEL,
+            ao_minweight: DEFAULT_AO_MINWEIGHT,
+            ao_opacity: DEFAULT_AO_OPACITY,
+            ao_color: [0, 0, 0],
+            pcf: 1,
+            blurclamp: 0.0,
             rad_extra: String::new(),
 
             ui_scale: 1.0,
@@ -690,6 +761,11 @@ impl Options {
         if self.texchart {
             a.push("-texchart".to_string());
         }
+        if !self.convexfix {
+            a.push("-noconvexfix".to_string());
+        } else if (self.convexgap - DEFAULT_CONVEXGAP).abs() > 0.001 {
+            push_num(&mut a, "-convexgap", self.convexgap);
+        }
         push_extra(&mut a, &self.csg_extra);
         a
     }
@@ -790,6 +866,41 @@ impl Options {
         }
         if self.profile {
             a.push("-profile".to_string());
+        }
+        if self.ao != AoMode::Off {
+            a.push(
+                if self.ao == AoMode::All {
+                    "-aoall"
+                } else {
+                    "-ao"
+                }
+                .to_string(),
+            );
+            if (self.ao_scale - DEFAULT_AO_SCALE).abs() > 0.001 {
+                push_num(&mut a, "-aoscale", self.ao_scale);
+            }
+            if (self.ao_gain - DEFAULT_AO_GAIN).abs() > 0.001 {
+                push_num(&mut a, "-aogain", self.ao_gain);
+            }
+            if self.ao_level != DEFAULT_AO_LEVEL {
+                push_num(&mut a, "-aolevel", self.ao_level);
+            }
+            if (self.ao_minweight - DEFAULT_AO_MINWEIGHT).abs() > 0.0001 {
+                push_num(&mut a, "-aominweight", self.ao_minweight);
+            }
+            if (self.ao_opacity - DEFAULT_AO_OPACITY).abs() > 0.001 {
+                push_num(&mut a, "-aoopacity", self.ao_opacity);
+            }
+            if self.ao_color != [0, 0, 0] {
+                a.push("-aocolor".to_string());
+                a.extend(self.ao_color.iter().map(|c| c.to_string()));
+            }
+        }
+        if self.pcf > 1 {
+            push_num(&mut a, "-pcf", self.pcf);
+        }
+        if self.blurclamp > 0.001 {
+            push_num(&mut a, "-blurclamp", self.blurclamp);
         }
         push_extra(&mut a, &self.rad_extra);
         a
@@ -941,6 +1052,20 @@ impl Options {
             w.push(
                 "-skylevel 8 son 65.538 rayos de cielo por muestra. Es enormemente más \
                  lento y la diferencia con 6 no se ve."
+                    .to_string(),
+            );
+        }
+        if self.gpu && (self.ao != AoMode::Off || self.pcf > 1) {
+            w.push(
+                "Con oclusión ambiental o sombras suaves, RAD calcula la luz directa en la \
+                 CPU aunque la GPU esté activada. La GPU sigue haciendo las transferencias."
+                    .to_string(),
+            );
+        }
+        if !self.convexfix {
+            w.push(
+                "Sin el arreglo de brushes no planos, los sólidos deformados con vertex \
+                 manipulation pueden dejar caras invisibles o rendijas en el juego."
                     .to_string(),
             );
         }

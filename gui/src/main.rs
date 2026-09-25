@@ -2,6 +2,7 @@
 // panics are visible.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod analysis;
 mod options;
 mod projects;
 mod runner;
@@ -18,7 +19,7 @@ use eframe::egui;
 use egui::{Align, Layout, RichText};
 use fs2::FileExt;
 
-use options::{always_rules, Options, Preset, VisMatrix, VisQuality};
+use options::{always_rules, AoMode, Options, Preset, VisMatrix, VisQuality};
 use projects::{FileEntry, FileKind, Library, Project};
 use runner::{CompilePlan, Job, LineKind, Msg, RunOutcome, Stage, STAGES};
 use theme::*;
@@ -35,6 +36,7 @@ enum Tab {
     Bsp,
     Vis,
     Rad,
+    Analysis,
     Advice,
 }
 
@@ -47,13 +49,14 @@ impl Tab {
     }
 }
 
-const TABS: [(Tab, &str); 7] = [
+const TABS: [(Tab, &str); 8] = [
     (Tab::Projects, "Proyectos"),
     (Tab::Compile, "Compilar"),
     (Tab::Csg, "CSG"),
     (Tab::Bsp, "BSP"),
     (Tab::Vis, "VIS"),
     (Tab::Rad, "RAD"),
+    (Tab::Analysis, "Análisis"),
     (Tab::Advice, "Guía"),
 ];
 
@@ -131,6 +134,13 @@ struct App {
     startup_check_done: bool,
     update_install: Option<update::Install>,
     installing: bool,
+
+    // ---- analysis ----
+    analysis_job: Option<analysis::Job>,
+    analysis_report: Option<analysis::Report>,
+    analysis_status: String,
+    /// .bsp picked by hand. Empty means the last compile's result.
+    analysis_bsp: String,
 }
 
 impl Default for App {
@@ -221,6 +231,11 @@ impl Default for App {
             startup_check_done: false,
             update_install: None,
             installing: false,
+
+            analysis_job: None,
+            analysis_report: None,
+            analysis_status: String::new(),
+            analysis_bsp: String::new(),
         }
     }
 }
@@ -523,6 +538,96 @@ impl App {
         }
         if finished {
             self.job = None;
+            if self.last_outcome == Some(RunOutcome::Succeeded)
+                && self.lib.analysis.after_compile
+                && self.opts.run_bsp | self.opts.run_vis | self.opts.run_rad
+            {
+                self.analysis_bsp.clear();
+                self.start_analysis();
+            }
+        }
+    }
+
+    // ---------------- analysis ----------------
+
+    /// The .bsp the last compile left: beside the project folder when the
+    /// output is organised, in the scratch folder, or next to the source map.
+    fn compiled_bsp(&self) -> Option<PathBuf> {
+        let map = Path::new(self.opts.map_path.trim());
+        let name = map.file_stem()?.to_os_string();
+        let mut file = PathBuf::from(name);
+        file.set_extension("bsp");
+        [
+            self.opts.output_base(),
+            self.opts.work_dir(),
+            map.parent().map(|p| p.to_path_buf()),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|dir| dir.join(&file))
+        .find(|p| p.is_file())
+    }
+
+    fn analysis_target(&self) -> Option<PathBuf> {
+        let manual = self.analysis_bsp.trim();
+        if manual.is_empty() {
+            self.compiled_bsp()
+        } else {
+            Some(PathBuf::from(manual))
+        }
+    }
+
+    fn start_analysis(&mut self) {
+        if self.analysis_job.is_some() {
+            return;
+        }
+        let Some(bsp) = self.analysis_target().filter(|p| p.is_file()) else {
+            self.analysis_status = "No hay .bsp para analizar: compila el mapa o elige uno.".into();
+            return;
+        };
+        // The source map only helps if it is the one this .bsp came from.
+        let map = PathBuf::from(self.opts.map_path.trim());
+        let map = (map.file_stem() == bsp.file_stem() && map.is_file()).then_some(map);
+        self.analysis_status = format!("Analizando {}", bsp.display());
+        self.analysis_job = Some(analysis::start(bsp, map, self.lib.analysis.clone()));
+    }
+
+    fn drain_analysis(&mut self) {
+        let Some(job) = &self.analysis_job else {
+            return;
+        };
+        let mut done = false;
+        while let Ok(msg) = job.rx.try_recv() {
+            match msg {
+                analysis::Msg::Progress(text) => self.analysis_status = text,
+                analysis::Msg::Done(Ok(report)) => {
+                    let problems = report
+                        .sections
+                        .iter()
+                        .filter(|s| {
+                            matches!(s.level, analysis::Level::Warn | analysis::Level::Error)
+                        })
+                        .count();
+                    self.analysis_status = format!(
+                        "Análisis listo en {}: {}",
+                        fmt_secs(report.secs),
+                        if problems == 0 {
+                            "sin problemas".to_string()
+                        } else {
+                            format!("{problems} apartados para revisar")
+                        }
+                    );
+                    self.analysis_report = Some(report);
+                    done = true;
+                }
+                analysis::Msg::Done(Err(error)) => {
+                    self.analysis_status = error;
+                    done = true;
+                }
+            }
+        }
+        if done {
+            self.analysis_job = None;
         }
     }
 
@@ -2543,6 +2648,62 @@ impl App {
                 );
             },
         );
+        card(
+            ui,
+            "Brushes deformados",
+            "vertex manipulation de J.A.C.K. y Hammer",
+            |ui| {
+                toggle_row(
+                    ui,
+                    m,
+                    "Reconstruir brushes no planos",
+                    "Cuando mueves vértices en el editor, una cara puede dejar de ser plana: \
+                     el editor la dibuja con sus vértices, pero el compilador solo guarda 3 \
+                     puntos por cara y arma el plano con ellos. El sólido que compila no es \
+                     el que ves, y en el juego aparecen caras invisibles, rendijas o caras \
+                     con NULL.\n\n\
+                     QUÉ CAMBIA: CSG detecta esos brushes y los rehace como el sólido convexo \
+                     de sus vértices, que es lo que el editor muestra. No tienes que tocar \
+                     nada en el editor. Las colisiones se siguen armando con los planos \
+                     originales, así que no suben los clipnodes.\n\n\
+                     Déjalo activado. Apagarlo solo sirve para comparar con el \
+                     comportamiento de antes.",
+                    Some("recomendado"),
+                    &mut self.opts.convexfix,
+                );
+                if self.opts.convexfix {
+                    row(
+                        ui,
+                        m,
+                        "Diferencia mínima",
+                        "Cuántas unidades tiene que separarse el sólido del editor del sólido \
+                         de los planos para que el brush se reconstruya.\n\n\
+                         QUÉ CAMBIA: la mayoría de los brushes deformados difieren en unas \
+                         centésimas, lo que no abre ninguna rendija visible. Reconstruirlos \
+                         igual agrega caras: en ze_elysium, rehacer los 1081 candidatos subió \
+                         un 17% las caras que ve cada hoja; con 0.2 se rehacen 48, cuesta un \
+                         2% y las rendijas de zpa_house siguen cerradas.\n\n\
+                         Bájalo solo si todavía ves una rendija fina en el juego.",
+                        Some("0.2"),
+                        |ui| {
+                            ui.spacing_mut().slider_width = (m.ctrl_w - 78.0).max(90.0);
+                            ui.add(
+                                egui::Slider::new(&mut self.opts.convexgap, 0.01..=2.0)
+                                    .max_decimals(2),
+                            );
+                        },
+                    );
+                } else {
+                    hint(
+                        ui,
+                        m,
+                        "Los sólidos deformados pueden dejar caras invisibles o rendijas en el \
+                         juego",
+                        WARN,
+                    );
+                }
+            },
+        );
         self.ui_extra(ui, "CSG");
     }
 
@@ -2824,6 +2985,8 @@ impl App {
             );
         });
 
+        self.ui_rad_shading(ui, m);
+
         card(ui, "Avanzado", "", |ui| {
             toggle_row(
                 ui,
@@ -2938,6 +3101,429 @@ impl App {
         });
 
         self.ui_extra(ui, "RAD");
+    }
+
+    fn ui_rad_shading(&mut self, ui: &mut egui::Ui, m: &Metrics) {
+        card(
+            ui,
+            "Sombras y oclusión",
+            "todo apagado por defecto; sin tocarlo el mapa sale igual",
+            |ui| {
+                row(
+                    ui,
+                    m,
+                    "Oclusión ambiental",
+                    "Oscurece la luz en rincones, bajo repisas y junto a objetos, donde en la \
+                     realidad llega menos luz de alrededor. Cada muestra de luz lanza rayos \
+                     en media esfera y se oscurece según cuántos chocan con geometría cerca.\n\n\
+                     QUÉ MODO USAR: si tu mapa se ilumina con light, light_spot y \
+                     light_environment, 'solo luz directa'. Si se ilumina con texlights, \
+                     'toda la luz': el otro modo no toca la luz de las texlights y casi no se \
+                     notaría.\n\n\
+                     Cuesta tiempo de compilación y cero FPS.",
+                    Some("apagada"),
+                    |ui| {
+                        egui::ComboBox::from_id_source("ao_mode")
+                            .width(m.ctrl_w)
+                            .selected_text(self.opts.ao.label())
+                            .show_ui(ui, |ui| {
+                                for mode in [AoMode::Off, AoMode::Direct, AoMode::All] {
+                                    ui.selectable_value(&mut self.opts.ao, mode, mode.label())
+                                        .on_hover_text(mode.help());
+                                }
+                            });
+                    },
+                );
+                if self.opts.ao != AoMode::Off {
+                    hint(ui, m, self.opts.ao.help(), MUTED);
+                    row(
+                        ui,
+                        m,
+                        "Alcance",
+                        "Hasta cuántas unidades busca geometría cada rayo. Más alcance \
+                         oscurece zonas más amplias alrededor de cada objeto; poco alcance \
+                         marca solo las esquinas.",
+                        Some("32"),
+                        |ui| slider_f32(ui, m, &mut self.opts.ao_scale, 1.0..=1024.0),
+                    );
+                    row(
+                        ui,
+                        m,
+                        "Intensidad",
+                        "Cuánto oscurece la oclusión: 1 es el efecto completo, 0 no hace \
+                         nada. Bájalo si los rincones quedan demasiado negros.",
+                        Some("1"),
+                        |ui| slider_f32(ui, m, &mut self.opts.ao_opacity, 0.0..=1.0),
+                    );
+                    row(
+                        ui,
+                        m,
+                        "Caída",
+                        "Cómo pesa la distancia del choque. 1 es lineal. Más alto deja \
+                         solo el oscurecido pegado a la geometría; más bajo lo extiende.",
+                        Some("1"),
+                        |ui| slider_f32(ui, m, &mut self.opts.ao_gain, 0.125..=8.0),
+                    );
+                    row(
+                        ui,
+                        m,
+                        "Rayos por muestra",
+                        "1 = 6 rayos, 2 = 18, 3 = 66, 4 = 258. Más rayos dan una oclusión \
+                         más suave y cuestan más tiempo. 3 alcanza para casi todo.",
+                        Some("3"),
+                        |ui| slider_u32(ui, m, &mut self.opts.ao_level, 1..=6, 0.0),
+                    );
+                    row(
+                        ui,
+                        m,
+                        "Descartar rayos débiles",
+                        "Salta los rayos que casi no aportan (los muy rasantes). Ahorra \
+                         tiempo sin cambio visible. 0 los traza todos.",
+                        Some("0.045"),
+                        |ui| {
+                            ui.spacing_mut().slider_width = (m.ctrl_w - 78.0).max(90.0);
+                            ui.add(
+                                egui::Slider::new(&mut self.opts.ao_minweight, 0.0..=0.1)
+                                    .max_decimals(3),
+                            );
+                        },
+                    );
+                    row(
+                        ui,
+                        m,
+                        "Color",
+                        "Hacia qué color tiñe la oclusión. Negro es lo normal; un tono \
+                         oscuro frío o cálido puede darle carácter a un mapa.",
+                        Some("negro"),
+                        |ui| {
+                            egui::color_picker::color_edit_button_srgb(ui, &mut self.opts.ao_color);
+                            let [r, g, b] = self.opts.ao_color;
+                            ui.label(RichText::new(format!("{r} {g} {b}")).color(MUTED).small());
+                        },
+                    );
+                }
+
+                row(
+                    ui,
+                    m,
+                    "Sombras suaves",
+                    "Cuántos rayos de sombra por eje traza cada muestra hacia cada luz: 1 es \
+                     un rayo (sombra dura, lo de siempre), 3 son 9 rayos repartidos en el \
+                     tamaño de un texel de lightmap.\n\n\
+                     QUÉ CAMBIA: el borde de las sombras pasa de una escalera de texels a un \
+                     degradado corto. Afecta a light, light_spot y light_environment; las \
+                     texlights ya dan sombras blandas.\n\n\
+                     COSTE: en zm_eichen_v2, 3 llevó RAD de 2.5 a 3.6 s. Calcula la luz \
+                     directa en la CPU aunque uses la GPU.",
+                    Some("1 = apagado"),
+                    |ui| slider_u32(ui, m, &mut self.opts.pcf, 1..=8, 0.0),
+                );
+                if self.opts.pcf > 1 {
+                    hint(
+                        ui,
+                        m,
+                        &format!(
+                            "{} rayos de sombra por muestra y luz. 3 es el valor útil; más \
+                             casi no se distingue y cuesta más",
+                            self.opts.pcf * self.opts.pcf
+                        ),
+                        OK,
+                    );
+                }
+                row(
+                    ui,
+                    m,
+                    "Frenar la luz que se filtra",
+                    "RAD suaviza cada luxel promediándolo con sus vecinos. En el borde de \
+                     una sombra fina o al pie de una pared, esos vecinos iluminados meten luz \
+                     donde no debería haber.\n\n\
+                     QUÉ CAMBIA: un vecino más brillante que el luxel pesa menos en el \
+                     promedio, hasta 1 - N de su peso. 0 lo apaga, 0.5 es un buen punto de \
+                     partida, 1 no deja entrar a ningún vecino más brillante.\n\n\
+                     Actúa sobre la luz directa de light, light_spot y light_environment. \
+                     Un mapa iluminado casi solo con texlights no cambia.",
+                    Some("0 = apagado"),
+                    |ui| slider_f32(ui, m, &mut self.opts.blurclamp, 0.0..=1.0),
+                );
+            },
+        );
+    }
+
+    fn ui_analysis(&mut self, ui: &mut egui::Ui, m: &Metrics) {
+        let running = self.analysis_job.is_some();
+        let prefs_before = self.lib.analysis.clone();
+        card(
+            ui,
+            "Analizar el mapa compilado",
+            "busca agujeros, zonas caras en FPS y caras que se dibujan de más",
+            |ui| {
+                let target = self.analysis_target();
+                row(
+                    ui,
+                    m,
+                    "Archivo .bsp",
+                    "Vacío analiza el .bsp que dejó la última compilación de este proyecto. \
+                     Elige otro para revisar cualquier mapa, aunque no lo hayas compilado tú.",
+                    None,
+                    |ui| {
+                        let state = target.as_ref().map(|p| p.is_file());
+                        path_row(
+                            ui,
+                            m,
+                            &mut self.analysis_bsp,
+                            state,
+                            "Buscar",
+                            || pick_file("Mapa compilado", "bsp"),
+                            true,
+                        );
+                    },
+                );
+                if self.analysis_bsp.trim().is_empty() {
+                    let text = match &target {
+                        Some(p) => format!("Último compilado: {}", p.display()),
+                        None => "Todavía no hay un .bsp compilado para este proyecto".to_string(),
+                    };
+                    hint(ui, m, &text, MUTED);
+                }
+
+                let prefs = &mut self.lib.analysis;
+                toggle_row(
+                    ui,
+                    m,
+                    "Agujeros",
+                    "Lanza rayos por el mapa compilado. Donde uno entra en una pared y ninguna \
+                     cara dibujada lo tapa, el jugador vería a través: es el problema de las \
+                     caras invisibles de los brushes deformados.\n\n\
+                     Si el .map del proyecto es el de este .bsp, los rayos apuntan a cada cara \
+                     visible del .map, así que no se escapa ninguna.",
+                    Some("recomendado"),
+                    &mut prefs.holes,
+                );
+                if prefs.holes {
+                    row(
+                        ui,
+                        m,
+                        "Rayos",
+                        "Más rayos revisan más superficie y tardan más. 20000 alcanza para \
+                         un mapa normal; súbelo en mapas enormes.",
+                        Some("20000"),
+                        |ui| slider_u32(ui, m, &mut prefs.rays, 1000..=200000, 1000.0),
+                    );
+                }
+                toggle_row(
+                    ui,
+                    m,
+                    "wpoly por zona",
+                    "Cuenta, para cada hoja del mapa, cuántas caras del mundo le manda el PVS \
+                     al motor. Eso es lo que sigue el wpoly y lo que baja los FPS. Lista las \
+                     zonas peores para que sepas dónde poner HINT o cortar una visual.",
+                    Some("FPS"),
+                    &mut prefs.wpoly,
+                );
+                if prefs.wpoly {
+                    row(
+                        ui,
+                        m,
+                        "Radio de zona",
+                        "Hojas más cerca que esto se juntan en una sola zona de la lista.",
+                        Some("256"),
+                        |ui| slider_f32(ui, m, &mut prefs.radius, 64.0..=2048.0),
+                    );
+                }
+                toggle_row(
+                    ui,
+                    m,
+                    "Caras ocultas",
+                    "Caras que se dibujan y se iluminan sin que nadie pueda verlas: paredes \
+                     del mundo tapadas del todo por un func_wall o func_illusionary, y caras \
+                     de entidades metidas dentro de paredes. Con NULL o func_detail se van.",
+                    Some("FPS"),
+                    &mut prefs.hidden,
+                );
+                toggle_row(
+                    ui,
+                    m,
+                    "Geometría",
+                    "Revisa que cada cara sea plana, convexa y sin vértices repetidos, y \
+                     cuenta los pares de caras que todavía se podrían fusionar. Un error acá \
+                     es del compilador, no tuyo.",
+                    None,
+                    &mut prefs.geometry,
+                );
+                toggle_row(
+                    ui,
+                    m,
+                    "Analizar al compilar",
+                    "Corre el análisis solo cada vez que una compilación termina bien. Tarda \
+                     unos segundos y avisa en esta pestaña.",
+                    Some("recomendado"),
+                    &mut prefs.after_compile,
+                );
+
+                let any = prefs.holes || prefs.wpoly || prefs.hidden || prefs.geometry;
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if running {
+                        if ui.button("Cancelar").clicked() {
+                            if let Some(job) = &self.analysis_job {
+                                job.cancel();
+                            }
+                        }
+                        ui.spinner();
+                    } else if ui
+                        .add_enabled(
+                            any && target.as_ref().is_some_and(|p| p.is_file()),
+                            egui::Button::new(RichText::new("Analizar").strong()),
+                        )
+                        .clicked()
+                    {
+                        self.start_analysis();
+                    }
+                    ui.label(RichText::new(&self.analysis_status).color(MUTED).small());
+                });
+            },
+        );
+        // The prefs are global; persist them right away like the update switch.
+        if self.lib.analysis != prefs_before {
+            self.save_library();
+        }
+
+        let Some(report) = self.analysis_report.clone() else {
+            return;
+        };
+        card(ui, "Resultado", "", |ui| {
+            ui.label(RichText::new(report.bsp.display().to_string()).color(TEXT));
+            ui.label(RichText::new(&report.stats).color(MUTED).small());
+        });
+        for section in &report.sections {
+            self.ui_analysis_section(ui, &report, section);
+        }
+    }
+
+    fn ui_analysis_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        report: &analysis::Report,
+        section: &analysis::Section,
+    ) {
+        let (tag, color) = match section.level {
+            analysis::Level::Ok => ("bien", OK),
+            analysis::Level::Info => ("info", ACCENT),
+            analysis::Level::Warn => ("revisar", WARN),
+            analysis::Level::Error => ("problema", ERR),
+        };
+        card(ui, section.title, "", |ui| {
+            ui.horizontal(|ui| {
+                chip(ui, tag, color);
+                ui.add(egui::Label::new(RichText::new(&section.summary).color(TEXT)).wrap());
+            });
+            if !section.advice.is_empty() && section.level != analysis::Level::Ok {
+                ui.add_space(4.0);
+                ui.add(egui::Label::new(RichText::new(section.advice).color(MUTED).small()).wrap());
+            }
+            if section.findings.is_empty() {
+                return;
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let dir = report.bsp.parent().map(|p| p.to_path_buf());
+                let stem = report
+                    .bsp
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "mapa".into());
+                if ui
+                    .button("Guardar pointfile")
+                    .on_hover_text(format!(
+                        "Escribe {stem}_{}.pts junto al .bsp. En J.A.C.K. o Hammer: Map > \
+                         Load Pointfile y elige ese archivo. Cada estrella marca un punto de \
+                         la lista.",
+                        section.key
+                    ))
+                    .clicked()
+                {
+                    if let Some(dir) = &dir {
+                        let path = dir.join(format!("{stem}_{}.pts", section.key));
+                        self.analysis_status =
+                            match analysis::write_pointfile(&path, &section.findings) {
+                                Ok(()) => {
+                                    reveal_in_explorer(&path);
+                                    format!("Pointfile guardado: {}", path.display())
+                                }
+                                Err(e) => format!("No pude escribir {}: {e}", path.display()),
+                            };
+                    }
+                }
+                let map = PathBuf::from(self.opts.map_path.trim());
+                let map_pts = map.with_extension("pts");
+                if map.file_stem() == report.bsp.file_stem()
+                    && map.parent().is_some_and(|p| p.is_dir())
+                    && ui
+                        .button(format!(
+                            "Como {}",
+                            map_pts.file_name().unwrap_or_default().to_string_lossy()
+                        ))
+                        .on_hover_text(
+                            "Lo guarda con el nombre que el editor abre directo con Load \
+                             Pointfile, junto al .map. Reemplaza el rastro del último leak.",
+                        )
+                        .clicked()
+                {
+                    self.analysis_status =
+                        match analysis::write_pointfile(&map_pts, &section.findings) {
+                            Ok(()) => format!("Pointfile guardado: {}", map_pts.display()),
+                            Err(e) => format!("No pude escribir {}: {e}", map_pts.display()),
+                        };
+                }
+                ui.label(
+                    RichText::new(format!("{} puntos", section.findings.len()))
+                        .color(MUTED)
+                        .small(),
+                );
+            });
+            ui.add_space(4.0);
+            const SHOWN: usize = 300;
+            egui::ScrollArea::vertical()
+                .id_source(("analysis", section.key))
+                .max_height(260.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    egui::Grid::new(("analysis_grid", section.key))
+                        .num_columns(3)
+                        .striped(true)
+                        .spacing([12.0, 4.0])
+                        .show(ui, |ui| {
+                            for f in section.findings.iter().take(SHOWN) {
+                                ui.label(RichText::new(&f.text).color(TEXT).small());
+                                let coords =
+                                    format!("{:.0} {:.0} {:.0}", f.pos[0], f.pos[1], f.pos[2]);
+                                ui.label(RichText::new(&coords).color(MUTED).small().monospace());
+                                if ui
+                                    .small_button("Copiar")
+                                    .on_hover_text(
+                                        "Copia la coordenada. En el juego, con sv_cheats 1: \
+                                         setpos seguido de la coordenada.",
+                                    )
+                                    .clicked()
+                                {
+                                    ui.output_mut(|o| o.copied_text = coords.clone());
+                                    self.analysis_status = format!("Copiado: {coords}");
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    if section.findings.len() > SHOWN {
+                        ui.label(
+                            RichText::new(format!(
+                                "y {} más; el pointfile los incluye todos",
+                                section.findings.len() - SHOWN
+                            ))
+                            .color(MUTED)
+                            .small(),
+                        );
+                    }
+                });
+        });
     }
 
     fn ui_extra(&mut self, ui: &mut egui::Ui, which: &str) {
@@ -3383,6 +3969,7 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_messages();
+        self.drain_analysis();
         self.refresh_checks();
         self.sync_active_project();
         self.maybe_check_updates();
@@ -3398,7 +3985,7 @@ impl eframe::App for App {
             ctx.set_zoom_factor(self.opts.ui_scale);
         }
 
-        if self.job.is_some() || self.installing {
+        if self.job.is_some() || self.installing || self.analysis_job.is_some() {
             // Keep painting while output streams in and the timers run.
             ctx.request_repaint_after(std::time::Duration::from_millis(80));
         } else {
@@ -3457,7 +4044,7 @@ impl eframe::App for App {
         // and the compile log has nothing to say while you are managing them.
         // Its own side panel takes that space instead, so the folder explorer
         // is a tall column that shows everything at once.
-        let show_log = self.tab != Tab::Projects;
+        let show_log = self.tab != Tab::Projects && self.tab != Tab::Analysis;
         let editing_enabled = self.job.is_none() && !self.installing;
         if self.tab == Tab::Projects {
             let w = (ctx.screen_rect().width() * 0.34).clamp(340.0, 560.0);
@@ -3523,6 +4110,7 @@ impl eframe::App for App {
                                     Tab::Bsp => self.ui_bsp(ui, &m),
                                     Tab::Vis => self.ui_vis(ui, &m),
                                     Tab::Rad => self.ui_rad(ui, &m),
+                                    Tab::Analysis => self.ui_analysis(ui, &m),
                                     Tab::Advice => self.ui_advice(ui),
                                 }
                             });

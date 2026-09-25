@@ -238,10 +238,38 @@ detrás. Lo esencial:
 Los números están en `docs/BENCHMARKS.md`. Y lo que de verdad baja `wpoly` está en
 `docs/FPS_Y_TOOL_TEXTURES.md`: el compilador ya hace casi todo lo que puede.
 
+Opciones propias de este fork, todas con su explicación en la interfaz:
+
+- **CSG, "Brushes deformados":** el arreglo de brushes no planos (vertex
+  manipulation) y la diferencia mínima que lo dispara (`-noconvexfix`,
+  `-convexgap`).
+- **RAD, "Sombras y oclusión":** oclusión ambiental (`-ao` o `-aoall`, con
+  alcance, intensidad, caída, rayos y color), sombras suaves (`-pcf`) y el
+  freno a la luz que se filtra en las sombras (`-blurclamp`). Todo viene
+  apagado; sin tocarlo, el mapa sale igual que antes.
+
+## Análisis
+
+La pestaña **"Análisis"** revisa un `.bsp` compilado sin Python ni scripts. Por
+defecto corre sola después de cada compilación que termina bien:
+
+- **Agujeros:** lanza rayos y marca donde el jugador vería a través de una
+  pared. Si el `.map` del proyecto es el de ese `.bsp`, apunta a cada cara
+  visible del `.map`.
+- **wpoly por zona:** cuántas caras del mundo le manda el PVS al motor en cada
+  zona, y cuáles son las peores.
+- **Caras ocultas:** caras tapadas del todo por un `func_wall` o
+  `func_illusionary`, y caras de entidades enterradas en paredes.
+- **Geometría:** caras no planas, no convexas o degeneradas.
+
+Cada hallazgo trae su coordenada, con un botón para copiarla, y cada apartado se
+puede guardar como pointfile (`.pts`) para abrirlo en J.A.C.K. o Hammer con
+*Map > Load Pointfile*, igual que el rastro de un leak.
+
 ## Alcance
 
-Hace tres cosas: configurar, compilar, y mostrar el log en vivo con errores y
-warnings resaltados. **No** copia el mapa al juego, no lo lanza, y no genera
+Hace cuatro cosas: configurar, compilar, mostrar el log en vivo con errores y
+warnings resaltados, y analizar el mapa compilado. **No** copia el mapa al juego, no lo lanza, y no genera
 `.res`. Fue una decisión deliberada para reducir la superficie de bugs en algo
 que no puedo probar.
 
@@ -263,7 +291,8 @@ gui/
     ├── projects.rs  proyectos guardados y vista de la carpeta
     ├── update.rs    releases de GitHub: comprobación e instalación
     ├── options.rs   opciones, descripciones, presets, línea de comandos
-    └── runner.rs    ejecuta las 4 etapas y streamea la salida
+    ├── runner.rs    ejecuta las 4 etapas y streamea la salida
+    └── analysis.rs  lector de .bsp y los análisis de la pestaña Análisis
 ```
 
 Si quieres agregar un flag: va en `options.rs` (campo + a `*_args()`) y una fila
