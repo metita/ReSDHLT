@@ -445,6 +445,15 @@ extern opaqueList_t* g_opaque_face_list;
 extern unsigned      g_opaque_face_count; // opaque entity count //HLRAD_OPAQUE_NODE
 extern unsigned      g_max_opaque_face_count;    // Current array maximum (used for reallocs)
 
+// Soft shadow edges and blur bleed clamp, ported from seedee/SDHLT (FIXXOR's work)
+#define DEFAULT_PCF                 1     // taps per axis; 1 = one binary shadow test
+#define MAX_PCF                     8
+#define MIN_BLURCLAMP_STRENGTH      0.0
+#define DEFAULT_BLURCLAMP_STRENGTH  0.0   // 0.5: samples 2x brighter than the luxel count at most 50%
+#define MAX_BLURCLAMP_STRENGTH      1.0
+extern int    g_pcf;
+extern vec_t  g_blurclamp_strength;
+
 // Ray-traced ambient occlusion, ported from seedee/SDHLT (-ao)
 #define DEFAULT_AO_ENABLE       false
 #define MIN_AO_SCALE            1.0

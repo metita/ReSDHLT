@@ -158,6 +158,8 @@ vec3_t          g_ao_color_linear = { DEFAULT_AO_COLOR_RED, DEFAULT_AO_COLOR_GRE
 int             g_ao_level = DEFAULT_AO_LEVEL;
 vec_t           g_ao_minweight = DEFAULT_AO_MINWEIGHT;
 bool            g_ao_all = false;
+int             g_pcf = DEFAULT_PCF;
+vec_t           g_blurclamp_strength = DEFAULT_BLURCLAMP_STRENGTH;
 vec_t			g_corings[ALLSTYLES];
 vec3_t*			g_translucenttextures = NULL;
 vec_t			g_translucentdepth = DEFAULT_TRANSLUCENTDEPTH;
@@ -3108,6 +3110,8 @@ static void     Usage()
 	Log("    -nospread       : Disable sunlight spread angles for this compile\n");
     Log("    -nopaque        : Disable the opaque zhlt_lightflags for this compile\n\n");
 	Log("    -nostudioshadow : Disable opaque studiomodels, ignore zhlt_studioshadow for this compile\n\n");
+	Log("    -pcf #          : Shadow taps per axis for soft shadow edges (1 = off, up to %d; cost grows with #^2)\n", MAX_PCF);
+	Log("    -blurclamp #    : Keep blurred light from bleeding into thin shadows (0 = off, up to 1)\n");
 	Log("    -ao             : Enable ray-traced ambient occlusion\n");
 	Log("    -aoscale #      : AO trace distance in units (%.0f to %.0f, default %.0f)\n", (double)MIN_AO_SCALE, (double)MAX_AO_SCALE, (double)DEFAULT_AO_SCALE);
 	Log("    -aogain #       : AO falloff exponent (%.3f to %.0f, default 1)\n", (double)MIN_AO_GAIN, (double)MAX_AO_GAIN);
@@ -3277,6 +3281,8 @@ static void     Settings()
     Log("\n");
 
 	Log("fast rad             [ %17s ] [ %17s ]\n", g_fastmode? "on": "off", DEFAULT_FASTMODE? "on": "off");
+	Log("pcf taps per axis    [ %17d ] [ %17d ]\n", g_pcf, DEFAULT_PCF);
+	Log("blur bleed clamp     [ %17.3f ] [ %17.3f ]\n", (double)g_blurclamp_strength, (double)DEFAULT_BLURCLAMP_STRENGTH);
 	Log("ambient occlusion    [ %17s ] [ %17s ]\n", g_ao_enable? "on": "off", DEFAULT_AO_ENABLE? "on": "off");
 	if (g_ao_enable)
 	{
@@ -4263,6 +4269,14 @@ int             main(const int argc, char** argv)
 		{
 			g_ao_enable = true;
 		}
+		else if (!strcasecmp(argv[i], "-pcf"))
+		{
+			g_pcf = (int)AOClamp (atoi (AOArg (i, argc, argv)), 1, MAX_PCF);
+		}
+		else if (!strcasecmp(argv[i], "-blurclamp"))
+		{
+			g_blurclamp_strength = (vec_t)AOClamp (atof (AOArg (i, argc, argv)), MIN_BLURCLAMP_STRENGTH, MAX_BLURCLAMP_STRENGTH);
+		}
 		else if (!strcasecmp(argv[i], "-aoall"))
 		{
 			g_ao_enable = true;
@@ -4537,6 +4551,12 @@ int             main(const int argc, char** argv)
         // AO rays are traced on the CPU sample by sample, and its texlight exemption
         // needs the gather to keep texlight light apart, which the kernel does not
         Log("-ao: the direct-light gather runs on the CPU; -gpu still covers transfers\n");
+        g_gpu_gather = false;
+    }
+    if (g_pcf > 1 && g_gpu_gather)
+    {
+        // the kernel traces one shadow ray per light; the PCF taps are CPU only
+        Log("-pcf: the direct-light gather runs on the CPU; -gpu still covers transfers\n");
         g_gpu_gather = false;
     }
     g_gpu = g_gpu_gather || g_gpu_transfers;

@@ -217,6 +217,8 @@ large texture library, and CSG aborted rather than ignoring the excess.
 | RAD | `-aominweight N` | Skip AO rays under this share of the mean weight, 0 to 0.1 |
 | RAD | `-aoopacity N` | AO strength, 0 to 1, default 1 |
 | RAD | `-aocolor r g b` | AO tint, 0 to 255 per channel, default black |
+| RAD | `-pcf N` | Soft shadow edges: N x N shadow rays per light, 1 to 8, default 1 (off) |
+| RAD | `-blurclamp N` | Keep bright samples from bleeding into dark ones, 0 to 1, default 0 (off) |
 
 ### Ambient occlusion
 
@@ -229,6 +231,28 @@ final light of each sample, texlights and bounces included, which is what a map
 lit by texlights needs; it reuses the same rays and cost about 4% of RAD time on
 ze_elysium. Both run the direct-light gather on the CPU even with `-gpu`, which
 still handles transfers.
+
+### Softer shadows
+
+`-pcf N` traces N x N shadow rays per sample and light instead of one, spread
+over a rotated grid the size of a lightmap texel and kept inside the face, and
+scales the light by the share that gets through. Shadow edges turn into a short
+gradient instead of a staircase of texels. It covers point lights, spotlights
+and `light_environment`; texlights are already soft. `-pcf 3` is the useful
+setting. It runs the direct-light gather on the CPU, like AO.
+
+`-blurclamp N` limits the blend of neighbouring subsamples that smooths each
+lightmap texel: a neighbour brighter than the center weighs less, down to
+`1 - N` of its weight. That keeps a lit floor from glowing under the foot of a
+wall, the "light bleed" of dark corners. 0.5 is a good start, 1 lets no brighter
+neighbour in at all.
+
+Both work on the light gathered per sample: `light`, `light_spot`,
+`light_environment` and texlights that are not fast. Fast texlights are added
+at patch level and interpolated later, so a map lit almost only by them, like
+ze_elysium, barely changes with `-pcf` and not at all with `-blurclamp`.
+
+Both are off by default, and without them RAD writes the same file as before.
 
 ## Building from source
 
@@ -319,6 +343,24 @@ visible brush face of the source map:
 
 ```sh
 python3 scripts/holecheck.py yourmap.bsp --map yourmap.map
+```
+
+`scripts/wpolymap.py` counts, for every leaf, the world faces its PVS sends to
+the renderer, which is what `wpoly` and the frame rate follow. It prints the
+distribution and the worst areas, and `--pts` writes them as a pointfile that
+J.A.C.K. and Hammer load like a leak trail:
+
+```sh
+python3 scripts/wpolymap.py yourmap.bsp --pts yourmap_wpoly.pts
+```
+
+`scripts/hiddenfaces.py` lists faces that cost lightmap and draw time for
+nothing: world faces fully covered by a `func_wall` or `func_illusionary`,
+entity faces buried inside world brushes, and world faces no leaf ever draws.
+Texture them with NULL, or turn the entity into `func_detail`:
+
+```sh
+python3 scripts/hiddenfaces.py yourmap.bsp --pts yourmap_hidden.pts
 ```
 
 ## Credits
