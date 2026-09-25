@@ -942,6 +942,7 @@ namespace rad
                 int32_t sky_step_match = 0;
                 float indirect_sun = 0;
                 uint32_t num_sky_normals = 0;
+                float light_skip = 0;
             };
             gather_session gsess;
 
@@ -1098,6 +1099,7 @@ namespace rad
             gsess.sky_step_match = scene.sky_step_match;
             gsess.indirect_sun = scene.indirect_sun;
             gsess.num_sky_normals = (uint32_t)(scene.sky_normals.size() / 4);
+            gsess.light_skip = scene.light_skip;
 
             const VkDeviceSize near_size = 16 + (VkDeviceSize)gsess.max_near * 8;
             const VkDeviceSize results_size =
@@ -1220,7 +1222,7 @@ namespace rad
                 int32_t sky_step_match;
                 float indirect_sun;
                 uint32_t max_near_pairs;
-                uint32_t pvs_stride_words;
+                uint32_t light_skip_bits;  // the float's bits; this slot was the unused pvs stride
                 uint32_t num_sky_normals;
             } push = {
                 (uint32_t)count,
@@ -1229,9 +1231,10 @@ namespace rad
                 gsess.sky_step_match,
                 gsess.indirect_sun,
                 gsess.max_near,
-                0, // pvs stride is unused with visible leaf lists
+                0,
                 gsess.num_sky_normals,
             };
+            std::memcpy(&push.light_skip_bits, &gsess.light_skip, sizeof(float));
             static_assert(sizeof(push_params) == 32, "must match the glsl Params block");
 
             const VkDeviceSize results_size = (VkDeviceSize)count * sizeof(gather_result_gpu);

@@ -228,6 +228,7 @@ namespace
         scene.sky_lighting_fix = g_sky_lighting_fix? 1: 0;
         scene.sky_step_match = (g_softsky || g_fastmode)? 1: 0;
         scene.indirect_sun = (float)g_indirect_sun;
+        scene.light_skip = (float)g_lightskip;
 
         // The texlightgap basis, per face: the kernel needs it as data, the CPU
         // resolver reuses the same table.

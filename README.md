@@ -226,6 +226,7 @@ large texture library, and CSG aborted rather than ignoring the excess.
 | RAD | `-aominweight N` | Skip AO rays under this share of the mean weight, 0 to 0.1 |
 | RAD | `-aoopacity N` | AO strength, 0 to 1, default 1 |
 | RAD | `-aocolor r g b` | AO tint, 0 to 255 per channel, default black |
+| RAD | `-lightskip N` | No shadow ray for a light that could add less than N, default 0.001; 0 traces all |
 | RAD | `-pcf N` | Soft shadow edges: N x N shadow rays per light, 1 to 8, default 1 (off) |
 | RAD | `-blurclamp N` | Keep bright samples from bleeding into dark ones, 0 to 1, default 0 (off) |
 

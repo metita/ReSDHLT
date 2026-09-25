@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-09-25
+
+### Added
+- RAD: `-lightskip #` (default 0.001). A point light, spotlight or texlight
+  that could add less than # to a sample, on the 0-255 lightmap scale, gets no
+  shadow ray. Sky light is not affected: its thousands of small rays do add up.
+  On ze_elysium_b1 it skipped 19% of the shadow rays: GPU 33.7 s to 31.8 s,
+  CPU 70.9 s to 65.1 s; 1% of the lighting bytes move by 1/255. `-lightskip 0`
+  traces every light and gives the 0.16.0 output byte for byte. The GPU kernel
+  applies the same rule.
+- RAD: `zhlt_noao 1` on a brush entity keeps ambient occlusion off its faces.
+
+### Fixed
+- RAD: ambient occlusion (`-ao`, `-aoall`) no longer darkens the faces of
+  entities that move: func_plat, func_door, func_train, func_rotating,
+  func_pushable and the rest of that family. The occlusion was baked where the
+  entity starts, a func_plat down in its shaft came out dark and stayed dark
+  wherever it went.
+
 ## [0.16.0] - 2026-09-25
 
 ### Changed

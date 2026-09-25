@@ -160,6 +160,8 @@ vec3_t          g_ao_color_linear = { DEFAULT_AO_COLOR_RED, DEFAULT_AO_COLOR_GRE
 int             g_ao_level = DEFAULT_AO_LEVEL;
 vec_t           g_ao_minweight = DEFAULT_AO_MINWEIGHT;
 bool            g_ao_all = false;
+bool*           g_face_ao_skip = NULL;
+vec_t           g_lightskip = DEFAULT_LIGHTSKIP;
 int             g_pcf = DEFAULT_PCF;
 vec_t           g_blurclamp_strength = DEFAULT_BLURCLAMP_STRENGTH;
 vec_t			g_corings[ALLSTYLES];
@@ -1858,6 +1860,42 @@ static void		LoadOpaqueEntities()
 				g_face_occludes_ao[m->firstface + j] = true;
 			}
 		}
+
+		// AO is baked where a face is when RAD runs. For an entity that moves
+		// that is one position of many, so those faces get none; zhlt_noao 1
+		// opts any other entity out.
+		static const char* const movers[] = {
+			"func_plat", "func_platrot", "func_door", "func_door_rotating", "momentary_door",
+			"func_train", "func_tracktrain", "func_trackchange", "func_tracktrain",
+			"func_rotating", "func_pendulum", "func_vehicle", "func_button", "func_rot_button",
+			"momentary_rot_button", "func_pushable", "func_water", "func_guntarget",
+		};
+		g_face_ao_skip = (bool *)calloc (g_numfaces, sizeof (bool));
+		hlassume (g_face_ao_skip != NULL, assume_NoMemory);
+		int skipped = 0;
+		for (int i = 0; i < g_numfaces; i++)
+		{
+			const entity_t *ent = g_face_entity[i];
+			if (!ent || ent == &g_entities[0])
+			{
+				continue;
+			}
+			const char *classname = ValueForKey (ent, "classname");
+			bool skip = IntForKey (ent, "zhlt_noao") != 0;
+			for (size_t m = 0; !skip && m < sizeof (movers) / sizeof (movers[0]); m++)
+			{
+				skip = !strcmp (classname, movers[m]);
+			}
+			if (skip)
+			{
+				g_face_ao_skip[i] = true;
+				skipped++;
+			}
+		}
+		if (g_ao_enable && skipped)
+		{
+			Log("%i faces of moving entities get no ambient occlusion\n", skipped);
+		}
 	}
 }
 
@@ -3139,7 +3177,8 @@ static void     Usage()
 	Log("    -aominweight #  : Skip AO rays below this fraction of the mean weight (0 to 0.1)\n");
 	Log("    -aoopacity #    : AO strength (0 to 1)\n");
 	Log("    -aocolor r g b  : AO tint color (0 to 255, r g b)\n");
-	Log("    -aoall          : AO darkens all light, texlights and bounces included (implies -ao)\n\n");
+	Log("    -aoall          : AO darkens all light, texlights and bounces included (implies -ao)\n");
+	Log("    -lightskip #    : Skip the shadow ray of a light adding less than # (default %g; 0 = trace all)\n\n", (double)DEFAULT_LIGHTSKIP);
 	Log("    -noallocblockcheck: Compile even when the map overflows the engine's lightmap atlas\n");
 	Log("    -gpu            : Force compatible gather and transfer work onto Vulkan\n");
 	Log("    -gpuauto        : Use Vulkan only when the phase workload is large enough\n");
@@ -3303,6 +3342,7 @@ static void     Settings()
 	Log("fast rad             [ %17s ] [ %17s ]\n", g_fastmode? "on": "off", DEFAULT_FASTMODE? "on": "off");
 	Log("pcf taps per axis    [ %17d ] [ %17d ]\n", g_pcf, DEFAULT_PCF);
 	Log("blur bleed clamp     [ %17.3f ] [ %17.3f ]\n", (double)g_blurclamp_strength, (double)DEFAULT_BLURCLAMP_STRENGTH);
+	Log("light skip below     [ %17.4f ] [ %17.4f ]\n", (double)g_lightskip, (double)DEFAULT_LIGHTSKIP);
 	Log("ambient occlusion    [ %17s ] [ %17s ]\n", g_ao_enable? "on": "off", DEFAULT_AO_ENABLE? "on": "off");
 	if (g_ao_enable)
 	{
@@ -4303,6 +4343,10 @@ int             main(const int argc, char** argv)
 		else if (!strcasecmp(argv[i], "-blurclamp"))
 		{
 			g_blurclamp_strength = (vec_t)AOClamp (atof (AOArg (i, argc, argv)), MIN_BLURCLAMP_STRENGTH, MAX_BLURCLAMP_STRENGTH);
+		}
+		else if (!strcasecmp(argv[i], "-lightskip"))
+		{
+			g_lightskip = (vec_t)AOClamp (atof (AOArg (i, argc, argv)), 0.0, 1.0);
 		}
 		else if (!strcasecmp(argv[i], "-aoall"))
 		{

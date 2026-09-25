@@ -485,6 +485,9 @@ extern vec3_t g_ao_color_linear;
 extern int    g_ao_level;
 extern vec_t  g_ao_minweight;
 extern bool*  g_face_occludes_ao;     // faces whose texlights AO leaves alone
+extern bool*  g_face_ao_skip;         // faces of entities that move: no AO baked into them
+#define DEFAULT_LIGHTSKIP 0.001       // in lightmap units, 255 = full; 0 traces every light
+extern vec_t  g_lightskip;
 extern bool   g_ao_all;               // -aoall: AO darkens the final light of every sample
 
 

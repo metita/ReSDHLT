@@ -133,6 +133,7 @@ namespace rad
             uint32_t sky_lighting_fix = 0;
             int32_t sky_step_match = 0;
             float indirect_sun = 0;
+            float light_skip = 0;            // -lightskip: no shadow ray for a light adding less than this
         };
 
         // a (work item, light) pair the kernel routed to the cpu (the surface

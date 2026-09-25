@@ -121,7 +121,7 @@ layout(push_constant) uniform Params
     int skyStepMatch;    // 1 when softsky or fastmode, else 0
     float indirectSun;   // optionsindirect_sun
     uint maxNearPairs;
-    uint pvsStrideWords; // unused and kept for layout stability
+    uint lightSkipBits;  // float bits: a light adding less than this gets no shadow ray (0 = trace all)
     uint numSkyNormals;  // of the active sky level
 };
 
@@ -403,6 +403,11 @@ void main()
                 addY = L.iy * ratio;
                 addZ = L.iz * ratio;
             }
+
+            // the cpu gather skips the same lights: what they could add is
+            // below one thousandth of a lightmap step, the ray is not
+            if (max(max(addX, addY), addZ) < uintBitsToFloat(lightSkipBits))
+                continue;
 
             int tf = 0;
             if (traceLine(item.px, item.py, item.pz, L.ox, L.oy, L.oz,

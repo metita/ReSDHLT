@@ -3214,6 +3214,13 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
                             break;
                         }
                         }
+						// -lightskip: a light that could add less than this to the
+						// sample gets no shadow ray. Point, spot and texlight only;
+						// the sky loops add thousands of small pieces that do sum up.
+						if (VectorMaximum (add) < g_lightskip)
+						{
+							continue;
+						}
 						float shadowvis = 1.0f;
 						if (pcf)
 						{
@@ -3959,7 +3966,10 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 			// With -aoall the occlusion is only recorded here and FinalLightFace applies
 			// it to the whole light of the sample; otherwise it darkens the direct light
 			// right away, as upstream does.
-			const bool ao = g_ao_enable && pass == LM_NORMAL;
+			// No AO on faces of entities that move: it would be baked for where
+			// they start (a func_plat down in its pit) and stay wrong everywhere
+			// else they go.
+			const bool ao = g_ao_enable && pass == LM_NORMAL && !g_face_ao_skip[facenum];
 			const bool aoexempt = ao && !g_ao_all;
 			vec3_t emitterlight[ALLSTYLES];
 			if (ao)
