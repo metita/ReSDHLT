@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- RAD: `-vismatrix auto` takes the plain bit matrix when it needs at most
+  512 MB and sparse otherwise. On ze_elysium_b1 (43,376 patches, 112 MB)
+  MakeScales went from 14.0 s to 3.4 s with the same output.
+
+### Changed
+- RAD: the plain visibility matrix builds twice as fast (9.6 s to 6.2 s on
+  ze_elysium_b1): each leaf gets its patches from a list built once instead of
+  scanning every patch of the map, and bits are set with an atomic OR instead
+  of a global lock.
+- RAD: GatherSampleLight gets the lights a PVS can see from a per-thread list
+  instead of walking every leaf of the map for every sample, and only checks
+  the sky leaves when a sky light asks. Same lights, same order.
+- GUI: "Vismatrix" defaults to automatic and "Aceleración GPU" defaults to on,
+  with the automatic CPU/GPU choice per phase. Projects saved with the old
+  defaults move to the new ones once; a value changed by hand stays.
+
+RAD on ze_elysium_b1 with the GUI's arguments: 88.5 s in 0.14.0, 70.5 s now on
+the CPU with the same .bsp byte for byte (same on zpa_house, zm_eichen_v2,
+zm_azteca and ar_pokemon), and 49 s with the GPU (0.6% of the lighting bytes
+change, by 3/255 at most). docs/BENCHMARKS.md §9 has the measurements and the
+ideas that did not make it.
+
 ## [0.14.0] - 2026-09-25
 
 ### Added

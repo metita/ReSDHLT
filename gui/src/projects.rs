@@ -97,7 +97,14 @@ impl Default for Library {
 impl Library {
     pub fn load_checked(path: &Path) -> Result<Self, String> {
         match std::fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text)
+            Ok(text) => serde_json::from_str::<Self>(&text)
+                .map(|mut lib| {
+                    // Saved with older defaults: moved on once, saved on the next write.
+                    for project in &mut lib.projects {
+                        project.opts.migrate_defaults();
+                    }
+                    lib
+                })
                 .map_err(|error| format!("{} está corrupto: {error}", path.display())),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(error) => Err(format!("no pude leer {}: {error}", path.display())),

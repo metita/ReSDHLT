@@ -2,6 +2,7 @@
 #include "profiling.h"
 #include "raybench.h"
 #include "gpu_gather.h"
+#include <vector>
 
 edgeshare_t     g_edgeshare[MAX_MAP_EDGES];
 vec3_t          g_face_centroids[MAX_MAP_EDGES]; // BUG: should this be [MAX_MAP_FACES]?
@@ -2686,6 +2687,66 @@ static float PCFShadowSky (const vec3_t pos, const vec3_t skydir, const pcfplane
 	});
 }
 
+// =====================================================================================
+//  Lights a PVS can see, in gather order
+//      GatherSampleLight used to walk every leaf of the map for every sample,
+//      test the leaf's PVS bit and follow its light list: thousands of leaves,
+//      an unpredictable branch each, millions of samples. Neighbouring samples
+//      almost always share a PVS, so each thread keeps the flattened list for
+//      the last few PVS it saw. The list holds the same lights in the same order
+//      as the walk, so the output does not change.
+// =====================================================================================
+struct gatherlights_t
+{
+    std::vector<byte>           pvs;        // the key: the PVS bytes the list was built from
+    std::vector<directlight_t*> lights;     // leaf ascending, then each leaf's list order
+    unsigned long long          lastuse;
+    bool                        valid;
+};
+
+#define GATHERLIGHTS_CACHE 4
+// RunThreadsOn starts fresh threads for every phase, so a cache never outlives
+// the phase whose light lists it was built from.
+static thread_local gatherlights_t t_gatherlights[GATHERLIGHTS_CACHE];
+static thread_local unsigned long long t_gatherlights_clock;
+
+static const std::vector<directlight_t*>& GatherLightsForPVS(const byte* const pvs)
+{
+    const int       visleafs = g_dmodels[0].visleafs;
+    const size_t    bytes = (size_t)((visleafs + 7) >> 3);
+    gatherlights_t* oldest = &t_gatherlights[0];
+    t_gatherlights_clock++;
+    for (int c = 0; c < GATHERLIGHTS_CACHE; c++)
+    {
+        gatherlights_t* e = &t_gatherlights[c];
+        if (e->valid && e->pvs.size() == bytes && !memcmp(e->pvs.data(), pvs, bytes))
+        {
+            e->lastuse = t_gatherlights_clock;
+            return e->lights;
+        }
+        if (!e->valid || e->lastuse < oldest->lastuse)
+        {
+            oldest = e;
+        }
+    }
+    oldest->pvs.assign(pvs, pvs + bytes);
+    oldest->lights.clear();
+    for (int i = 0; i < 1 + visleafs; i++)
+    {
+        directlight_t* l = directlights[i];
+        if (l && (i == 0? g_sky_lighting_fix: (pvs[(i - 1) >> 3] & (1 << ((i - 1) & 7))) != 0))
+        {
+            for (; l; l = l->next)
+            {
+                oldest->lights.push_back(l);
+            }
+        }
+    }
+    oldest->valid = true;
+    oldest->lastuse = t_gatherlights_clock;
+    return oldest->lights;
+}
+
 static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const vec3_t normal, vec3_t* sample
 								  , byte* styles
 								  , int step
@@ -2746,7 +2807,8 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 	lighting_diversify = (lighting_power != 1.0 || lighting_scale != 1.0);
 	vec3_t			texlightgap_textoworld[2];
 	bool			texlightgap_textoworld_ready = false;
-	const bool		sample_may_reach_sky = SampleMayReachSky (pvs);
+	// Scans every sky leaf, so only when a sky light asks: many maps have none.
+	int				sample_may_reach_sky = -1;
 	const bool		pcf = g_pcf > 1;
 	pcfplane_t		pcfplane;
 	if (pcf)
@@ -2754,21 +2816,22 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 		PCFPlaneForFace (texlightgap_surfacenum, &pcfplane);
 	}
 
-    for (i = 0; i < 1 + g_dmodels[0].visleafs; i++)
     {
-        l = directlights[i];
-        if (l)
-		{
-            if (i == 0? g_sky_lighting_fix: pvs[(i - 1) >> 3] & (1 << ((i - 1) & 7)))
+        {
             {
-                for (; l; l = l->next)
+                for (directlight_t* const gl : GatherLightsForPVS (pvs))
                 {
+                    l = gl;
                     // skylights work fundamentally differently than normal lights
                     if (l->type == emit_skylight)
                     {
 						// Nothing this sample can see is sky: both the sun loop
 						// and the sky dome below would trace thousands of rays
 						// only to find them all occluded.
+						if (sample_may_reach_sky < 0)
+						{
+							sample_may_reach_sky = SampleMayReachSky (pvs)? 1: 0;
+						}
 						if (!sample_may_reach_sky)
 						{
 							continue;

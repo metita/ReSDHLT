@@ -279,8 +279,11 @@ fn load_profile() -> Result<Option<Options>, String> {
     let path = profile_path().ok_or("no pude determinar dónde leer las preferencias")?;
     migrate_legacy_state("resdhlt-gui.json", &path)?;
     match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text)
-            .map(Some)
+        Ok(text) => serde_json::from_str::<Options>(&text)
+            .map(|mut opts| {
+                opts.migrate_defaults();
+                Some(opts)
+            })
             .map_err(|error| format!("{} está corrupto: {error}", path.display())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("no pude leer {}: {error}", path.display())),
@@ -3016,10 +3019,15 @@ impl App {
                 m,
                 "Aceleración GPU",
                 "Activa el backend Vulkan de RAD para el gather directo y las transferencias \
-                 compatibles. Si una fase o entidad no está soportada, RAD informa el motivo \
-                 y vuelve a CPU. En mapas con pocas luces la GPU puede no ser más rápida; \
-                 compara el perfil antes de dejarla fija.",
-                Some("Vulkan"),
+                 compatibles. Si una fase o entidad no está soportada, o no hay driver \
+                 Vulkan, RAD informa el motivo y vuelve a CPU.\n\n\
+                 CUÁNTO GANA: depende de cuántas luces tiene el mapa. En ze_elysium, con \
+                 1561 luces directas, RAD bajó de 88 a 49 segundos con una GTX 1060. En \
+                 mapas con pocas luces la selección automática deja esa fase en la CPU.\n\n\
+                 QUÉ CAMBIA: la GPU calcula en float; frente a la CPU cambia menos del 1% \
+                 de los luxels, en 3/255 como mucho. Apágala si necesitas el .bsp idéntico \
+                 al de la CPU.",
+                Some("recomendado"),
                 &mut self.opts.gpu,
             );
             if self.opts.gpu {
@@ -3069,14 +3077,19 @@ impl App {
                 m,
                 "Vismatrix",
                 "Cómo guarda RAD la visibilidad entre parches. Es una decisión de \
-                 memoria, no de calidad.",
-                Some("sparse"),
+                 memoria y velocidad, no de calidad: las cuatro dan la misma luz.",
+                Some("automático"),
                 |ui| {
                     egui::ComboBox::from_id_source("vismat")
                         .width(m.ctrl_w)
                         .selected_text(self.opts.vismatrix.label())
                         .show_ui(ui, |ui| {
-                            for mm in [VisMatrix::Normal, VisMatrix::Sparse, VisMatrix::Off] {
+                            for mm in [
+                                VisMatrix::Auto,
+                                VisMatrix::Normal,
+                                VisMatrix::Sparse,
+                                VisMatrix::Off,
+                            ] {
                                 ui.selectable_value(&mut self.opts.vismatrix, mm, mm.label())
                                     .on_hover_text(mm.help());
                             }

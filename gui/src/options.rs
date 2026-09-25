@@ -15,6 +15,9 @@ pub const WORK_SUBDIR: &str = "intermedios";
 // Tool defaults. An option at its default is left off the command line, so
 // these must match sdHLCSG/qcsg.cpp and sdHLRAD/qrad.h.
 pub const DEFAULT_CONVEXGAP: f32 = 0.2;
+
+/// 1: vismatrix sparse -> auto, GPU off -> on (0.15.0).
+pub const DEFAULTS_REV: u32 = 1;
 pub const DEFAULT_AO_SCALE: f32 = 32.0;
 pub const DEFAULT_AO_GAIN: f32 = 1.0;
 pub const DEFAULT_AO_LEVEL: u32 = 3;
@@ -24,6 +27,7 @@ pub const DEFAULT_AO_OPACITY: f32 = 1.0;
 /// Radiosity visibility matrix method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VisMatrix {
+    Auto,
     Normal,
     Sparse,
     Off,
@@ -32,6 +36,7 @@ pub enum VisMatrix {
 impl VisMatrix {
     pub fn flag(self) -> &'static str {
         match self {
+            VisMatrix::Auto => "auto",
             VisMatrix::Normal => "normal",
             VisMatrix::Sparse => "sparse",
             VisMatrix::Off => "off",
@@ -40,6 +45,7 @@ impl VisMatrix {
 
     pub fn label(self) -> &'static str {
         match self {
+            VisMatrix::Auto => "automático (recomendado)",
             VisMatrix::Normal => "normal (rápido, mucha RAM)",
             VisMatrix::Sparse => "sparse (equilibrado)",
             VisMatrix::Off => "off (mapas enormes)",
@@ -48,6 +54,15 @@ impl VisMatrix {
 
     pub fn help(self) -> &'static str {
         match self {
+            VisMatrix::Auto => {
+                "RAD elige solo, cuando ya sabe cuántos parches tiene el mapa: la \
+                 matriz normal si ocupa hasta 512 MB, sparse si no.\n\n\
+                 La normal responde cada consulta con un bit en vez de una búsqueda: \
+                 en ze_elysium bajó MakeScales de 14 a 3.4 s. Con 43.000 parches ocupa \
+                 112 MB. Para mapas enormes pasa sola a sparse, así que no se queda sin \
+                 memoria.\n\n\
+                 NO cambia la iluminación resultante."
+            }
             VisMatrix::Normal => {
                 "Guarda en memoria, sin comprimir, qué parche de luz ve a qué otro. \
                  Es el más rápido de los tres, pero el consumo de RAM crece con el \
@@ -57,8 +72,8 @@ impl VisMatrix {
             }
             VisMatrix::Sparse => {
                 "Guarda esa misma información comprimida: solo los pares que \
-                 realmente se ven. Usa mucha menos RAM a cambio de algo de CPU. Es el \
-                 default y el equilibrio correcto para prácticamente cualquier mapa.\n\n\
+                 realmente se ven. Usa mucha menos RAM a cambio de CPU: cada consulta \
+                 es una búsqueda. Automático la elige sola cuando la normal no entra.\n\n\
                  NO cambia la iluminación resultante."
             }
             VisMatrix::Off => {
@@ -251,6 +266,14 @@ pub struct Options {
     /// Zoom applied to the whole UI. Saved so a 4K user does not have to
     /// re-scale on every launch.
     pub ui_scale: f32,
+
+    /// Which default changes this profile has already been through. Profiles
+    /// saved before a default changed carry the old value as if it had been
+    /// chosen; `migrate_defaults` moves them once, and only when the old value
+    /// is still the old default. Missing in an old file means 0, not the
+    /// current revision, hence the field-level default.
+    #[serde(default)]
+    pub defaults_rev: u32,
 }
 
 impl Default for Options {
@@ -309,8 +332,11 @@ impl Default for Options {
             chop: 64.0,
             texchop: 32.0,
             smooth: 50.0,
-            vismatrix: VisMatrix::Sparse,
-            gpu: false,
+            vismatrix: VisMatrix::Auto,
+            // On by default with the automatic policy: RAD picks CPU or GPU per
+            // phase by workload and falls back to the CPU without Vulkan. On
+            // ze_elysium, 1561 direct lights, RAD went from 88 s to 49 s.
+            gpu: true,
             gpu_auto: true,
             gpu_gather: true,
             gpu_transfers: true,
@@ -333,6 +359,7 @@ impl Default for Options {
             rad_extra: String::new(),
 
             ui_scale: 1.0,
+            defaults_rev: DEFAULTS_REV,
         }
     }
 }
@@ -977,6 +1004,26 @@ impl Options {
     }
 
     /// Trim path fields once before persisting or constructing a compile plan.
+    /// Brings a profile saved before a default changed to the new default,
+    /// once, and only where it still holds the old one. Returns whether it
+    /// changed anything, so the caller can save.
+    pub fn migrate_defaults(&mut self) -> bool {
+        if self.defaults_rev >= DEFAULTS_REV {
+            return false;
+        }
+        if self.defaults_rev < 1 {
+            if self.vismatrix == VisMatrix::Sparse {
+                self.vismatrix = VisMatrix::Auto;
+            }
+            if !self.gpu {
+                self.gpu = true;
+                self.gpu_auto = true;
+            }
+        }
+        self.defaults_rev = DEFAULTS_REV;
+        true
+    }
+
     pub fn normalize_paths(&mut self) {
         self.map_path = self.map_path.trim().to_string();
         self.tools_dir = self.tools_dir.trim().to_string();

@@ -48,6 +48,8 @@ typedef enum
 eVisMethods;
 
 eVisMethods		g_method = DEFAULT_METHOD;
+bool			g_method_auto = false;                     // -vismatrix auto
+#define VISMATRIX_AUTO_MAX_BYTES (512.0 * 1024.0 * 1024.0)
 
 int RadVisMatrixMethodId()
 {
@@ -2742,6 +2744,18 @@ static void     BounceLight()
 // =====================================================================================
 static void     CheckMaxPatches()
 {
+    // -vismatrix auto: the plain bit matrix answers each patch pair with one
+    // bit test instead of a search, which cut MakeScales from 14 s to 3.4 s on
+    // ze_elysium with the same output. It costs (n+1)^2/16 bytes, so it is only
+    // taken when that stays small; past it, sparse, as before.
+    if (g_method_auto)
+    {
+        const double bytes = ((double)g_num_patches + 1) * ((double)g_num_patches + 1) / 16.0;
+        const bool normal = g_num_patches < MAX_VISMATRIX_PATCHES && bytes <= VISMATRIX_AUTO_MAX_BYTES;
+        g_method = normal ? eMethodVismatrix : eMethodSparseVismatrix;
+        Log("vismatrix auto: %d patches, plain matrix %.0f MB -> %s\n",
+            g_num_patches, bytes / (1024.0 * 1024.0), normal ? "normal" : "sparse");
+    }
     switch (g_method)
     {
     case eMethodVismatrix:
@@ -3100,7 +3114,8 @@ static void     Usage()
 	Log("    -lang file      : localization file\n");
 	Log("    -waddir folder  : Search this folder for wad files.\n");
 	Log("    -fast           : Fast rad\n");
-	Log("    -vismatrix value: Set vismatrix method to normal, sparse or off.\n");
+	Log("    -vismatrix value: Set vismatrix method to normal, sparse, off, or auto\n");
+	Log("                       (auto: normal when it needs at most 512 MB, else sparse).\n");
 	Log("    -pre25          : Optimize compile for pre-Half-Life 25th anniversary update.\n");
     Log("    -extra          : Improve lighting quality by doing 9 point oversampling\n");
     Log("    -bounce #       : Set number of radiosity bounces\n");
@@ -4096,6 +4111,13 @@ int             main(const int argc, char** argv)
 				else if (!strcasecmp (value, "off"))
 				{
 					g_method = eMethodNoVismatrix;
+					g_cli_overrides.vismatrix = true;
+				}
+				else if (!strcasecmp (value, "auto"))
+				{
+					// resolved in CheckMaxPatches, once the patch count is known
+					g_method = eMethodSparseVismatrix;
+					g_method_auto = true;
 					g_cli_overrides.vismatrix = true;
 				}
 				else

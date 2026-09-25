@@ -539,6 +539,68 @@ CSG completo, 12 hilos, salida idéntica a la anterior en los 13 mapas:
 `CreateBrush` sigue en un hilo: ahí el orden de creación decide qué plano queda como representante de
 cada grupo, y cambiarlo cambiaría el `.bsp`.
 
+## 9. RAD en un mapa de texlights (septiembre 2026)
+
+`ze_elysium_b1`: 15.002 caras, 43.376 parches, **1.561 luces directas** (texlights no rápidas) y 4.282
+rápidas, sin `light_environment`. Argumentos de la GUI (`-extra -bounce 12 -skylevel 6 -softsky 1
+-pre25`), Ryzen 5 5600G, 12 hilos, GTX 1060 3GB.
+
+### 9.1 Dónde se va el tiempo: medir con muestreo, no con relojes
+
+El perfil con `-profile` y relojes `rdtsc` alrededor del código caliente dijo que la mitad de
+`GatherSampleLight` era recorrer las hojas del PVS. Era mentira: dos lecturas del reloj por cada uno de
+los 1.580 millones de pares muestra-luz deformaban justo lo que medían (con `-profile`, RAD tardaba 92 s;
+sin él, 83 s). Un muestreador (cada milisegundo suspende los hilos y anota dónde están, después resuelve
+con el PDB) no toca el código y dio lo real, en tiempo de CPU trabajando:
+
+| función | % |
+|---|---|
+| `TestLine_r` (rayos de sombra) | **58%** |
+| `IsVisbitInArray` (búsqueda en la vismatrix sparse) | 11% |
+| `GatherSampleLight` (la cuenta de luz) | 7% |
+| `CalcSightArea` | 4% |
+| `VectorNormalize` | 4% |
+
+Con `-extra` son 6,6 millones de muestras y 512 millones de rayos de sombra, a ~460 ns cada uno.
+
+### 9.2 Lo que entró (misma salida byte a byte) ✅
+
+- **`-vismatrix auto`, default de la GUI.** La matriz normal responde cada par de parches con un bit; la
+  sparse, con una búsqueda. Pesa (n+1)²/16 bytes: 112 MB con 43.376 parches. `auto` la toma hasta 512 MB y
+  si no usa sparse. MakeScales: 14,0 s → 3,4 s.
+- **La matriz normal se arma el doble de rápido.** Cada hoja recorría todos los parches del mapa buscando
+  los suyos (240 millones de iteraciones), y cada bit visible tomaba un lock global de todos los hilos.
+  Ahora hay una lista de parches por hoja y un OR atómico: 9,6 s → 6,2 s.
+- **Lista de luces por PVS.** `GatherSampleLight` recorría todas las hojas del mapa en cada muestra. Cada
+  hilo guarda la lista aplanada de los últimos PVS; mismas luces, mismo orden. Del orden del 5%, dentro del
+  ruido de una sola corrida.
+
+| mapa | v0.14.0 | ahora | |
+|---|---|---|---|
+| ze_elysium_b1 | 88,5 s | 70,5 s | idéntico |
+| zpa_house | 5,5 s | 5,1 s | idéntico |
+| zm_eichen_v2 | 4,1 s | 3,7 s | idéntico |
+| zm_azteca | 1,9 s | 1,8 s | idéntico |
+| ar_pokemon | 0,4 s | 0,4 s | idéntico |
+
+Con la GPU (`-gpuauto`, que ya existía) el mismo mapa baja a **49 s**: 0,6% de los bytes de luz cambian,
+en 3/255 como mucho. La GUI la trae activada desde ahora; sin Vulkan, RAD vuelve a la CPU.
+
+### 9.3 Lo que se probó y no entró ❌
+
+- **Reusar rayos de sombra con `-extra`.** Los puntos de la grilla de luxels trazan y anotan cada rayo;
+  los intermedios saltan los rayos en que las cuatro esquinas coinciden. Sobre las caras enteras dio 2,2×
+  en `BuildFacelights` (49 → 22,5 s), pero 110 de los 114 bytes con error de 8/255 o más (hasta 49/255)
+  estaban en el borde de la cara, donde los puntos del margen de blur caen en otra superficie. Limitado a
+  puntos sobre la misma superficie que sus esquinas, el error baja a 3/255 y la ganancia a 10-20%: el mapa
+  tiene muchas caras chicas, y en una cara chica casi todo es borde.
+- **Interpolar la luz** donde las cuatro esquinas coinciden en todos los rayos y se parecen: más error y
+  no más rápido; sólo 0,45 de 6,6 millones de puntos calificaban.
+- **Cortar las luces tenues con error acotado.** Trazar de mayor a menor aporte y parar cuando lo que falta
+  no pueda sumar más de 0,5% de lo ya visto. Validado (umbral 0 = idéntico), pero ordenar las luces de cada
+  muestra cuesta más que los rayos que ahorra.
+- **Copiar las luces contiguas en memoria** en vez de punteros: sin cambio; no eran fallos de caché.
+
 ## Cómo reproducir
 
 ```sh

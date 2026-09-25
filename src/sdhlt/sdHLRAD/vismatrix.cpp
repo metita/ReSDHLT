@@ -1,4 +1,8 @@
 #include "qrad.h"
+#include <vector>
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
 
 ////////////////////////////
 // begin old vismat.c
@@ -14,6 +18,14 @@
 // =====================================================================================
 
 static byte*    s_vismatrix;
+
+typedef struct
+{
+    unsigned        patchnum;
+    int             facenum;
+}
+leafpatch_t;
+static std::vector<std::vector<leafpatch_t> > s_leafpatches;  // BuildVisMatrix only
 
 
 
@@ -117,9 +129,13 @@ static void     TestPatchToFace(const unsigned patchnum, const int facenum, cons
 						AddTransparencyToRawArray(patchnum, m, transparency);
                     }
 
-					ThreadLock (); //--vluzacn
-                    s_vismatrix[bitset >> 3] |= 1 << (bitset & 7);
-					ThreadUnlock (); //--vluzacn
+					// Several threads can set bits of one byte; an atomic OR
+					// replaces the global lock the whole map used to queue on.
+#ifdef _MSC_VER
+					_InterlockedOr8 ((volatile char*)&s_vismatrix[bitset >> 3], (char)(1 << (bitset & 7)));
+#else
+					__atomic_fetch_or (&s_vismatrix[bitset >> 3], (byte)(1 << (bitset & 7)), __ATOMIC_RELAXED);
+#endif
                 }
             }
         }
@@ -178,21 +194,20 @@ static void     BuildVisLeafs(int threadnum)
         // leaf, and process the patches that
         // actually have origins inside
         //
-		for (facenum = 0; facenum < g_numfaces; facenum++)
+		// (the patches of each leaf, listed once, in face then patch order)
+		for (const leafpatch_t& lp : s_leafpatches[i])
 		{
-			for (patch = g_face_patches[facenum]; patch; patch = patch->next)
-			{
-				if (patch->leafnum != i)
-					continue;
-				patchnum = patch - g_patches;
+			facenum = lp.facenum;
+			patch = &g_patches[lp.patchnum];
+			(void)patch;
+			patchnum = lp.patchnum;
 #ifdef HALFBIT
-				bitpos = patchnum * g_num_patches - (patchnum * (patchnum + 1)) / 2;
+			bitpos = patchnum * g_num_patches - (patchnum * (patchnum + 1)) / 2;
 #else
-				bitpos = patchnum * g_num_patches;
+			bitpos = patchnum * g_num_patches;
 #endif
-				for (facenum2 = facenum + 1; facenum2 < g_numfaces; facenum2++)
-					TestPatchToFace (patchnum, facenum2, head, bitpos, pvs);
-			}
+			for (facenum2 = facenum + 1; facenum2 < g_numfaces; facenum2++)
+				TestPatchToFace (patchnum, facenum2, head, bitpos, pvs);
 		}
 
     }
@@ -226,7 +241,22 @@ static void     BuildVisMatrix()
         hlassume(s_vismatrix != NULL, assume_NoMemory);
     }
 
+    // Each leaf used to scan every patch of the map for its own; list them once.
+    s_leafpatches.assign(g_dmodels[0].visleafs + 1, std::vector<leafpatch_t>());
+    for (int facenum = 0; facenum < g_numfaces; facenum++)
+    {
+        for (patch_t* patch = g_face_patches[facenum]; patch; patch = patch->next)
+        {
+            if (patch->leafnum > 0 && patch->leafnum <= g_dmodels[0].visleafs)
+            {
+                s_leafpatches[patch->leafnum].push_back({(unsigned)(patch - g_patches), facenum});
+            }
+        }
+    }
+
     NamedRunThreadsOn(g_dmodels[0].visleafs, g_estimate, BuildVisLeafs);
+    s_leafpatches.clear();
+    s_leafpatches.shrink_to_fit();
 }
 
 static void     FreeVisMatrix()
