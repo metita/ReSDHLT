@@ -20,10 +20,13 @@ Reported:
                          already, but they still take lightmap space and count
                          against the face limits
 
-Only entities that are always there and drawn fully opaque count: func_wall
-and func_illusionary with rendermode 0 and no zhlt_invisible. Triggers and
-ladders are not drawn; doors, trains and breakables move or break and uncover
-what is behind them, so those faces are not wasted. Textures the compiler
+Only entities that are always there, always solid and drawn fully opaque
+count: func_wall with no targetname, rendermode and renderfx 0, and no
+zhlt_invisible or zhlt_noclip, the same rule as sdHLCSG -autonull, which NULLs
+these faces by itself. func_illusionary is not solid: a player can walk into a
+bush and look at the floor under it. Triggers and ladders are not drawn; doors,
+trains and breakables move or break and uncover what is behind them, so those
+faces are not wasted. Textures the compiler
 already hides (sky, NULL, tool textures) are skipped.
 With --pts the faces are marked in a pointfile the editor loads like a leak.
 
@@ -41,7 +44,16 @@ from collections import Counter
 CONTENTS_SOLID = -2
 TEX_SPECIAL = 1
 SKIP_TEXTURES = ("sky", "null", "clip", "origin", "hint", "skip", "aaatrigger", "bevel")
-STATIC_VISIBLE_CLASSES = ("func_wall", "func_illusionary")
+STATIC_VISIBLE_CLASSES = ("func_wall",)
+
+
+def is_static_wall(e):
+    """A func_wall nothing can hide, move or walk into (sdHLCSG -autonull's rule)."""
+    def on(key):
+        return e.get(key, "").strip() not in ("", "0")
+    return (e.get("classname", "") in STATIC_VISIBLE_CLASSES
+            and not e.get("targetname", "").strip()
+            and not any(on(k) for k in ("rendermode", "renderfx", "zhlt_invisible", "zhlt_noclip")))
 
 
 def dot(a, b):
@@ -205,12 +217,10 @@ def main():
         model = e.get("model", "")
         if not model.startswith("*"):
             continue
-        # only entities that are always there and always drawn hide what is behind
+        # only entities that are always there, solid and drawn hide what is behind
         # them: triggers and ladders are invisible, doors, trains and breakables
-        # move or go away and uncover it
-        if e.get("classname", "") not in STATIC_VISIBLE_CLASSES:
-            continue
-        if int(e.get("rendermode", "0") or 0) != 0 or e.get("zhlt_invisible", "0") not in ("", "0"):
+        # move or go away and uncover it, func_illusionary can be walked into
+        if not is_static_wall(e):
             continue
         mi = int(model[1:])
         if mi <= 0 or mi >= len(bsp.models):

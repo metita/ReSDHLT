@@ -851,6 +851,9 @@ fn holes(bsp: &Bsp, targets: Option<&[(Vec<V3>, V3)]>, rays: u32, cancel: &Atomi
     let world = &bsp.models[0];
     let head = world.headnode;
     let drawn_set = bsp.drawn_faces();
+    // A static func_wall is solid and opaque: nobody stands inside one, and a
+    // world face it covers is not a hole even if -autonull removed it.
+    let walls = static_walls(bsp);
 
     // plane -> faces of the world model on it
     let mut by_plane: HashMap<usize, Vec<(usize, Vec<V3>)>> = HashMap::new();
@@ -935,7 +938,10 @@ fn holes(bsp: &Bsp, targets: Option<&[(Vec<V3>, V3)]>, rays: u32, cancel: &Atomi
             }
         };
         let size = len(d);
-        if size == 0.0 || bsp.contents(head, origin) != CONTENTS_EMPTY {
+        if size == 0.0
+            || bsp.contents(head, origin) != CONTENTS_EMPTY
+            || inside_wall(bsp, &walls, origin)
+        {
             continue;
         }
         let dir = scale(d, 1.0 / size);
@@ -956,7 +962,7 @@ fn holes(bsp: &Bsp, targets: Option<&[(Vec<V3>, V3)]>, rays: u32, cancel: &Atomi
                 facing_away = true;
             }
         }
-        if ok || covered_render(p, dir) {
+        if ok || covered_render(p, dir) || inside_wall(bsp, &walls, sub(p, scale(dir, 0.5))) {
             continue;
         }
         let key = (
@@ -1280,7 +1286,71 @@ const SKIP_TEXTURES: [&str; 8] = [
     "aaatrigger",
     "bevel",
 ];
-const STATIC_VISIBLE: [&str; 2] = ["func_wall", "func_illusionary"];
+
+/// A func_wall that is always there, always drawn and always solid. Only these
+/// hide what is behind them: func_illusionary is not solid, so a player can
+/// walk into a bush and look at the floor under it; anything with a
+/// targetname or a render mode can be hidden, faded or killed at run time.
+/// The same rule as sdHLCSG's -autonull.
+struct Wall {
+    model: usize,
+    origin: V3,
+    lo: V3,
+    hi: V3,
+}
+
+fn static_walls(bsp: &Bsp) -> Vec<Wall> {
+    let key = |e: &HashMap<String, String>, k: &str| {
+        e.get(k).map(|v| v.trim().to_string()).unwrap_or_default()
+    };
+    let set = |v: String| !v.is_empty() && v != "0";
+    let mut walls = Vec::new();
+    for e in parse_entities(&bsp.entities) {
+        let Some(mi) = key(&e, "model")
+            .strip_prefix('*')
+            .and_then(|m| m.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        if key(&e, "classname") != "func_wall" || mi == 0 || mi >= bsp.models.len() {
+            continue;
+        }
+        if !key(&e, "targetname").is_empty()
+            || set(key(&e, "rendermode"))
+            || set(key(&e, "renderfx"))
+            || set(key(&e, "zhlt_invisible"))
+            || set(key(&e, "zhlt_noclip"))
+        {
+            continue;
+        }
+        let m = &bsp.models[mi];
+        let drawn = (m.firstface..m.firstface + m.numfaces).any(|fi| {
+            let name = bsp.texname(fi);
+            !bsp.special(fi) && !SKIP_TEXTURES.iter().any(|t| name.starts_with(t))
+        });
+        if !drawn {
+            continue;
+        }
+        let mut origin = [0.0; 3];
+        for (k, v) in key(&e, "origin").split_whitespace().take(3).enumerate() {
+            origin[k] = v.parse().unwrap_or(0.0);
+        }
+        walls.push(Wall {
+            model: mi,
+            origin,
+            lo: add(m.mins, origin),
+            hi: add(m.maxs, origin),
+        });
+    }
+    walls
+}
+
+fn inside_wall(bsp: &Bsp, walls: &[Wall], p: V3) -> bool {
+    walls.iter().any(|w| {
+        (0..3).all(|k| p[k] >= w.lo[k] - 1.0 && p[k] <= w.hi[k] + 1.0)
+            && bsp.contents(bsp.models[w.model].headnode, sub(p, w.origin)) == CONTENTS_SOLID
+    })
+}
 
 fn parse_entities(text: &str) -> Vec<HashMap<String, String>> {
     let mut ents = Vec::new();
@@ -1386,49 +1456,10 @@ fn hidden(bsp: &Bsp) -> Vec<Section> {
         bsp.special(fi) || SKIP_TEXTURES.iter().any(|t| name.starts_with(t))
     };
 
-    // Opaque static brush entities: always there, always drawn.
-    let mut covers = Vec::new();
-    for e in parse_entities(&bsp.entities) {
-        let model = e.get("model").map(|s| s.as_str()).unwrap_or("");
-        let Some(mi) = model
-            .strip_prefix('*')
-            .and_then(|m| m.parse::<usize>().ok())
-        else {
-            continue;
-        };
-        let class = e.get("classname").map(|s| s.as_str()).unwrap_or("");
-        if !STATIC_VISIBLE.contains(&class) || mi == 0 || mi >= bsp.models.len() {
-            continue;
-        }
-        let rendermode = e
-            .get("rendermode")
-            .and_then(|v| v.parse::<i32>().ok())
-            .unwrap_or(0);
-        let invisible = e
-            .get("zhlt_invisible")
-            .map(|v| !v.is_empty() && v != "0")
-            .unwrap_or(false);
-        if rendermode != 0 || invisible {
-            continue;
-        }
-        let m = &bsp.models[mi];
-        if !(m.firstface..m.firstface + m.numfaces).any(|fi| !skip(fi)) {
-            continue;
-        }
-        let mut origin = [0.0; 3];
-        if let Some(o) = e.get("origin") {
-            for (k, v) in o.split_whitespace().take(3).enumerate() {
-                origin[k] = v.parse().unwrap_or(0.0);
-            }
-        }
-        covers.push((
-            mi,
-            origin,
-            add(m.mins, origin),
-            add(m.maxs, origin),
-            class.to_string(),
-        ));
-    }
+    let covers: Vec<_> = static_walls(bsp)
+        .into_iter()
+        .map(|w| (w.model, w.origin, w.lo, w.hi, "func_wall".to_string()))
+        .collect();
 
     let world = &bsp.models[0];
     let drawn = bsp.drawn_faces();
@@ -1541,9 +1572,10 @@ fn hidden(bsp: &Bsp) -> Vec<Section> {
             "Caras tapadas por entidades",
             "tapadas",
             covered,
-            "de mundo que un func_wall o func_illusionary tapa del todo",
-            "El motor las dibuja y RAD las ilumina aunque nadie pueda verlas. Ponles NULL, \
-             o convierte la entidad en func_detail para que el compilador las quite solo.",
+            "de mundo que un func_wall fijo tapa del todo",
+            "El motor las dibuja y RAD las ilumina aunque nadie pueda verlas. Activa 'Poner \
+             NULL en caras tapadas' en la pestaña CSG y el compilador las quita solo; o \
+             ponles NULL a mano, o convierte la entidad en func_detail.",
             Level::Warn,
         ),
         make(

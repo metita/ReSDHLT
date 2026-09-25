@@ -203,6 +203,7 @@ large texture library, and CSG aborted rather than ignoring the excess.
 | CSG | `-nodeterministic` | Restore the old thread ordered, irreproducible output |
 | CSG | `-noconvexfix` | Keep non-planar brushes as the three points of each face say |
 | CSG | `-convexgap N` | Smallest editor/plane mismatch that rebuilds a brush, default 0.2 |
+| CSG | `-autonull` | NULL world faces fully hidden inside a static func_wall |
 | BSP | `-lmoptimize` | Reorder faces to waste fewer lightmap atlas pages |
 | BSP | `-allleaks` | Mark every hole, not just the first one found |
 | RAD | `-skylevel N` | Sky sampling fineness, 4 to 8, default 6 |

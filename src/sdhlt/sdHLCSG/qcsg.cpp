@@ -114,7 +114,136 @@ bool g_nolightopt = DEFAULT_NOLIGHTOPT;
 bool g_noutf8 = DEFAULT_NOUTF8;
 #endif
 bool g_nullifytrigger = DEFAULT_NULLIFYTRIGGER;
+bool g_autonull = DEFAULT_AUTONULL;                     // "-autonull"
 bool g_viewsurface = false;
+
+// =====================================================================================
+//  -autonull
+//      A world face fully inside an opaque, static func_wall is drawn and lit for
+//      nothing: nobody can stand where it would be seen. Such faces become NULL.
+//      Only func_wall counts: func_illusionary is not solid, so a player can walk
+//      into a bush and look at the floor under it. Only a func_wall nothing can
+//      change at run time qualifies (no targetname, rendermode 0, drawn), and
+//      only when one of its brushes alone covers the whole face.
+// =====================================================================================
+static std::vector<int> g_coverbrushes;
+static std::atomic<int> c_autonull;
+
+// How far in front of the face the cover must reach, so a world face that only
+// touches the entity edge on or a coplanar entity face does not count.
+#define AUTONULL_DEPTH 1.0
+
+static bool     CoverTextureOk(const int texinfo)
+{
+    if (texinfo < 0 || texinfo >= g_numtexinfo || (g_texinfo[texinfo].flags & TEX_SPECIAL))
+    {
+        return false;
+    }
+    const char*     name = GetTextureByNumber_CSG(texinfo);
+    if (!name || !*name || name[0] == '{' || name[0] == '!' || name[0] == '*')
+    {
+        return false; // see-through or water
+    }
+    static const char* const tools[] = {
+        "NULL", "SKIP", "HINT", "SOLIDHINT", "BEVELHINT", "BEVEL", "CLIP", "ORIGIN",
+        "AAATRIGGER", "BOUNDINGBOX", "CONTENT", "SKY", "TRANSLUCENT",
+    };
+    for (const char* const tool : tools)
+    {
+        if (!strncasecmp(name, tool, strlen(tool)))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void     CollectCoverBrushes()
+{
+    g_coverbrushes.clear();
+    for (int i = 1; i < g_numentities; i++)
+    {
+        entity_t*       e = &g_entities[i];
+        if (!e->numbrushes || strcmp(ValueForKey(e, "classname"), "func_wall"))
+        {
+            continue;
+        }
+        // anything a trigger, env_render or the game can hide, move or fade
+        if (*ValueForKey(e, "targetname") || IntForKey(e, "rendermode") || IntForKey(e, "renderfx")
+            || IntForKey(e, "zhlt_invisible") || IntForKey(e, "zhlt_noclip")
+            || *ValueForKey(e, "zhlt_usemodel"))
+        {
+            continue;
+        }
+        for (int j = e->firstbrush; j < e->firstbrush + e->numbrushes; j++)
+        {
+            const brush_t*  b = &g_mapbrushes[j];
+            if (b->contents != CONTENTS_SOLID || !b->hulls[0].faces)
+            {
+                continue;
+            }
+            bool            opaque = true;
+            for (const bface_t* f = b->hulls[0].faces; f; f = f->next)
+            {
+                if (!CoverTextureOk(f->texinfo))
+                {
+                    opaque = false;
+                    break;
+                }
+            }
+            if (opaque)
+            {
+                g_coverbrushes.push_back(j);
+            }
+        }
+    }
+    Log("-autonull: %i func_wall brushes can hide world faces\n", (int)g_coverbrushes.size());
+}
+
+static bool     FaceCoveredByEntity(const bface_t* const f)
+{
+    const Winding*  w = f->w;
+    const vec_t*    normal = f->plane->normal;
+    BoundingBox     bounds;
+    for (unsigned int k = 0; k < w->m_NumPoints; k++)
+    {
+        vec3_t          front;
+        VectorMA(w->m_Points[k], AUTONULL_DEPTH, normal, front);
+        bounds.add(w->m_Points[k]);
+        bounds.add(front);
+    }
+    for (const int brushnum : g_coverbrushes)
+    {
+        const brushhull_t* bh = &g_mapbrushes[brushnum].hulls[0];
+        if (bh->bounds.testDisjoint(bounds))
+        {
+            continue;
+        }
+        // Both brushes are convex: the face and the slab in front of it are
+        // inside when every corner of both is behind every side of the cover.
+        bool            inside = true;
+        for (const bface_t* side = bh->faces; side && inside; side = side->next)
+        {
+            const vec_t*    n = side->plane->normal;
+            const vec_t     d = side->plane->dist;
+            for (unsigned int k = 0; k < w->m_NumPoints; k++)
+            {
+                vec3_t          front;
+                VectorMA(w->m_Points[k], AUTONULL_DEPTH, normal, front);
+                if (DotProduct(w->m_Points[k], n) - d > ON_EPSILON || DotProduct(front, n) - d > ON_EPSILON)
+                {
+                    inside = false;
+                    break;
+                }
+            }
+        }
+        if (inside)
+        {
+            return true;
+        }
+    }
+    return false;
+}
 
 // =====================================================================================
 //  GetParamsFromEnt
@@ -509,6 +638,16 @@ static void     SaveOutside(const brush_t* const b, const int hull, bface_t* out
 		if (b->entitynum != 0 && !strncasecmp (texname, "!", 1))
 		{
 			backnull = true; // strip water face on one side
+		}
+		if (g_autonull && hull == 0 && b->entitynum == 0 && !frontnull
+			&& texinfo >= 0 && !(g_texinfo[texinfo].flags & TEX_SPECIAL)
+			&& frontcontents == CONTENTS_EMPTY
+			&& strncasecmp(texname, "SKIP", 4) && strncasecmp(texname, "HINT", 4)
+			&& strncasecmp(texname, "SOLIDHINT", 9) && strncasecmp(texname, "BEVELHINT", 9)
+			&& FaceCoveredByEntity(f))
+		{
+			frontnull = true;
+			c_autonull++;
 		}
 
 		f->contents = frontcontents;
@@ -1724,6 +1863,7 @@ static void     Usage()
 
     Log("    -nonulltex       : Turns off null texture stripping\n");
 	Log("    -nonullifytrigger: don't remove 'aaatrigger' texture\n");
+	Log("    -autonull        : NULL world faces fully hidden inside a static func_wall\n");
 
 	Log("    -mergeentities   : merge identical static brush entities to save models\n");
 	Log("    -mergesize #     : max size of a merged group, 0 for no limit\n");
@@ -1841,6 +1981,7 @@ static void     Settings()
 	Log("wad.cfg config name   [ %7s ] [ %7s ]\n", g_wadconfigname? g_wadconfigname: "None", "None");
 	Log("nullfile              [ %7s ] [ %7s ]\n", g_nullfile ? g_nullfile : "None", "None");
 	Log("nullify trigger       [ %7s ] [ %7s ]\n", g_nullifytrigger? "on": "off", DEFAULT_NULLIFYTRIGGER? "on": "off");
+	Log("null hidden faces     [ %7s ] [ %7s ]\n", g_autonull? "on": "off", DEFAULT_AUTONULL? "on": "off");
 	Log("texture cost report  [ %7s ] [ %7s ]\n", g_texreport? "on": "off", DEFAULT_TEXREPORT? "on": "off");
 	Log("merge static entities [ %7s ] [ %7s ]\n", g_merge_entities? "on": "off", DEFAULT_MERGE_ENTITIES? "on": "off");
 	{
@@ -2173,6 +2314,10 @@ int             main(const int argc_input, char** argv_input)
 		else if (!strcasecmp (argv[i], "-nonullifytrigger"))
 		{
 			g_nullifytrigger = false;
+		}
+		else if (!strcasecmp (argv[i], "-autonull"))
+		{
+			g_autonull = true;
 		}
 		else if (!strcasecmp (argv[i], "-texchart"))
 		{
@@ -2513,8 +2658,17 @@ int             main(const int argc_input, char** argv_input)
 		fclose (f);
 	}
 
+    if (g_autonull)
+    {
+        CollectCoverBrushes();
+    }
+
     ProcessModels();
 
+    if (g_autonull)
+    {
+        Log("-autonull: %i world faces hidden by a func_wall set to NULL\n", c_autonull.load());
+    }
     Verbose("%5i csg faces\n", c_csgfaces);
     Verbose("%5i used faces\n", c_outfaces.load());
     Verbose("%5i tiny faces\n", c_tiny.load());

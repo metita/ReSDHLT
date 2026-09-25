@@ -258,8 +258,10 @@ defecto corre sola después de cada compilación que termina bien:
   visible del `.map`.
 - **wpoly por zona:** cuántas caras del mundo le manda el PVS al motor en cada
   zona, y cuáles son las peores.
-- **Caras ocultas:** caras tapadas del todo por un `func_wall` o
-  `func_illusionary`, y caras de entidades enterradas en paredes.
+- **Caras ocultas:** caras tapadas del todo por un `func_wall` fijo, y caras
+  de entidades enterradas en paredes. Un `func_illusionary` no cuenta: no es
+  sólido y un jugador puede meterse adentro. Con "Poner NULL en caras tapadas"
+  (`-autonull`, pestaña CSG) el compilador quita solo las primeras.
 - **Geometría:** caras no planas, no convexas o degeneradas.
 
 Cada hallazgo trae su coordenada, con un botón para copiarla, y cada apartado se

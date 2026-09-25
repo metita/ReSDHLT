@@ -64,6 +64,7 @@
 #define DEFAULT_NOUTF8 false
 #endif
 #define DEFAULT_NULLIFYTRIGGER true
+#define DEFAULT_AUTONULL false
 #define DEFAULT_TEXREPORT false
 #define DEFAULT_MERGE_ENTITIES false
 #define DEFAULT_MERGE_MAXSIZE 1024.0 // longest side a merged group may reach, 0 = no limit
@@ -314,6 +315,7 @@ extern bool g_nolightopt;
 extern bool g_noutf8;
 #endif
 extern bool g_nullifytrigger;
+extern bool g_autonull;
 
 extern vec_t    g_tiny_threshold;
 extern vec_t    g_BrushUnionThreshold;

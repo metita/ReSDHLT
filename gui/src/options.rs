@@ -187,6 +187,8 @@ pub struct Options {
     pub convexfix: bool,
     /// Smallest editor/plane mismatch, in units, that triggers the rebuild.
     pub convexgap: f32,
+    /// NULL world faces fully hidden inside a static func_wall.
+    pub autonull: bool,
     pub csg_extra: String,
 
     // ---- BSP ----
@@ -280,6 +282,7 @@ impl Default for Options {
             texchart: false,
             convexfix: true,
             convexgap: DEFAULT_CONVEXGAP,
+            autonull: false,
             csg_extra: String::new(),
 
             run_bsp: true,
@@ -765,6 +768,9 @@ impl Options {
             a.push("-noconvexfix".to_string());
         } else if (self.convexgap - DEFAULT_CONVEXGAP).abs() > 0.001 {
             push_num(&mut a, "-convexgap", self.convexgap);
+        }
+        if self.autonull {
+            a.push("-autonull".to_string());
         }
         push_extra(&mut a, &self.csg_extra);
         a

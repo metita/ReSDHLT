@@ -2637,6 +2637,29 @@ impl App {
                         OK,
                     );
                 }
+                toggle_row(
+                    ui,
+                    m,
+                    "Poner NULL en caras tapadas",
+                    "Quita las caras del mundo que un func_wall tapa por completo: el motor \
+                     las dibuja y RAD las ilumina aunque nadie pueda verlas. Es lo que harías \
+                     a mano con la textura NULL, sin tocar el editor.\n\n\
+                     SOLO CUENTAN los func_wall que nunca cambian: sin targetname, con \
+                     rendermode Normal, sin zhlt_invisible ni zhlt_noclip, y con todas sus \
+                     caras en texturas opacas (nada de '{', agua ni texturas de herramienta). \
+                     Un func_illusionary no cuenta: no es sólido y un jugador puede meterse \
+                     adentro y ver lo que tapa.\n\n\
+                     Una cara solo se quita si un brush del func_wall la cubre entera, con al \
+                     menos 1 unidad de grosor delante. Si la tapa solo en parte, queda como \
+                     está.\n\n\
+                     CÓMO SABER CUÁNTAS QUITÓ: el log de CSG dice '-autonull: N world faces \
+                     hidden by a func_wall set to NULL'. La pestaña Análisis lista las que \
+                     quedan.\n\n\
+                     CUÁNDO NO USARLO: si un plugin del servidor mueve, oculta o borra \
+                     func_walls sin nombre, el hueco quedaría a la vista.",
+                    Some("-autonull"),
+                    &mut self.opts.autonull,
+                );
                 row(
                     ui,
                     m,
@@ -3335,8 +3358,10 @@ impl App {
                     m,
                     "Caras ocultas",
                     "Caras que se dibujan y se iluminan sin que nadie pueda verlas: paredes \
-                     del mundo tapadas del todo por un func_wall o func_illusionary, y caras \
-                     de entidades metidas dentro de paredes. Con NULL o func_detail se van.",
+                     del mundo tapadas del todo por un func_wall fijo, y caras de entidades \
+                     metidas dentro de paredes. Con NULL o func_detail se van.\n\n\
+                     Un func_illusionary no cuenta: no es sólido, y un jugador puede meterse \
+                     en un arbusto y ver el piso de abajo.",
                     Some("FPS"),
                     &mut prefs.hidden,
                 );

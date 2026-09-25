@@ -80,7 +80,27 @@ class Bsp:
         self.leafs = arr(LUMP_LEAFS, "<ii3h3hHH4B")
         edges = arr(LUMP_EDGES, "<HH")
         surfedges = arr(LUMP_SURFEDGES, "<i")
-        model = arr(LUMP_MODELS, "<9f4iiii")[0]
+        models = arr(LUMP_MODELS, "<9f4iiii")
+        model = models[0]
+        # Static func_walls (sdHLCSG -autonull's rule) are solid and opaque:
+        # nobody stands inside one, and what one covers is not a hole.
+        eoff, esize = lumps[0]
+        self.walls = []
+        for block in re.findall(r"\{([^{}]*)\}", data[eoff:eoff + esize].decode("latin-1")):
+            e = dict(re.findall(r'"([^"]*)"\s*"([^"]*)"', block))
+            mi = e.get("model", "")
+            if (e.get("classname") != "func_wall" or not mi.startswith("*")
+                    or e.get("targetname", "").strip()
+                    or any(e.get(k, "").strip() not in ("", "0")
+                           for k in ("rendermode", "renderfx", "zhlt_invisible", "zhlt_noclip"))):
+                continue
+            m = models[int(mi[1:])] if 0 < int(mi[1:]) < len(models) else None
+            if m is None:
+                continue
+            origin = tuple(float(v) for v in (e.get("origin", "0 0 0").split() + ["0", "0", "0"])[:3])
+            self.walls.append((m[9], origin,
+                               tuple(m[k] + origin[k] for k in range(3)),
+                               tuple(m[3 + k] + origin[k] for k in range(3))))
         off = lumps[LUMP_TEXTURES][0]
         names = []
         for i in range(struct.unpack_from("<i", data, off)[0]):
@@ -139,13 +159,20 @@ class Bsp:
                 return True
         return False
 
-    def contents(self, p):
-        n = self.head
+    def contents(self, p, head=None):
+        n = self.head if head is None else head
         while n >= 0:
             node = self.nodes[n]
             pl = self.planes[node[0]]
             n = node[1] if dot(p, pl) - pl[3] >= 0 else node[2]
         return self.leafs[-n - 1][0]
+
+    def inside_wall(self, p):
+        for head, origin, lo, hi in self.walls:
+            if all(lo[k] - 1 <= p[k] <= hi[k] + 1 for k in range(3)) and \
+                    self.contents(sub(p, origin), head) == CONTENTS_SOLID:
+                return True
+        return False
 
     def trace(self, start, end):
         """First point where the segment enters solid or sky: (point, planenum, side)."""
@@ -311,7 +338,7 @@ def main():
             origin = tuple(rnd.uniform(bsp.mins[i], bsp.maxs[i]) for i in range(3))
             d = tuple(rnd.gauss(0, 1) for _ in range(3))
         size = length(d)
-        if not size or bsp.contents(origin) != CONTENTS_EMPTY:
+        if not size or bsp.contents(origin) != CONTENTS_EMPTY or bsp.inside_wall(origin):
             continue
         end = tuple(origin[i] + d[i] / size * 16384 for i in range(3))
         hit = bsp.trace(origin, end)
@@ -322,6 +349,8 @@ def main():
         result = bsp.covered(p, planenum, side)
         if result != "ok" and bsp.covered_render(p, tuple(c / size for c in d)):
             result = "ok"
+        if result != "ok" and bsp.inside_wall(tuple(p[i] - d[i] / size * 0.5 for i in range(3))):
+            result = "ok"  # a static func_wall covers the spot
         if result == "hole":
             holes.append((p, planenum, origin))
         elif result == "backface":

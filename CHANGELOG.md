@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- CSG: `-autonull` sets to NULL the world faces a static func_wall hides
+  completely: no targetname, rendermode and renderfx 0, no zhlt_invisible or
+  zhlt_noclip, every side an opaque texture, and one of its brushes covering the
+  whole face plus 1 unit in front of it. They were drawn and lit for nothing.
+  Off by default, and the GUI has it in the CSG tab. Without it CSG writes the
+  same file as 0.13.0. On the test maps it NULLs the pillar top under a
+  func_wall slab and leaves alone the same slab with a targetname or as a
+  func_illusionary; the five real test maps have no such face.
+
+### Fixed
+- Análisis tab and `hiddenfaces.py`: func_illusionary no longer counts as
+  covering what is behind it. It is not solid, so a player can walk into a bush
+  and see the floor under it; NULLing that floor would show the void.
+- Análisis tab and `holecheck.py`: a spot covered by a static func_wall is not a
+  hole, and rays no longer start inside one. With `-autonull` the removed faces
+  showed up as holes seen from inside the func_wall.
+
 ## [0.13.0] - 2026-09-25
 
 ### Added
