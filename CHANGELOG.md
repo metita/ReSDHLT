@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-09-25
+
+### Added
+- RAD: `-pcf #`, soft shadow edges. Each sample traces # x # shadow rays per
+  light over a rotated grid one lightmap texel wide, kept inside the face, and
+  scales the light by the share that gets through. Covers light, light_spot and
+  light_environment. On zm_eichen_v2 `-pcf 3` took RAD from 2.5 to 3.6 s; on
+  ze_elysium, lit by fast texlights, from 42.7 to 43.8 s. Like AO, it runs
+  the direct-light gather on the CPU even with `-gpu`.
+- RAD: `-blurclamp #` (0 to 1), a bilateral limit on the subsample blend
+  (seedee/SDHLT, FIXXOR's idea): a neighbour brighter than the luxel keeps at
+  least `1 - #` of its weight, so light no longer bleeds into thin shadows and
+  the feet of walls. Each style is normalized by its own weight sum.
+- `scripts/wpolymap.py`: counts the world faces each leaf's PVS sends to the
+  renderer, prints the distribution and the worst areas, and writes them as a
+  pointfile with `--pts`.
+- `scripts/hiddenfaces.py`: lists world faces fully covered by a func_wall or
+  func_illusionary, entity faces buried in world brushes, and faces no leaf
+  draws, with an optional pointfile.
+
+Both RAD flags are off by default. Without them RAD writes the same file as
+0.11.0, with and without `-gpu` (checked on zm_eichen_v2 and ze_elysium).
+Fast texlights are added at patch level, so neither flag changes the light
+they give.
+
 ## [0.11.0] - 2026-09-25
 
 ### Added
