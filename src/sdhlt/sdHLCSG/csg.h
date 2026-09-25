@@ -35,6 +35,7 @@
 #define DEFAULT_TINY_THRESHOLD        0.0
 #define DEFAULT_NOCLIP      false
 #define DEFAULT_CONVEXFIX   true
+#define DEFAULT_CONVEXFIX_MINGAP 0.2
 #define DEFAULT_ONLYENTS    false
 #define DEFAULT_WADTEXTURES true
 #define DEFAULT_SKYCLIP     true
@@ -290,6 +291,7 @@ extern bool     g_deterministic;
 extern bool     g_onlyents;
 extern bool     g_noclip;
 extern bool     g_convexfix;
+extern vec_t    g_convexfix_mingap;
 extern bool     g_wadtextures;
 extern bool     g_skyclip;
 extern bool     g_estimate;         

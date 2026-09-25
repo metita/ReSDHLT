@@ -1691,6 +1691,7 @@ static void     Usage()
     Log("    -wadinclude file : Include specific wad or directory into bsp\n");
     Log("    -noclip          : don't create clipping hull\n");
     Log("    -noconvexfix     : keep non-planar brushes as the 3 points of each face say\n");
+    Log("    -convexgap #     : smallest editor/plane mismatch that rebuilds a brush (default 0.2)\n");
     
     Log("    -clipeconomy     : turn clipnode economy mode on\n");
 
@@ -1823,6 +1824,7 @@ static void     Settings()
 
     Log("noclip                [ %7s ] [ %7s ]\n", g_noclip          ? "on" : "off", DEFAULT_NOCLIP       ? "on" : "off");
     Log("non-planar brush fix  [ %7s ] [ %7s ]\n", g_convexfix       ? "on" : "off", DEFAULT_CONVEXFIX    ? "on" : "off");
+    Log("non-planar min gap    [ %7.2f ] [ %7.2f ]\n", g_convexfix_mingap, DEFAULT_CONVEXFIX_MINGAP);
 
     Log("null texture stripping[ %7s ] [ %7s ]\n", g_bUseNullTex     ? "on" : "off", DEFAULT_NULLTEX      ? "on" : "off");
 
@@ -2047,6 +2049,10 @@ int             main(const int argc_input, char** argv_input)
         else if (!strcasecmp(argv[i], "-noconvexfix"))
         {
             g_convexfix = false;
+        }
+        else if (!strcasecmp(argv[i], "-convexgap"))
+        {
+            g_convexfix_mingap = atof(RequireOptionValue("-convexgap", i, argc, argv));
         }
         else if (!strcasecmp(argv[i], "-onlyents"))
         {

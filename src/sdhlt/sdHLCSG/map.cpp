@@ -167,6 +167,12 @@ static bool CheckForInvisible(entity_t* mapent)
 //      hull face takes the texture of the original face that shares most of its points.
 // =====================================================================================
 bool g_convexfix = DEFAULT_CONVEXFIX;
+// A brush is only rebuilt when the editor solid and the plane solid differ by at
+// least g_convexfix_mingap. Smaller gaps do not show in game, and every rebuild splits bent
+// faces into triangles: rebuilding all 1081 candidates of ze_elysium, most off by a
+// few hundredths, added 17% to the faces a leaf sees; 0.2 rebuilds 48 of them for
+// 2% and still closes the 0.1 to 0.6 unit seams of zpa_house.
+vec_t g_convexfix_mingap = DEFAULT_CONVEXFIX_MINGAP;
 static int g_numconvexfixed = 0;
 
 #define CONVEXFIX_MAXPOINTS    64
@@ -464,7 +470,7 @@ static void FixNonPlanarBrushes()
 			SidePlane(&sides[i], ni, &di);
 			for (const vec3_array& p : own)
 			{
-				if (DotProduct(p.v, ni) - di > ON_EPSILON)
+				if (DotProduct(p.v, ni) - di > g_convexfix_mingap)
 				{
 					inconsistent = true;
 					break;
@@ -519,7 +525,10 @@ static void FixNonPlanarBrushes()
 			if (best && bestdist >= 0.01)
 			{
 				AddUniquePoint(pts, best->v);
-				snapped = true;
+				if (bestdist >= g_convexfix_mingap)
+				{
+					snapped = true;
+				}
 			}
 			else if (!inconsistent)
 			{
