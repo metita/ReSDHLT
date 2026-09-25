@@ -32,6 +32,7 @@ sparse_column_t;
 
 sparse_column_t* s_vismatrix;
 static std::vector< std::vector<unsigned> > s_patches_by_leaf;
+static std::vector< std::vector<int> > s_faces_by_leaf;      // faces with a patch in each leaf, ascending
 static std::atomic<uint64_t> s_sparse_source_patches(0);
 static std::atomic<uint64_t> s_sparse_candidate_faces(0);
 static std::atomic<uint64_t> s_sparse_visible_pairs(0);
@@ -348,22 +349,20 @@ static void     BuildVisLeafs(int threadnum)
 		}
         head = 0;
 
-		// Build the PVS-compatible target face list once per source leaf. The old
-		// code rediscovered the same empty faces for every patch in this leaf.
+		// Build the PVS-compatible target face list once per source leaf, from
+		// the faces of the leaves the PVS lists rather than by scanning every
+		// face of the map: a few hundred visible leaves against thousands of
+		// faces, for each of thousands of source leaves.
 		candidate_faces.clear();
-		for (int facenum = 0; facenum < g_numfaces; ++facenum)
+		for (int leaf = 1; leaf <= g_dmodels[0].visleafs; ++leaf)
 		{
-			for (patch_t* target = g_face_patches[facenum]; target; target = target->next)
+			if (pvs[(leaf - 1) >> 3] & (1 << ((leaf - 1) & 7)))
 			{
-				if (target->leafnum != 0
-					&& (pvs[(target->leafnum - 1) >> 3]
-						& (1 << ((target->leafnum - 1) & 7))))
-				{
-					candidate_faces.push_back(facenum);
-					break;
-				}
+				candidate_faces.insert(candidate_faces.end(), s_faces_by_leaf[leaf].begin(), s_faces_by_leaf[leaf].end());
 			}
 		}
+		std::sort(candidate_faces.begin(), candidate_faces.end());
+		candidate_faces.erase(std::unique(candidate_faces.begin(), candidate_faces.end()), candidate_faces.end());
 
 		const std::vector<unsigned>& source_patches = s_patches_by_leaf[i];
 		for (size_t source = 0; source < source_patches.size(); ++source)
@@ -415,12 +414,19 @@ static void     BuildVisMatrix()
 
 	s_patches_by_leaf.clear();
 	s_patches_by_leaf.resize((size_t)g_dmodels[0].visleafs + 1);
+	s_faces_by_leaf.clear();
+	s_faces_by_leaf.resize((size_t)g_dmodels[0].visleafs + 1);
 	for (int facenum = 0; facenum < g_numfaces; ++facenum)
 	{
 		for (patch_t* patch = g_face_patches[facenum]; patch; patch = patch->next)
 		{
 			if (patch->leafnum > 0 && patch->leafnum <= g_dmodels[0].visleafs)
+			{
 				s_patches_by_leaf[patch->leafnum].push_back((unsigned)(patch - g_patches));
+				std::vector<int>& lf = s_faces_by_leaf[patch->leafnum];
+				if (lf.empty() || lf.back() != facenum)
+					lf.push_back(facenum);
+			}
 		}
 	}
 	s_sparse_source_patches.store(0, std::memory_order_relaxed);
@@ -434,6 +440,7 @@ static void     BuildVisMatrix()
 		s_sparse_visible_pairs.load(std::memory_order_relaxed) / 1000000.0,
 		I_FloatTime() - started);
 	std::vector< std::vector<unsigned> >().swap(s_patches_by_leaf);
+	std::vector< std::vector<int> >().swap(s_faces_by_leaf);
 }
 
 static void     FreeVisMatrix()

@@ -2751,10 +2751,15 @@ static void     CheckMaxPatches()
     if (g_method_auto)
     {
         const double bytes = ((double)g_num_patches + 1) * ((double)g_num_patches + 1) / 16.0;
-        const bool normal = g_num_patches < MAX_VISMATRIX_PATCHES && bytes <= VISMATRIX_AUTO_MAX_BYTES;
+        // The GPU only computes transfer factors for the sparse matrix, and that
+        // beats the plain matrix on the CPU: sparse with the GPU took 3.2 s less
+        // on ze_elysium_b1 than the plain matrix did.
+        const bool gpu_sparse = g_gpu && g_gpu_transfers && !g_rgb_transfers;
+        const bool normal = !gpu_sparse && g_num_patches < MAX_VISMATRIX_PATCHES && bytes <= VISMATRIX_AUTO_MAX_BYTES;
         g_method = normal ? eMethodVismatrix : eMethodSparseVismatrix;
-        Log("vismatrix auto: %d patches, plain matrix %.0f MB -> %s\n",
-            g_num_patches, bytes / (1024.0 * 1024.0), normal ? "normal" : "sparse");
+        Log("vismatrix auto: %d patches, plain matrix %.0f MB -> %s%s\n",
+            g_num_patches, bytes / (1024.0 * 1024.0), normal ? "normal" : "sparse",
+            gpu_sparse ? " (GPU transfers)" : "");
     }
     switch (g_method)
     {

@@ -1,4 +1,5 @@
 #include "qrad.h"
+#include <algorithm>
 #include <vector>
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -26,6 +27,7 @@ typedef struct
 }
 leafpatch_t;
 static std::vector<std::vector<leafpatch_t> > s_leafpatches;  // BuildVisMatrix only
+static std::vector<std::vector<int> > s_leaffaces;           // faces with a patch in each leaf, sorted
 
 
 
@@ -162,6 +164,7 @@ static void     BuildVisLeafs(int threadnum)
     int             head;
     unsigned        bitpos;
     unsigned        patchnum;
+    std::vector<int> candidates;
 
     while (1)
     {
@@ -189,6 +192,22 @@ static void     BuildVisLeafs(int threadnum)
 		}
         head = 0;
 
+		// The faces this leaf's patches can reach at all: those with a patch
+		// in a leaf the PVS lists. TestPatchToFace skips every patch of any
+		// other face, so leaving those faces out changes nothing but the time
+		// spent finding that out - a few hundred visible leaves against all
+		// the faces of the map, per source patch.
+		candidates.clear ();
+		for (int leaf = 1; leaf <= g_dmodels[0].visleafs; leaf++)
+		{
+			if (pvs[(leaf - 1) >> 3] & (1 << ((leaf - 1) & 7)))
+			{
+				candidates.insert (candidates.end (), s_leaffaces[leaf].begin (), s_leaffaces[leaf].end ());
+			}
+		}
+		std::sort (candidates.begin (), candidates.end ());
+		candidates.erase (std::unique (candidates.begin (), candidates.end ()), candidates.end ());
+
         //
         // go through all the faces inside the
         // leaf, and process the patches that
@@ -206,8 +225,12 @@ static void     BuildVisLeafs(int threadnum)
 #else
 			bitpos = patchnum * g_num_patches;
 #endif
-			for (facenum2 = facenum + 1; facenum2 < g_numfaces; facenum2++)
+			std::vector<int>::const_iterator target = std::upper_bound (candidates.begin (), candidates.end (), facenum);
+			for (; target != candidates.end (); ++target)
+			{
+				facenum2 = *target;
 				TestPatchToFace (patchnum, facenum2, head, bitpos, pvs);
+			}
 		}
 
     }
@@ -243,6 +266,7 @@ static void     BuildVisMatrix()
 
     // Each leaf used to scan every patch of the map for its own; list them once.
     s_leafpatches.assign(g_dmodels[0].visleafs + 1, std::vector<leafpatch_t>());
+    s_leaffaces.assign(g_dmodels[0].visleafs + 1, std::vector<int>());
     for (int facenum = 0; facenum < g_numfaces; facenum++)
     {
         for (patch_t* patch = g_face_patches[facenum]; patch; patch = patch->next)
@@ -250,13 +274,18 @@ static void     BuildVisMatrix()
             if (patch->leafnum > 0 && patch->leafnum <= g_dmodels[0].visleafs)
             {
                 s_leafpatches[patch->leafnum].push_back({(unsigned)(patch - g_patches), facenum});
+                std::vector<int>& lf = s_leaffaces[patch->leafnum];
+                if (lf.empty() || lf.back() != facenum)
+                {
+                    lf.push_back(facenum);                 // faces come in ascending order
+                }
             }
         }
     }
 
     NamedRunThreadsOn(g_dmodels[0].visleafs, g_estimate, BuildVisLeafs);
-    s_leafpatches.clear();
-    s_leafpatches.shrink_to_fit();
+    std::vector<std::vector<leafpatch_t> >().swap(s_leafpatches);
+    std::vector<std::vector<int> >().swap(s_leaffaces);
 }
 
 static void     FreeVisMatrix()

@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-09-25
+
+### Changed
+- RAD (GPU): the device and the CPU no longer take turns. While the GPU
+  gathers one chunk of faces, the CPU collects the next and finishes the
+  previous; the texlight near pairs the kernel hands back (3.2 million on
+  ze_elysium_b1) are resolved on the thread pool instead of on the single
+  thread that fed the device, which had hidden them inside its time. Two
+  chunks are alive at once, so each is capped at 256 MB instead of 512 MB.
+- RAD: `-vismatrix auto` picks sparse when the GPU transfers are on, since the
+  GPU only computes transfer factors for that matrix; the plain matrix stays
+  the choice on the CPU.
+- RAD: BuildVisLeafs takes the candidate faces of a leaf from the faces of the
+  leaves its PVS lists instead of scanning every face of the map, for both
+  matrices. 6.7 s to 4.1 s on ze_elysium_b1 with the plain matrix.
+
+RAD on ze_elysium_b1 with the GUI's arguments: 52.4 s in 0.15.0, 33.7 s now
+(31.5 s in the best run), same .bsp as 0.15.0's GPU output. On the CPU alone
+the .bsp is byte for byte the one 0.14.0 wrote.
+
 ## [0.15.0] - 2026-09-25
 
 ### Added

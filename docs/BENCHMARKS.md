@@ -601,6 +601,33 @@ en 3/255 como mucho. La GUI la trae activada desde ahora; sin Vulkan, RAD vuelve
   muestra cuesta más que los rayos que ahorra.
 - **Copiar las luces contiguas en memoria** en vez de punteros: sin cambio; no eran fallos de caché.
 
+### 9.4 Segunda vuelta: la GPU y la CPU en paralelo ✅
+
+Con la GUI en su default (GPU + `-vismatrix auto`), la línea de tiempo del mismo mapa era: 19 s de
+`BuildFacelights`, 6,7 s de `BuildVisLeafs`, 3,7 s de `MakeScales`, 4 s de rebotes. Dentro de los 19 s la
+GPU trabajaba 14,6 s y la CPU 7,4 s (5,1 s preparando muestras, 2,3 s terminando caras), **por turnos**.
+
+- **Pipeline.** Mientras la GPU calcula el lote N, la CPU prepara el N+1 y termina el N-1. Dos lotes vivos,
+  presupuesto de 256 MB cada uno en vez de 512 MB para uno.
+- **Los pares cercanos de texlights** (el kernel devuelve a la CPU los pares muestra-texlight a menos del
+  rango del emisor, para resolverlos con `CalcSightArea`) eran 3,2 millones y se resolvían en el único hilo
+  que alimentaba la GPU: estaban escondidos dentro del "tiempo de device". Ahora van al pool de hilos,
+  agrupados por muestra para que el orden de suma no cambie. 47,5 s → 36,1 s de un golpe.
+- **`auto` elige sparse con GPU.** La GPU solo calcula transferencias para la matriz sparse; con GPU, sparse
+  gana por 3,2 s a la matriz normal en CPU. Sin GPU sigue eligiendo la normal.
+- **Caras candidatas por hoja** en `BuildVisLeafs`: de las hojas que el PVS lista, no de recorrer las 15.000
+  caras del mapa por cada hoja. Para las dos matrices. 6,7 → 4,1 s.
+- Lotes de despacho más grandes (262k items) no ayudaron; el kernel es lo que cuesta, no el despacho.
+
+| ze_elysium_b1, GUI default | tiempo | .bsp |
+|---|---|---|
+| 0.15.0 | 52,4 s | — |
+| ahora | **33,7 s** (31,5 s la mejor) | idéntico al de 0.15.0 con GPU |
+| ahora, solo CPU, matriz normal | 70,9 s | idéntico a 0.14.0 |
+| ahora, solo CPU, sparse | 88,3 s | idéntico a 0.14.0 |
+
+Lo que queda: el kernel de gather, 16 s de GPU en 6,6 millones de muestras.
+
 ## Cómo reproducir
 
 ```sh

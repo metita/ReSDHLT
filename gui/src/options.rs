@@ -55,12 +55,13 @@ impl VisMatrix {
     pub fn help(self) -> &'static str {
         match self {
             VisMatrix::Auto => {
-                "RAD elige solo, cuando ya sabe cuántos parches tiene el mapa: la \
-                 matriz normal si ocupa hasta 512 MB, sparse si no.\n\n\
+                "RAD elige solo. Con la GPU activada usa sparse, porque la GPU solo \
+                 calcula las transferencias de esa matriz y así gana más. Sin GPU usa \
+                 la matriz normal si ocupa hasta 512 MB, y sparse si no.\n\n\
                  La normal responde cada consulta con un bit en vez de una búsqueda: \
-                 en ze_elysium bajó MakeScales de 14 a 3.4 s. Con 43.000 parches ocupa \
-                 112 MB. Para mapas enormes pasa sola a sparse, así que no se queda sin \
-                 memoria.\n\n\
+                 en ze_elysium bajó MakeScales de 14 a 3.4 s en CPU. Con 43.000 parches \
+                 ocupa 112 MB. Para mapas enormes pasa sola a sparse, así que no se \
+                 queda sin memoria.\n\n\
                  NO cambia la iluminación resultante."
             }
             VisMatrix::Normal => {

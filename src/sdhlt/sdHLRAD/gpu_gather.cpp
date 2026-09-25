@@ -15,8 +15,14 @@ int             g_gpu_phase = 0;
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 #include <utility>
 #include <vector>
 
@@ -36,8 +42,8 @@ namespace
     // under that window - the spread around the average is wide and only the
     // peak matters. An extra dispatch costs microseconds of submit overhead,
     // while one overshoot loses the whole gather to the CPU fallback.
-    const double GATHER_TARGET_SECONDS = 0.20;
-    const double GATHER_CEILING_SECONDS = 0.40;
+    const double GATHER_TARGET_SECONDS = 0.35;
+    const double GATHER_CEILING_SECONDS = 0.70;
     const size_t GATHER_CHUNK_MIN = 256;
     const size_t GATHER_CHUNK_START = 2048;
     const size_t GPU_AUTO_GATHER_LIGHTS = 150;
@@ -69,6 +75,25 @@ namespace
     };
 
     gpu_gather_data *g_data = NULL;
+
+    // One chunk of faces on its way through collect, device and finish. Two
+    // are alive at a time: the device works on one while the CPU collects the
+    // next, which is why the items and results are not in g_data any more.
+    struct gpu_chunk
+    {
+        int base;
+        int count;
+        std::vector< char > state;                          // facebuild_t per face
+        std::vector< unsigned char > live;
+        std::vector< rad::gpu::work_item_gpu > items;       // flat, face major
+        std::vector< rad::gpu::gather_result_gpu > results;
+        std::vector< std::vector< byte > > pvs_rows;
+        std::vector< rad::gpu::near_pair > nearpairs;       // texlight pairs the kernel routed back
+        std::vector< size_t > near_groups;                  // first pair of each item, plus the end
+        size_t bytes;
+    };
+    gpu_chunk *g_active_chunk = NULL;                       // the one ChunkCollect/ChunkFinish work on
+    const gpu_chunk *g_apply_chunk = NULL;                  // the one GpuGatherApply reads
     std::vector< float > g_face_gap;                        // 6 floats per face, kept for the CPU resolver
     std::vector< directlight_t * > g_flatlights;            // same order as scene.lights
 
@@ -426,11 +451,11 @@ void GpuGatherApply (vec3_t *sample, byte *styles)
                (int)d.face_items[facenum].size ());
     }
     const int flat = d.face_first[facenum] + cursor;
-    const rad::gpu::gather_result_gpu &r = d.results[flat];
+    const rad::gpu::gather_result_gpu &r = g_apply_chunk->results[flat];
     const vec_t *pos = NULL;
     vec3_t itempos;
     {
-        const rad::gpu::work_item_gpu &item = d.items[flat];
+        const rad::gpu::work_item_gpu &item = g_apply_chunk->items[flat];
         VectorCopy (item.pos, itempos);
         pos = itempos;
     }
@@ -515,51 +540,50 @@ namespace
     // lmcache dominates it - one vec3_t per light style per lmcache point,
     // megabytes on a large face with -extra - and it is the price of not
     // recomputing everything a second time.
-    const size_t CHUNK_BYTE_BUDGET = 512u * 1024u * 1024u;
+    // Two chunks are alive at once (see gpu_chunk), so this is half of what one
+    // alone was allowed.
+    const size_t CHUNK_BYTE_BUDGET = 256u * 1024u * 1024u;
     const int CHUNK_FACES_START = 64;
     const int CHUNK_FACES_MAX = 4096;
 
-    // Set for the duration of a chunk so the worker callbacks know their range.
-    int g_chunk_base = 0;
-    std::vector< char > g_chunk_state;
-    std::vector< unsigned char > g_chunk_live;
-
     void ChunkCollect (int i)
     {
-        void *state = &g_chunk_state[(size_t)i * RadGpuFaceStateSize ()];
-        g_chunk_live[i] = RadGpuFaceBegin (g_chunk_base + i, state)? 1: 0;
+        gpu_chunk &c = *g_active_chunk;
+        void *state = &c.state[(size_t)i * RadGpuFaceStateSize ()];
+        c.live[i] = RadGpuFaceBegin (c.base + i, state)? 1: 0;
     }
 
     void ChunkFinish (int i)
     {
-        if (!g_chunk_live[i])
+        gpu_chunk &c = *g_active_chunk;
+        if (!c.live[i])
         {
             return;
         }
-        void *state = &g_chunk_state[(size_t)i * RadGpuFaceStateSize ()];
-        RadGpuFaceEnd (g_chunk_base + i, state);
+        void *state = &c.state[(size_t)i * RadGpuFaceStateSize ()];
+        RadGpuFaceEnd (c.base + i, state);
     }
 
-    // Dispatches the items collected for the current chunk. Returns false if
-    // the device failed, in which case the caller has to abandon the GPU path.
-    bool DispatchChunk (size_t first_item, size_t &chunk_hint,
+    // Dispatches the items collected for one chunk. Returns false if the
+    // device failed, in which case the caller has to abandon the GPU path.
+    bool DispatchChunk (gpu_chunk &c, size_t &chunk_hint,
                         std::vector< rad::gpu::near_pair > &near_pairs,
                         size_t &dispatches, double &spent, double &slowest,
                         size_t &chunk_ceiling)
     {
-        for (size_t base = first_item; base < g_data->items.size ();)
+        for (size_t base = 0; base < c.items.size ();)
         {
-            const size_t count = qmin (g_data->items.size () - base, chunk_hint);
+            const size_t count = qmin (c.items.size () - base, chunk_hint);
             std::vector< rad::gpu::gather_result_gpu > chunk_results;
             std::vector< rad::gpu::near_pair > chunk_near;
             const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now ();
-            const bool ok = rad::gpu::gather_batch (&g_data->items[base], count, chunk_results, chunk_near);
+            const bool ok = rad::gpu::gather_batch (&c.items[base], count, chunk_results, chunk_near);
             const double elapsed = std::chrono::duration< double > (std::chrono::steady_clock::now () - started).count ();
             if (!ok)
             {
                 Warning ("-gpu: %s (dispatch %d, item %d of %d, chunk %d, %.3fs)",
                          rad::gpu::last_error ().c_str (), (int)dispatches + 1, (int)base,
-                         (int)g_data->items.size (), (int)count, elapsed);
+                         (int)c.items.size (), (int)count, elapsed);
                 return false;
             }
             dispatches++;
@@ -568,7 +592,7 @@ namespace
             {
                 slowest = elapsed;
             }
-            memcpy (&g_data->results[base], &chunk_results[0],
+            memcpy (&c.results[base], &chunk_results[0],
                     chunk_results.size () * sizeof (rad::gpu::gather_result_gpu));
             for (size_t p = 0; p < chunk_near.size (); p++)
             {
@@ -604,26 +628,23 @@ namespace
 
     // The texlight near branch, resolved with the reference CPU functions for
     // the pairs the kernel routed back. Sorted by item then light so the merge
-    // order matches the CPU's ascending light loop.
-    void ResolveNearPairs (std::vector< rad::gpu::near_pair > &near_pairs)
+    // order matches the CPU's ascending light loop. Millions of pairs on a
+    // texlight map, each a CalcSightArea, so they are spread over the thread
+    // pool by item: one thread owns all the pairs of an item, which keeps the
+    // accumulation order, and no two threads touch the same result.
+    gpu_chunk *g_near_chunk = NULL;
+
+    void ResolveNearGroup (int g)
     {
-        if (near_pairs.empty ())
+        gpu_chunk &c = *g_near_chunk;
+        for (size_t p = c.near_groups[g]; p < c.near_groups[g + 1]; p++)
         {
-            return;
-        }
-        std::sort (near_pairs.begin (), near_pairs.end (),
-            [](const rad::gpu::near_pair &a, const rad::gpu::near_pair &b)
-            {
-                return a.item != b.item? a.item < b.item: a.light < b.light;
-            });
-        for (size_t p = 0; p < near_pairs.size (); p++)
-        {
-            const rad::gpu::near_pair &pair = near_pairs[p];
+            const rad::gpu::near_pair &pair = c.nearpairs[p];
             if (pair.light >= g_flatlights.size ())
             {
                 continue;
             }
-            const rad::gpu::work_item_gpu &item = g_data->items[pair.item];
+            const rad::gpu::work_item_gpu &item = c.items[pair.item];
             directlight_t *l = g_flatlights[pair.light];
             vec3_t pos, normal, add;
             VectorCopy (item.pos, pos);
@@ -631,7 +652,7 @@ namespace
             if (ResolveNearPair (pos, normal, l, item.cone_power, item.cone_scale,
                                  &g_face_gap[(size_t)item.face * 6], add))
             {
-                rad::gpu::gather_result_gpu &out = g_data->results[pair.item];
+                rad::gpu::gather_result_gpu &out = c.results[pair.item];
                 const int compact = g_data->style_to_compact[l->style];
                 out.adds[compact * 3 + 0] += (float)add[0];
                 out.adds[compact * 3 + 1] += (float)add[1];
@@ -639,7 +660,33 @@ namespace
                 out.touched |= 1u << compact;
             }
         }
-        near_pairs.clear ();
+    }
+
+    void ResolveNearPairs (gpu_chunk &c)
+    {
+        if (c.nearpairs.empty ())
+        {
+            return;
+        }
+        std::sort (c.nearpairs.begin (), c.nearpairs.end (),
+            [](const rad::gpu::near_pair &a, const rad::gpu::near_pair &b)
+            {
+                return a.item != b.item? a.item < b.item: a.light < b.light;
+            });
+        c.near_groups.clear ();
+        for (size_t p = 0; p < c.nearpairs.size (); p++)
+        {
+            if (p == 0 || c.nearpairs[p].item != c.nearpairs[p - 1].item)
+            {
+                c.near_groups.push_back (p);
+            }
+        }
+        c.near_groups.push_back (c.nearpairs.size ());
+        g_near_chunk = &c;
+        RunThreadsOnIndividual ((int)c.near_groups.size () - 1, false, ResolveNearGroup);
+        g_near_chunk = NULL;
+        std::vector< rad::gpu::near_pair > ().swap (c.nearpairs);
+        std::vector< size_t > ().swap (c.near_groups);
     }
 }
 
@@ -713,127 +760,178 @@ bool GpuBuildFacelights ()
     double slowest = 0.0;
     size_t chunk_hint = GATHER_CHUNK_START;
     size_t chunk_ceiling = GATHER_CHUNK_ITEMS;
-    std::vector< rad::gpu::near_pair > near_pairs;
     size_t totalsamples = 0;
-    double t_collect = 0, t_finish = 0;
+    double t_collect = 0, t_finish = 0, t_near = 0;
     bool ok = true;
 
-    // Advance by the count this iteration actually used, not by chunkfaces:
-    // the loop retunes chunkfaces at the bottom, and stepping by the new value
-    // would skip everything between.
-    for (int base = 0; base < g_numfaces && ok;)
-    {
-        const int count = qmin (chunkfaces, g_numfaces - base);
-        g_chunk_base = base;
-        g_chunk_state.assign ((size_t)count * statesize, 0);
-        g_chunk_live.assign (count, 0);
+    int base = 0;
 
-        // Everything below is per chunk and consumed before the next one, so
-        // the buffers are reused rather than grown to the whole map. A million
-        // samples would otherwise mean 200 MB of results alone.
-        g_data->items.clear ();
-        g_data->results.clear ();
+    // First half of a chunk: sample placement, phong normals, PVS, and the
+    // gather calls recorded rather than traced. Threaded, like the CPU pass.
+    // Returns the chunk with its items flattened, ready for the device, and
+    // retunes chunkfaces for the next one.
+    auto collect = [&]() -> std::unique_ptr< gpu_chunk >
+    {
+        std::unique_ptr< gpu_chunk > c (new gpu_chunk ());
+        c->base = base;
+        c->count = qmin (chunkfaces, g_numfaces - base);
+        c->state.assign ((size_t)c->count * statesize, 0);
+        c->live.assign (c->count, 0);
+        c->bytes = 0;
+
+        // The row table is per chunk: what the intercepts record goes to
+        // g_data and is moved into the chunk once they are done.
         g_data->pvs_rows.clear ();
         g_data->row_lookup.clear ();
         g_row_generation++;                                 // retires the per-thread row memo
 
-        // First half: sample placement, phong normals, PVS, and the gather
-        // calls recorded rather than traced. Threaded, like the CPU pass.
+        g_active_chunk = c.get ();
+        g_gpu_phase = 1;
         double t0 = I_FloatTime ();
-        RunThreadsOnIndividual (count, false, ChunkCollect);
+        RunThreadsOnIndividual (c->count, false, ChunkCollect);
         t_collect += I_FloatTime () - t0;
 
-        const size_t first_item = 0;
-        size_t chunkbytes = 0;
-        for (int i = 0; i < count; i++)
+        for (int i = 0; i < c->count; i++)
         {
-            const int f = base + i;
-            g_data->face_first[f] = (int)g_data->items.size ();
-            g_data->items.insert (g_data->items.end (),
-                                  g_data->face_items[f].begin (), g_data->face_items[f].end ());
-            if (g_chunk_live[i])
+            const int f = c->base + i;
+            g_data->face_first[f] = (int)c->items.size ();
+            c->items.insert (c->items.end (),
+                             g_data->face_items[f].begin (), g_data->face_items[f].end ());
+            if (c->live[i])
             {
-                chunkbytes += RadGpuFaceStateBytes (&g_chunk_state[(size_t)i * statesize]);
+                c->bytes += RadGpuFaceStateBytes (&c->state[(size_t)i * statesize]);
             }
         }
-        g_data->results.resize (g_data->items.size ());
-        totalsamples += g_data->items.size ();
-
-        // PVS rows accumulate across chunks, so the session is reopened per
-        // chunk with the rows known so far. The scene upload is the same
-        // buffers every time; only the row table grows.
-        const uint32_t stride_words = (uint32_t)((g_data->rowbytes + 3) / 4 + 1);
-        std::vector< uint32_t > pvs_words (g_data->pvs_rows.size () * stride_words, 0);
-        for (size_t r = 0; r < g_data->pvs_rows.size (); r++)
-        {
-            memcpy (&pvs_words[r * stride_words], &g_data->pvs_rows[r][0], g_data->rowbytes);
-        }
-
-        if (g_data->items.size () > first_item)
-        {
-            const size_t chunkitems = g_data->items.size () - first_item;
-            const size_t cap = qmin (chunkitems, GATHER_CHUNK_ITEMS);
-            if (!rad::gpu::gather_begin (scene, pvs_words, stride_words, (uint32_t)cap))
-            {
-                Warning ("-gpu: %s; using the CPU path", rad::gpu::last_error ().c_str ());
-                ok = false;
-            }
-            else
-            {
-                ok = DispatchChunk (first_item, chunk_hint, near_pairs,
-                                    dispatches, spent, slowest, chunk_ceiling);
-                rad::gpu::gather_end ();
-            }
-            if (ok)
-            {
-                ResolveNearPairs (near_pairs);
-            }
-        }
-
-        if (!ok)
-        {
-            // Nothing has been written to the map yet for this chunk, and the
-            // chunks before it were finished properly - but their lightmaps
-            // would be half a compile. Give up on the whole GPU path and let
-            // RAD redo BuildFacelights from scratch on the CPU.
-            for (int i = 0; i < count; i++)
-            {
-                if (g_chunk_live[i])
-                {
-                    RadGpuFaceAbandon (&g_chunk_state[(size_t)i * statesize]);
-                }
-            }
-            break;
-        }
-
-        // Second half: the blur, the patch accumulation and the lightmap
-        // write, each face reading the results the device just produced.
-        g_gpu_phase = 0;
-        double t1 = I_FloatTime ();
-        RunThreadsOnIndividual (count, false, ChunkFinish);
-        t_finish += I_FloatTime () - t1;
-        g_gpu_phase = 1;
-
-        // Done with this chunk's items; the memory is worth reclaiming on a
-        // large map, and the results are already in the lightmaps.
-        for (int i = 0; i < count; i++)
-        {
-            std::vector< rad::gpu::work_item_gpu > ().swap (g_data->face_items[base + i]);
-        }
+        c->results.resize (c->items.size ());
+        c->pvs_rows.swap (g_data->pvs_rows);
+        totalsamples += c->items.size ();
 
         // Aim the next chunk at the byte budget, so a map of small faces gets
         // big batches and a map of huge ones does not run the machine out of
         // memory.
-        if (chunkbytes > 0)
+        if (c->bytes > 0)
         {
-            const double perface = (double)chunkbytes / count;
+            const double perface = (double)c->bytes / c->count;
             double next = (double)CHUNK_BYTE_BUDGET / perface;
             if (next < CHUNK_FACES_START) next = CHUNK_FACES_START;
             if (next > CHUNK_FACES_MAX) next = CHUNK_FACES_MAX;
             chunkfaces = (int)next;
         }
-        base += count;
+        base += c->count;
+        return c;
+    };
+
+    // The device half, run on its own thread so the CPU can collect the next
+    // chunk meanwhile. All Vulkan calls of a chunk happen on that thread, one
+    // chunk at a time.
+    auto dispatch = [&](gpu_chunk &c) -> bool
+    {
+#ifdef _WIN32
+        // The thread pool keeps every core busy meanwhile; this thread feeds
+        // the device and must not wait behind it.
+        SetThreadPriority (GetCurrentThread (), THREAD_PRIORITY_ABOVE_NORMAL);
+#endif
+        if (c.items.empty ())
+        {
+            return true;
+        }
+        // PVS rows are per chunk, so the session is reopened per chunk with
+        // its rows. The scene upload is the same buffers every time.
+        const uint32_t stride_words = (uint32_t)((g_data->rowbytes + 3) / 4 + 1);
+        std::vector< uint32_t > pvs_words (c.pvs_rows.size () * stride_words, 0);
+        for (size_t r = 0; r < c.pvs_rows.size (); r++)
+        {
+            memcpy (&pvs_words[r * stride_words], &c.pvs_rows[r][0], g_data->rowbytes);
+        }
+        const size_t cap = qmin (c.items.size (), GATHER_CHUNK_ITEMS);
+        if (!rad::gpu::gather_begin (scene, pvs_words, stride_words, (uint32_t)cap))
+        {
+            Warning ("-gpu: %s; using the CPU path", rad::gpu::last_error ().c_str ());
+            return false;
+        }
+        const bool good = DispatchChunk (c, chunk_hint, c.nearpairs,
+                                         dispatches, spent, slowest, chunk_ceiling);
+        rad::gpu::gather_end ();
+        return good;
+    };
+
+    auto abandon = [&](gpu_chunk &c)
+    {
+        for (int i = 0; i < c.count; i++)
+        {
+            if (c.live[i])
+            {
+                RadGpuFaceAbandon (&c.state[(size_t)i * statesize]);
+            }
+        }
+    };
+
+    // The device works on one chunk while the CPU collects the next and then
+    // finishes the previous, so neither side waits on the other for long.
+    std::unique_ptr< gpu_chunk > cur;
+    std::thread worker;
+    bool device_ok = false;
+    if (base < g_numfaces)
+    {
+        cur = collect ();
+        gpu_chunk *c = cur.get ();
+        worker = std::thread ([&device_ok, &dispatch, c]() { device_ok = dispatch (*c); });
     }
+    while (cur)
+    {
+        std::unique_ptr< gpu_chunk > next;
+        if (base < g_numfaces)
+        {
+            next = collect ();
+        }
+        worker.join ();
+
+        if (!device_ok)
+        {
+            // Nothing has been written to the map yet for this chunk, and the
+            // chunks before it were finished properly - but their lightmaps
+            // would be half a compile. Give up on the whole GPU path and let
+            // RAD redo BuildFacelights from scratch on the CPU.
+            abandon (*cur);
+            if (next)
+            {
+                abandon (*next);
+            }
+            ok = false;
+            break;
+        }
+        if (next)
+        {
+            gpu_chunk *c = next.get ();
+            worker = std::thread ([&device_ok, &dispatch, c]() { device_ok = dispatch (*c); });
+        }
+
+        // The near pairs the device handed back, on the thread pool while the
+        // device is busy with the next chunk.
+        double t2 = I_FloatTime ();
+        ResolveNearPairs (*cur);
+        t_near += I_FloatTime () - t2;
+
+        // Second half: the blur, the patch accumulation and the lightmap
+        // write, each face reading the results the device just produced.
+        g_active_chunk = cur.get ();
+        g_apply_chunk = cur.get ();
+        g_gpu_phase = 0;
+        double t1 = I_FloatTime ();
+        RunThreadsOnIndividual (cur->count, false, ChunkFinish);
+        t_finish += I_FloatTime () - t1;
+        g_gpu_phase = 1;
+        g_apply_chunk = NULL;
+
+        // Done with this chunk's items; the memory is worth reclaiming on a
+        // large map, and the results are already in the lightmaps.
+        for (int i = 0; i < cur->count; i++)
+        {
+            std::vector< rad::gpu::work_item_gpu > ().swap (g_data->face_items[cur->base + i]);
+        }
+        cur = std::move (next);
+    }
+    g_active_chunk = NULL;
 
     if (!ok)
     {
@@ -847,7 +945,7 @@ bool GpuBuildFacelights ()
 
     Log ("  %d samples, %d dispatches, %.2fs on the device (slowest %.3fs)\n",
          (int)totalsamples, (int)dispatches, spent, slowest);
-    Log ("  collect %.2fs, finish %.2fs\n", t_collect, t_finish);
+    Log ("  collect %.2fs, near pairs %.2fs, finish %.2fs\n", t_collect, t_near, t_finish);
     GpuGatherFinish ();
     return true;
 }
