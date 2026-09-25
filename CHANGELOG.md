@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- RAD: ray-traced ambient occlusion ported from seedee/SDHLT (`-ao`,
+  `-aoscale`, `-aogain`, `-aolevel`, `-aominweight`, `-aoopacity`,
+  `-aocolor`), including upstream's texlight exemption and color fixes. Not
+  ported: `-aostats` and `-aostudiomode`, which need the newer studio trace
+  controls this RAD does not have. With AO the direct-light gather runs on the
+  CPU even under `-gpu`; transfers still use the GPU.
+- RAD: `-aoall`, a ReSDHLT extension. Upstream AO only darkens light gathered
+  per sample, so maps lit by texlights (fast texlights and bounces are added at
+  patch level) got no visible AO. `-aoall` records the occlusion of each point,
+  blends it with the same weights as the light and darkens the final light of
+  every sample. On ze_elysium: 27% of faces darker, +4% RAD time.
+- CSG: `-convexgap #` sets how far the editor solid and the plane solid must
+  differ before a non-planar brush is rebuilt.
+
+### Changed
+- CSG: non-planar brushes are only rebuilt when the mismatch is at least 0.2
+  units (was `ON_EPSILON`). Rebuilding the 1081 candidates of ze_elysium, most
+  off by a few hundredths, added 17% to the faces a leaf sees; 48 rebuilds cost
+  2% and still close the zpa_house seams.
+
+Without `-ao` or `-aoall`, RAD writes the same file as 0.10.3. Maps with no
+non-planar brushes (ar_pokemon, zm_azteca, zm_eichen_v2) compile byte-identical
+end to end.
+
 ## [0.10.3] - 2026-09-24
 
 ### Fixed

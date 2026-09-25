@@ -193,6 +193,8 @@ large texture library, and CSG aborted rather than ignoring the excess.
 | CSG | `-texchart` | Report what each texture costs the BSP |
 | CSG | `-mergeentities` | Fold equivalent static brush entities into one |
 | CSG | `-nodeterministic` | Restore the old thread ordered, irreproducible output |
+| CSG | `-noconvexfix` | Keep non-planar brushes as the three points of each face say |
+| CSG | `-convexgap N` | Smallest editor/plane mismatch that rebuilds a brush, default 0.2 |
 | BSP | `-lmoptimize` | Reorder faces to waste fewer lightmap atlas pages |
 | BSP | `-allleaks` | Mark every hole, not just the first one found |
 | RAD | `-skylevel N` | Sky sampling fineness, 4 to 8, default 6 |
@@ -207,6 +209,26 @@ large texture library, and CSG aborted rather than ignoring the excess.
 | RAD | `-profile` | Report where RAD spends its time, no external profiler needed |
 | RAD | `-raybench` | Benchmark real sky rays through RAD's BSP tracer |
 | RAD | `-workbench` | Measure per-face work balance and scheduling overhead |
+| RAD | `-ao` | Ray-traced ambient occlusion, ported from seedee/SDHLT |
+| RAD | `-aoall` | Ambient occlusion on all light, texlights and bounces included |
+| RAD | `-aoscale N` | AO ray length in units, 1 to 1024, default 32 |
+| RAD | `-aogain N` | AO falloff exponent, 0.125 to 8, default 1 |
+| RAD | `-aolevel N` | AO rays per sample: 1 = 6, 2 = 18, 3 = 66, 4 = 258, default 3 |
+| RAD | `-aominweight N` | Skip AO rays under this share of the mean weight, 0 to 0.1 |
+| RAD | `-aoopacity N` | AO strength, 0 to 1, default 1 |
+| RAD | `-aocolor r g b` | AO tint, 0 to 255 per channel, default black |
+
+### Ambient occlusion
+
+`-ao` is seedee's ray-traced AO: every lightmap sample casts rays over its
+hemisphere and darkens by the share that hits world or opaque entities within
+`-aoscale` units. As upstream, it only darkens light gathered per sample (point
+lights, spotlights, `light_environment`) and leaves texlight light alone, so a
+map lit by texlights barely changes. `-aoall` applies the same occlusion to the
+final light of each sample, texlights and bounces included, which is what a map
+lit by texlights needs; it reuses the same rays and cost about 4% of RAD time on
+ze_elysium. Both run the direct-light gather on the CPU even with `-gpu`, which
+still handles transfers.
 
 ## Building from source
 

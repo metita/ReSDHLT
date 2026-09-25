@@ -445,6 +445,39 @@ extern opaqueList_t* g_opaque_face_list;
 extern unsigned      g_opaque_face_count; // opaque entity count //HLRAD_OPAQUE_NODE
 extern unsigned      g_max_opaque_face_count;    // Current array maximum (used for reallocs)
 
+// Ray-traced ambient occlusion, ported from seedee/SDHLT (-ao)
+#define DEFAULT_AO_ENABLE       false
+#define MIN_AO_SCALE            1.0
+#define DEFAULT_AO_SCALE        32.0      // trace distance
+#define MAX_AO_SCALE            1024.0
+#define MIN_AO_GAIN             0.125
+#define DEFAULT_AO_GAIN         1.0       // exponent reshaping the falloff (1.0 = linear)
+#define MAX_AO_GAIN             8.0
+#define MIN_AO_OPACITY          0.0
+#define DEFAULT_AO_OPACITY      1.0
+#define MAX_AO_OPACITY          1.0
+#define DEFAULT_AO_COLOR_RED    0.0
+#define DEFAULT_AO_COLOR_GREEN  0.0
+#define DEFAULT_AO_COLOR_BLUE   0.0
+#define MIN_AO_LEVEL            1         // geodesic sky tables: 1 = 6 rays, 2 = 18, 3 = 66, 4 = 258, 5 = 1026 ...
+#define DEFAULT_AO_LEVEL        3
+#define MAX_AO_LEVEL            SKYLEVELMAX
+#define MIN_AO_MINWEIGHT        0.0
+#define DEFAULT_AO_MINWEIGHT    0.045     // skip rays under this fraction of the mean ray weight
+#define MAX_AO_MINWEIGHT        0.1
+#define AO_SATURATION_EPSILON   0.001     // stop tracing once occlusion cannot drop below 99.9%
+
+extern bool   g_ao_enable;
+extern vec_t  g_ao_scale;
+extern vec_t  g_ao_opacity;
+extern vec_t  g_ao_gain;
+extern vec3_t g_ao_color;
+extern vec3_t g_ao_color_linear;
+extern int    g_ao_level;
+extern vec_t  g_ao_minweight;
+extern bool*  g_face_occludes_ao;     // faces whose texlights AO leaves alone
+extern bool   g_ao_all;               // -aoall: AO darkens the final light of every sample
+
 
 // ------------------------------------------------------------------------
 // Changes by Adam Foster - afoster@compsoc.man.ac.uk

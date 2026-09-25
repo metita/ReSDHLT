@@ -146,6 +146,18 @@ vec_t           g_texchop = DEFAULT_TEXCHOP;
 opaqueList_t*   g_opaque_face_list = NULL;
 unsigned        g_opaque_face_count = 0;
 unsigned        g_max_opaque_face_count = 0;               // Current array maximum (used for reallocs)
+bool*           g_face_occludes_ao = NULL;
+
+// Ambient occlusion
+bool            g_ao_enable = DEFAULT_AO_ENABLE;
+vec_t           g_ao_scale = DEFAULT_AO_SCALE;
+vec_t           g_ao_opacity = DEFAULT_AO_OPACITY;
+vec_t           g_ao_gain = DEFAULT_AO_GAIN;
+vec3_t          g_ao_color = { DEFAULT_AO_COLOR_RED, DEFAULT_AO_COLOR_GREEN, DEFAULT_AO_COLOR_BLUE };
+vec3_t          g_ao_color_linear = { DEFAULT_AO_COLOR_RED, DEFAULT_AO_COLOR_GREEN, DEFAULT_AO_COLOR_BLUE };
+int             g_ao_level = DEFAULT_AO_LEVEL;
+vec_t           g_ao_minweight = DEFAULT_AO_MINWEIGHT;
+bool            g_ao_all = false;
 vec_t			g_corings[ALLSTYLES];
 vec3_t*			g_translucenttextures = NULL;
 vec_t			g_translucentdepth = DEFAULT_TRANSLUCENTDEPTH;
@@ -1822,6 +1834,27 @@ static void		LoadOpaqueEntities()
 		}
 		Log("%i opaque faces\n", facecount);
 	}
+	{
+		// AO skips the light of texlights on these faces, since they are what occludes
+		g_face_occludes_ao = (bool *)calloc (g_numfaces, sizeof (bool));
+		hlassume (g_face_occludes_ao != NULL, assume_NoMemory);
+		for (int i = 0; i < g_dmodels[0].numfaces; i++)
+		{
+			g_face_occludes_ao[g_dmodels[0].firstface + i] = true;
+		}
+		for (unsigned i = 0; i < g_opaque_face_count; i++)
+		{
+			if (g_opaque_face_list[i].transparency || g_opaque_face_list[i].style != -1)
+			{
+				continue;
+			}
+			const dmodel_t *m = &g_dmodels[g_opaque_face_list[i].modelnum];
+			for (int j = 0; j < m->numfaces; j++)
+			{
+				g_face_occludes_ao[m->firstface + j] = true;
+			}
+		}
+	}
 }
 
 // =====================================================================================
@@ -3010,6 +3043,52 @@ static void     RadWorld()
 // =====================================================================================
 //  Usage
 // =====================================================================================
+// =====================================================================================
+//  FinalizeAOColor
+//      FinalLightFace scales and gamma corrects the samples CalcLightmap blends the AO
+//      color into; pre-invert that so -aocolor is the color that ends up in the map.
+// =====================================================================================
+static void     FinalizeAOColor()
+{
+	for (int x = 0; x < 3; x++)
+	{
+		vec_t gamma = g_colour_qgamma[x];
+		vec_t scale = g_colour_lightscale[x] * g_direct_scale; // direct light is scaled by dscale before the gamma
+		if (gamma > 0.0 && scale > 0.0)
+		{
+			g_ao_color_linear[x] = (vec_t)(256.0 * pow (qmin (g_ao_color[x], 255.0f) / 256.0, 1.0 / gamma) / scale);
+		}
+		else
+		{
+			g_ao_color_linear[x] = g_ao_color[x];
+		}
+	}
+	if (g_limitthreshold >= 0.0 && g_limitthreshold < 255.0)
+	{
+		for (int x = 0; x < 3; x++)
+		{
+			if (g_ao_color[x] > g_limitthreshold)
+			{
+				Warning ("ao color %g %g %g exceeds light limit threshold %g and will be capped.",
+					(double)g_ao_color[0], (double)g_ao_color[1], (double)g_ao_color[2], (double)g_limitthreshold);
+				break;
+			}
+		}
+	}
+	if (g_minlight > 0)
+	{
+		for (int x = 0; x < 3; x++)
+		{
+			if (g_ao_color[x] > 0.0 && g_ao_color[x] < g_minlight)
+			{
+				Warning ("ao color %g %g %g is below minimum final light %d and will be raised.",
+					(double)g_ao_color[0], (double)g_ao_color[1], (double)g_ao_color[2], (int)g_minlight);
+				break;
+			}
+		}
+	}
+}
+
 static void     Usage()
 {
     Banner();
@@ -3029,6 +3108,14 @@ static void     Usage()
 	Log("    -nospread       : Disable sunlight spread angles for this compile\n");
     Log("    -nopaque        : Disable the opaque zhlt_lightflags for this compile\n\n");
 	Log("    -nostudioshadow : Disable opaque studiomodels, ignore zhlt_studioshadow for this compile\n\n");
+	Log("    -ao             : Enable ray-traced ambient occlusion\n");
+	Log("    -aoscale #      : AO trace distance in units (%.0f to %.0f, default %.0f)\n", (double)MIN_AO_SCALE, (double)MAX_AO_SCALE, (double)DEFAULT_AO_SCALE);
+	Log("    -aogain #       : AO falloff exponent (%.3f to %.0f, default 1)\n", (double)MIN_AO_GAIN, (double)MAX_AO_GAIN);
+	Log("    -aolevel #      : AO rays per sample: 1 = 6, 2 = 18, 3 = 66, 4 = 258, 5 = 1026 (default %d)\n", DEFAULT_AO_LEVEL);
+	Log("    -aominweight #  : Skip AO rays below this fraction of the mean weight (0 to 0.1)\n");
+	Log("    -aoopacity #    : AO strength (0 to 1)\n");
+	Log("    -aocolor r g b  : AO tint color (0 to 255, r g b)\n");
+	Log("    -aoall          : AO darkens all light, texlights and bounces included (implies -ao)\n\n");
 	Log("    -noallocblockcheck: Compile even when the map overflows the engine's lightmap atlas\n");
 	Log("    -gpu            : Force compatible gather and transfer work onto Vulkan\n");
 	Log("    -gpuauto        : Use Vulkan only when the phase workload is large enough\n");
@@ -3124,6 +3211,22 @@ static void     Usage()
 // =====================================================================================
 //  Settings
 // =====================================================================================
+// clamps once: qmin/qmax are macros and would read the option twice
+static double AOClamp(const double value, const double lo, const double hi)
+{
+	return value < lo? lo: (value > hi? hi: value);
+}
+
+// value after an AO option, or the usage text if there is none
+static const char* AOArg(int& i, const int argc, char** argv)
+{
+	if (i + 1 >= argc)
+	{
+		Usage ();
+	}
+	return argv[++i];
+}
+
 static void     Settings()
 {
     char*           tmp;
@@ -3174,6 +3277,18 @@ static void     Settings()
     Log("\n");
 
 	Log("fast rad             [ %17s ] [ %17s ]\n", g_fastmode? "on": "off", DEFAULT_FASTMODE? "on": "off");
+	Log("ambient occlusion    [ %17s ] [ %17s ]\n", g_ao_enable? "on": "off", DEFAULT_AO_ENABLE? "on": "off");
+	if (g_ao_enable)
+	{
+		Log("ao scale             [ %17.3f ] [ %17.3f ]\n", (double)g_ao_scale, (double)DEFAULT_AO_SCALE);
+		Log("ao gain              [ %17.3f ] [ %17.3f ]\n", (double)g_ao_gain, (double)DEFAULT_AO_GAIN);
+		Log("ao level             [ %17d ] [ %17d ]\n", g_ao_level, DEFAULT_AO_LEVEL);
+		Log("ao min weight        [ %17.3f ] [ %17.3f ]\n", (double)g_ao_minweight, (double)DEFAULT_AO_MINWEIGHT);
+		Log("ao opacity           [ %17.3f ] [ %17.3f ]\n", (double)g_ao_opacity, (double)DEFAULT_AO_OPACITY);
+		Log("ao on all light      [ %17s ] [ %17s ]\n", g_ao_all? "on": "off", "off");
+		Log("ao color             [ %5.1f %5.1f %5.1f ] [ %5.1f %5.1f %5.1f ]\n", (double)g_ao_color[0], (double)g_ao_color[1], (double)g_ao_color[2],
+			(double)DEFAULT_AO_COLOR_RED, (double)DEFAULT_AO_COLOR_GREEN, (double)DEFAULT_AO_COLOR_BLUE);
+	}
 	if (g_gpu)
 	{
 		Log("gpu policy           [ %17s ] [ %17s ]\n", g_gpu_auto? "automatic": "forced", "off");
@@ -4144,6 +4259,47 @@ int             main(const int argc, char** argv)
 		{
 			g_studioshadow = false;
 		}
+		else if (!strcasecmp(argv[i], "-ao"))
+		{
+			g_ao_enable = true;
+		}
+		else if (!strcasecmp(argv[i], "-aoall"))
+		{
+			g_ao_enable = true;
+			g_ao_all = true;
+		}
+		else if (!strcasecmp(argv[i], "-aoscale"))
+		{
+			g_ao_scale = (vec_t)AOClamp (atof (AOArg (i, argc, argv)), MIN_AO_SCALE, MAX_AO_SCALE);
+		}
+		else if (!strcasecmp(argv[i], "-aogain") || !strcasecmp(argv[i], "-aofalloff"))
+		{
+			g_ao_gain = (vec_t)AOClamp (atof (AOArg (i, argc, argv)), MIN_AO_GAIN, MAX_AO_GAIN);
+		}
+		else if (!strcasecmp(argv[i], "-aolevel") || !strcasecmp(argv[i], "-aosampling") || !strcasecmp(argv[i], "-aodensity"))
+		{
+			g_ao_level = (int)AOClamp (atoi (AOArg (i, argc, argv)), MIN_AO_LEVEL, MAX_AO_LEVEL);
+		}
+		else if (!strcasecmp(argv[i], "-aominweight"))
+		{
+			g_ao_minweight = (vec_t)AOClamp (atof (AOArg (i, argc, argv)), MIN_AO_MINWEIGHT, MAX_AO_MINWEIGHT);
+		}
+		else if (!strcasecmp(argv[i], "-aoopacity") || !strcasecmp(argv[i], "-aopacity"))
+		{
+			g_ao_opacity = (vec_t)AOClamp (atof (AOArg (i, argc, argv)), MIN_AO_OPACITY, MAX_AO_OPACITY);
+		}
+		else if (!strcasecmp(argv[i], "-aocolor"))
+		{
+			if (i + 3 >= argc)
+			{
+				Error ("expected three color values after '-aocolor'\n");
+			}
+			for (int x = 0; x < 3; x++)
+			{
+				const float value = (float)atof (argv[++i]);
+				g_ao_color[x] = value < 0.0f? 0.0f: value;
+			}
+		}
 		else if (!strcasecmp(argv[i], "-drawpatch"))
 		{
 			g_drawpatch = true;
@@ -4376,6 +4532,13 @@ int             main(const int argc, char** argv)
         && !gpu_gather_disabled;
     g_gpu_transfers = (gpu_all_requested || gpu_transfers_requested)
         && !gpu_transfers_disabled;
+    if (g_ao_enable && g_gpu_gather)
+    {
+        // AO rays are traced on the CPU sample by sample, and its texlight exemption
+        // needs the gather to keep texlight light apart, which the kernel does not
+        Log("-ao: the direct-light gather runs on the CPU; -gpu still covers transfers\n");
+        g_gpu_gather = false;
+    }
     g_gpu = g_gpu_gather || g_gpu_transfers;
     g_gpu_auto = g_gpu && gpu_auto_requested && !gpu_force_requested;
     if (g_cli_overrides.pre25 && !g_cli_overrides.limiter)
@@ -4494,6 +4657,10 @@ int             main(const int argc, char** argv)
 	if (g_blur < 1.0)
 	{
 		g_blur = 1.0;
+	}
+	if (g_ao_enable)
+	{
+		FinalizeAOColor ();
 	}
     RadWorld();
 	FreeStudioModels(); //seedee

@@ -549,6 +549,7 @@ typedef struct
 	vec3_t			(*lmcache)[ALLSTYLES]; // lm: short for lightmap // don't forget to free!
 	vec3_t			*lmcache_normal; // record the phong normals
 	int				*lmcache_wallflags; // wallflag_t
+	vec_t			*lmcache_ao; // -aoall: AO blend factor of each point, NULL otherwise
 	int				lmcachewidth;
 	int				lmcacheheight;
 }
@@ -690,6 +691,12 @@ static void     CalcFaceExtents(lightinfo_t* l)
 		hlassume (l->lmcache_normal != NULL, assume_NoMemory);
 		l->lmcache_wallflags = (int *)malloc (l->lmcachewidth * l->lmcacheheight * sizeof (int));
 		hlassume (l->lmcache_wallflags != NULL, assume_NoMemory);
+		l->lmcache_ao = NULL;
+		if (g_ao_enable && g_ao_all)
+		{
+			l->lmcache_ao = (vec_t *)calloc (l->lmcachewidth * l->lmcacheheight, sizeof (vec_t));
+			hlassume (l->lmcache_ao != NULL, assume_NoMemory);
+		}
 		l->surfpt_position = (vec3_t *)malloc (MAX_SINGLEMAP * sizeof (vec3_t));
 		l->surfpt_surface = (int *)malloc (MAX_SINGLEMAP * sizeof (int));
 		hlassume (l->surfpt_position != NULL && l->surfpt_surface != NULL, assume_NoMemory);
@@ -1600,6 +1607,7 @@ typedef struct
 {
     int             numsamples;
     sample_t*       samples[MAXLIGHTMAPS];
+    vec_t*          ao; // -aoall: AO blend factor per sample, NULL otherwise
 }
 facelight_t;
 
@@ -1629,6 +1637,8 @@ void            RadGpuResetFace(int facenum)
 		}
 	}
 	fl->numsamples = 0;
+	free (fl->ao);
+	fl->ao = NULL;
 	for (patch_t *patch = g_face_patches[facenum]; patch; patch = patch->next)
 	{
 		free (patch->totalstyle_all);
@@ -2593,6 +2603,7 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 								  , int step
 								  , int miptex
 								  , int texlightgap_surfacenum
+								  , vec3_t* emitteroccl = NULL // -ao: texlight light AO must not darken, per style slot
 								  )
 {
     PROF_SCOPE(PROF_GATHERSAMPLELIGHT);
@@ -2618,6 +2629,7 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 	bool			sky_used = false;
 	vec3_t			testline_origin;
 	vec3_t			adds[ALLSTYLES];
+	vec3_t			emitteradds[ALLSTYLES];
 	int				style;
 	// Which entries of adds[] a sample actually receives light in. One or two,
 	// in practice: clearing all 64 and then scanning all 64 meant 768 bytes of
@@ -2635,6 +2647,7 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 			istouched[st] = true;
 			touched[numtouched++] = st;
 			VectorClear (adds[st]);
+			VectorClear (emitteradds[st]);
 		}
 	};
 	bool			lighting_diversify;
@@ -3061,6 +3074,10 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 						}
 						touch_style (style);
 						VectorAdd (adds[style], add, adds[style]);
+						if (emitteroccl && l->type == emit_surface && l->patch && g_face_occludes_ao[l->patch->faceNumber])
+						{
+							VectorAdd (emitteradds[style], add, emitteradds[style]);
+						}
                     } // end emit_skylight
 
                 }
@@ -3113,6 +3130,10 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 			}
 
 			VectorAdd(sample[style_index], adds[style], sample[style_index]);
+			if (emitteroccl)
+			{
+				VectorAdd (emitteroccl[style_index], emitteradds[style], emitteroccl[style_index]);
+			}
 		}
 		else
 		{
@@ -3426,6 +3447,113 @@ enum
 	LM_APPLY,
 };
 
+// =====================================================================================
+//  AmbientOcclusionAlpha
+//      Ray-traced ambient occlusion, ported from seedee/SDHLT. Rays leave the sample
+//      over the hemisphere of its normal, g_ao_scale units long, cosine weighted; the
+//      weighted share that hits world or opaque entities, shaped by -aogain and scaled
+//      by -aoopacity, is how far the sample is blended towards the AO color.
+// =====================================================================================
+static vec_t AmbientOcclusionAlpha (const vec3_t spot, const vec3_t pointnormal)
+{
+	const vec3_t *aonormals = g_skynormals[g_ao_level];
+	const vec_t *aoweights = g_skynormalsizes[g_ao_level]; // solid angle each direction covers
+	const int aonum = g_numskynormals[g_ao_level];
+	vec_t occluded = 0;
+	vec_t totalweight = 0;
+	int numaccepted = 0;
+
+	// cosine weights first, so the low-weight skip and the saturation early-out
+	// know the real denominator
+	for (int k = 0; k < aonum; k++)
+	{
+		vec_t d = DotProduct (pointnormal, aonormals[k]);
+		if (d <= NORMAL_EPSILON)
+		{
+			continue;
+		}
+		totalweight += d * aoweights[k];
+		numaccepted++;
+	}
+	if (totalweight <= 0.0)
+	{
+		return 0.0;
+	}
+	const vec_t saturlimit = totalweight * (1.0 - AO_SATURATION_EPSILON);
+	const vec_t minweight = g_ao_minweight * totalweight / qmax (numaccepted, 1); // relative to the mean ray weight
+	for (int k = 0; k < aonum; k++)
+	{
+		vec_t d = DotProduct (pointnormal, aonormals[k]);
+		if (d <= NORMAL_EPSILON)
+		{
+			continue;
+		}
+		vec_t w = d * aoweights[k];
+		if (w < minweight)
+		{
+			continue;
+		}
+		vec3_t dest;
+		VectorMA (spot, g_ao_scale, aonormals[k], dest);
+		bool hit = TestLine (spot, dest) == CONTENTS_SOLID;
+		if (!hit)
+		{
+			vec3_t transparency;
+			int opaquestyle;
+			hit = TestSegmentAgainstOpaqueList (spot, dest, transparency, opaquestyle);
+		}
+		if (hit)
+		{
+			occluded += w;
+			if (occluded >= saturlimit)
+			{
+				occluded = totalweight;
+				break;
+			}
+		}
+	}
+	vec_t occlusion = occluded / totalweight;
+	if (g_ao_gain != 1.0)
+	{
+		occlusion = pow (occlusion, g_ao_gain);
+	}
+	return occlusion * g_ao_opacity;
+}
+
+// -ao as upstream: darken the direct light gathered for this sample, except what came
+// from texlights on occluding faces (emitterlight)
+static void ApplyAmbientOcclusion (const vec3_t spot, const vec3_t pointnormal, vec3_t *sampled,
+	const vec3_t *emitterlight, const byte *styles)
+{
+	const vec_t alpha = AmbientOcclusionAlpha (spot, pointnormal);
+	if (alpha <= 0.0)
+	{
+		return;
+	}
+	for (int j = 0; j < ALLSTYLES && styles[j] != 255; j++)
+	{
+		// only the part of the sample that is not texlight light takes the AO color
+		vec_t aocolorshare = 1.0;
+		{
+			vec_t s_max = VectorMaximum (sampled[j]);
+			vec_t e_max = qmin (VectorMaximum (emitterlight[j]), s_max);
+			if (s_max > 0.0)
+			{
+				aocolorshare = 1.0 - e_max / s_max;
+			}
+		}
+		for (int x = 0; x < 3; x++)
+		{
+			vec_t e = qmin (emitterlight[j][x], sampled[j][x]);
+			sampled[j][x] = (sampled[j][x] - e) * (1.0 - alpha) + e + g_ao_color_linear[x] * alpha * aocolorshare;
+			if (sampled[j][x] < 0.0)
+			{
+				sampled[j][x] = 0.0;
+			}
+		}
+	}
+}
+
 void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflags)
 {
 	int facenum;
@@ -3647,6 +3775,17 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 		}
 		// gather light
 		{
+			// -ao forces the CPU gather, so pass is LM_NORMAL whenever this is used.
+			// With -aoall the occlusion is only recorded here and FinalLightFace applies
+			// it to the whole light of the sample; otherwise it darkens the direct light
+			// right away, as upstream does.
+			const bool ao = g_ao_enable && pass == LM_NORMAL;
+			const bool aoexempt = ao && !g_ao_all;
+			vec3_t emitterlight[ALLSTYLES];
+			if (ao)
+			{
+				memset (emitterlight, 0, sizeof (emitterlight));
+			}
 			if (!blocked)
 			{
 				if (pass == LM_APPLY)
@@ -3660,13 +3799,19 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 					, 0
 					, l->miptex
 					, surface
+					, aoexempt? emitterlight: NULL
 					);
 				}
 			}
 			if (l->translucent_b)
 			{
 				vec3_t sampled2[ALLSTYLES];
+				vec3_t emitterlight2[ALLSTYLES];
 				memset (sampled2, 0, ALLSTYLES * sizeof (vec3_t));
+				if (ao)
+				{
+					memset (emitterlight2, 0, sizeof (emitterlight2));
+				}
 				if (!blocked)
 				{
 					if (pass == LM_APPLY)
@@ -3680,6 +3825,7 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 						, 0
 						, l->miptex
 						, surface
+						, aoexempt? emitterlight2: NULL
 						);
 					}
 				}
@@ -3688,8 +3834,20 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 					for (int x = 0; x < 3; x++)
 					{
 						sampled[j][x] = (1.0 - l->translucent_v[x]) * sampled[j][x] + l->translucent_v[x] * sampled2[j][x];
+						if (ao)
+						{
+							emitterlight[j][x] = (1.0 - l->translucent_v[x]) * emitterlight[j][x] + l->translucent_v[x] * emitterlight2[j][x];
+						}
 					}
 				}
+			}
+			if (ao && g_ao_all)
+			{
+				l->lmcache_ao[i] = blocked? 0: AmbientOcclusionAlpha (spot, pointnormal);
+			}
+			else if (ao && !blocked)
+			{
+				ApplyAmbientOcclusion (spot, pointnormal, sampled, emitterlight, styles);
 			}
 			if (g_drawnudge)
 			{
@@ -3849,6 +4007,13 @@ static void     BuildFacelights_End(const int facenum, facebuild_t *fb, int pass
 		fl_samples[k] = (sample_t *)calloc (l.numsurfpt, sizeof(sample_t));
 		hlassume (fl_samples[k] != NULL, assume_NoMemory);
 	}
+	vec_t *fl_ao = NULL; // -aoall: blended the same way as the light
+	if (l.lmcache_ao)
+	{
+		free (facelight[facenum].ao);
+		fl_ao = facelight[facenum].ao = (vec_t *)calloc (l.numsurfpt, sizeof (vec_t));
+		hlassume (fl_ao != NULL, assume_NoMemory);
+	}
 	for (patch = g_face_patches[facenum]; patch; patch = patch->next)
 	{
 		hlassume (patch->totalstyle_all = (unsigned char *)malloc (ALLSTYLES * sizeof (unsigned char)), assume_NoMemory);
@@ -3979,6 +4144,10 @@ static void     BuildFacelights_End(const int facenum, facebuild_t *fb, int pass
 				{
 					VectorMA (fl_samples[j][i].light, weighting, l.lmcache[pos][j], fl_samples[j][i].light);
 				}
+				if (fl_ao)
+				{
+					fl_ao[i] += weighting * l.lmcache_ao[pos];
+				}
 				subsamples += weighting;
 			}
 		}
@@ -3993,6 +4162,10 @@ static void     BuildFacelights_End(const int facenum, facebuild_t *fb, int pass
 			{
 				VectorClear (fl_samples[j][i].light);
 			}
+			if (fl_ao)
+			{
+				fl_ao[i] = 0;
+			}
 		}
 	  }
 		if (subsamples > 0)
@@ -4000,6 +4173,10 @@ static void     BuildFacelights_End(const int facenum, facebuild_t *fb, int pass
 			for (j = 0; j < ALLSTYLES && f_styles[j] != 255; j++)
 			{
 				VectorScale (fl_samples[j][i].light, 1.0 / subsamples, fl_samples[j][i].light);
+			}
+			if (fl_ao)
+			{
+				fl_ao[i] /= subsamples;
 			}
 		}
     } // end of i loop
@@ -4395,6 +4572,7 @@ static void     BuildFacelights_End(const int facenum, facebuild_t *fb, int pass
 	free (l.lmcache);
 	free (l.lmcache_normal);
 	free (l.lmcache_wallflags);
+	free (l.lmcache_ao);
 	free (l.surfpt_position);
 	free (l.surfpt_surface);
 }
@@ -5243,6 +5421,31 @@ void            FinalLightFace(const int facenum)
     {
         return;
     }
+
+	// -aoall: the samples now hold every light, texlights and bounces included, so
+	// the occlusion CalcLightmap recorded darkens all of it. The AO color only tints
+	// style 0: a toggled light that is off must not glow in it.
+	if (fl->ao)
+	{
+		for (j = 0; j < fl->numsamples; j++)
+		{
+			const vec_t alpha = fl->ao[j];
+			if (alpha <= 0.0)
+			{
+				continue;
+			}
+			for (k = 0; k < lightstyles; k++)
+			{
+				vec_t *light = fl->samples[k][j].light;
+				for (int x = 0; x < 3; x++)
+				{
+					light[x] = light[x] * (1.0 - alpha) + (f->styles[k] == 0? g_ao_color_linear[x] * alpha: 0.0);
+				}
+			}
+		}
+		free (fl->ao);
+		fl->ao = NULL;
+	}
 
     //
     // set up the triangulation
