@@ -1029,7 +1029,7 @@ int             main(int argc, char** argv)
         {
             safe_strncpy(g_Mapname, argv[i], _MAX_PATH);
 			FlipSlashes(g_Mapname);
-            StripExtension(g_Mapname);
+            StripMapExtension(g_Mapname);
         }
     }
 

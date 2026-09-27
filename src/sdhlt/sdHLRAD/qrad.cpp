@@ -4654,7 +4654,7 @@ int             main(const int argc, char** argv)
     FlipSlashes(g_Mapname);
 	ExtractFilePath(g_Mapname, temp);	// skip mapname
 	ExtractFilePath(temp, g_Wadpath);
-    StripExtension(g_Mapname);
+    StripMapExtension(g_Mapname);
     OpenLog(g_clientid);
     atexit(CloseLog);
     ThreadSetDefault();

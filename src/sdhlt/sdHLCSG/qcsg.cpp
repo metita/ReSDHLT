@@ -2364,7 +2364,7 @@ int             main(const int argc_input, char** argv_input)
     // handle mapname
     safe_strncpy(g_Mapname, mapname_from_arg, _MAX_PATH);
     FlipSlashes(g_Mapname);
-    StripExtension(g_Mapname);
+    StripMapExtension(g_Mapname);
 
     // onlyents
     if (!g_onlyents)

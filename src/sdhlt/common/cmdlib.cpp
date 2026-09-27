@@ -191,6 +191,25 @@ void StripExtension(char* path)
 	{ path[extension_pos] = 0; }
 }
 
+// Map names can carry dots of their own (pl_2.1), so only the extensions the
+// tools are handed get stripped. StripExtension would turn pl_2.1 into pl_2.
+void StripMapExtension(char* path)
+{
+	static const char* const known[] = { ".map", ".bsp", ".ent" };
+	int extension_pos, directory_pos;
+	getFilePositions(path,&extension_pos,&directory_pos);
+	if(extension_pos == -1)
+	{ return; }
+	for(const char* ext : known)
+	{
+		if(!strcasecmp(path + extension_pos, ext))
+		{
+			path[extension_pos] = 0;
+			return;
+		}
+	}
+}
+
 void ExtractFilePath(const char* const path, char* dest)
 {
 	int extension_pos, directory_pos;
