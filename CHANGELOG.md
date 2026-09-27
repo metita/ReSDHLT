@@ -4,9 +4,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.17.1] - 2026-09-26
 
 ### Fixed
+- CSG, BSP, VIS, RAD and RIPENT: a map name with a dot of its own lost
+  everything after it. `sdHLBSP pl_2.1` worked on `pl_2` and failed with the
+  error in `pl_2.log`. Only `.map`, `.bsp` and `.ent` are stripped from the
+  name now, in any case, so `pl_2.1`, `pl_2.1.map` and `pl_2.1.bsp` all mean
+  `pl_2.1`.
 - GUI: maps with a dot in the name (`pl_2.1.map`) failed at BSP with nothing
   in their log. The GUI handed BSP, VIS and RAD the bare name `pl_2.1`, the
   tools took `.1` for an extension and went looking for `pl_2.bsp`, writing
