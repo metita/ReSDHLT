@@ -300,8 +300,8 @@ pub fn validation_errors(opts: &Options) -> Vec<String> {
                 .unwrap_or_default(),
         )
     });
-    let bsp_available = sibling(&base, "bsp").is_file()
-        || finished_bsp.as_ref().is_some_and(|path| path.is_file());
+    let bsp_available =
+        sibling(&base, "bsp").is_file() || finished_bsp.as_ref().is_some_and(|path| path.is_file());
 
     if opts.run_bsp && !opts.run_csg {
         let mut missing = Vec::new();
