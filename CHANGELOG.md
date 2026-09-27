@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- GUI: maps with a dot in the name (`pl_2.1.map`) failed at BSP with nothing
+  in their log. The GUI handed BSP, VIS and RAD the bare name `pl_2.1`, the
+  tools took `.1` for an extension and went looking for `pl_2.bsp`, writing
+  the error to `pl_2.log`. They now get `pl_2.1.bsp`, and the GUI's own
+  checks for `.bsp`, `.p0`-`.p3`, `.hsz` and `.prt` keep the dot as well.
+
 ## [0.17.0] - 2026-09-25
 
 ### Added

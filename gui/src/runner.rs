@@ -198,6 +198,16 @@ fn stage_enabled(opts: &Options, stage: Stage) -> bool {
     }
 }
 
+/// `base` plus `.ext`. `Path::with_extension` would eat a dot that belongs to
+/// the map name: the base of `pl_2.1.map` is `pl_2.1`, and its bsp must be
+/// `pl_2.1.bsp`, not `pl_2.bsp`.
+fn sibling(base: &Path, ext: &str) -> PathBuf {
+    let mut name = base.as_os_str().to_os_string();
+    name.push(".");
+    name.push(ext);
+    PathBuf::from(name)
+}
+
 fn predicted_map(opts: &Options) -> PathBuf {
     let source = PathBuf::from(opts.map_path.trim());
     opts.work_dir()
@@ -225,10 +235,13 @@ fn commands_for(opts: &Options, map: &Path) -> Vec<PlannedCommand> {
                 stage,
                 exe,
                 args,
+                // The tools strip whatever follows the last dot, so a bare
+                // `pl_2.1` would turn into `pl_2`. Passing `pl_2.1.bsp` gives
+                // them an extension to strip.
                 target: if stage == Stage::Csg {
                     map.to_path_buf()
                 } else {
-                    base.clone()
+                    sibling(&base, "bsp")
                 },
                 work_dir: work_dir.clone(),
             }
@@ -287,7 +300,7 @@ pub fn validation_errors(opts: &Options) -> Vec<String> {
                 .unwrap_or_default(),
         )
     });
-    let bsp_available = base.with_extension("bsp").is_file()
+    let bsp_available = sibling(&base, "bsp").is_file()
         || finished_bsp.as_ref().is_some_and(|path| path.is_file());
 
     if opts.run_bsp && !opts.run_csg {
@@ -298,12 +311,12 @@ pub fn validation_errors(opts: &Options) -> Vec<String> {
         for hull in 0..4 {
             for prefix in ['p', 'b'] {
                 let extension = format!("{prefix}{hull}");
-                if !base.with_extension(&extension).is_file() {
+                if !sibling(&base, &extension).is_file() {
                     missing.push(format!(".{extension}"));
                 }
             }
         }
-        if !base.with_extension("hsz").is_file() {
+        if !sibling(&base, "hsz").is_file() {
             missing.push(".hsz".to_string());
         }
         if !missing.is_empty() {
@@ -318,7 +331,7 @@ pub fn validation_errors(opts: &Options) -> Vec<String> {
         if !bsp_available {
             missing.push(".bsp");
         }
-        if !base.with_extension("prt").is_file() {
+        if !sibling(&base, "prt").is_file() {
             missing.push(".prt");
         }
         if !missing.is_empty() {
@@ -1159,7 +1172,7 @@ pub fn start(plan: CompilePlan) -> Job {
         }
 
         if all_ok {
-            let mut bsp = base.with_extension("bsp");
+            let mut bsp = sibling(&base, "bsp");
 
             // The .bsp is the only thing worth keeping in plain sight, so it
             // moves up out of the scratch folder and everything else stays
@@ -1272,12 +1285,28 @@ mod tests {
             .target
             .extension()
             .is_some_and(|ext| ext == "map"));
-        assert!(plan.commands[1].target.extension().is_none());
+        assert!(plan.commands[1]
+            .target
+            .extension()
+            .is_some_and(|ext| ext == "bsp"));
         let preview = CompilePlan::preview(&options);
         assert!(preview.contains("map with spaces.map\""), "{preview}");
         assert!(preview.contains("\"C:\\My Maps\\custom.rad\""), "{preview}");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dotted_map_names_keep_their_dot() {
+        let map = Path::new(r"C:\maps\pl_2.1.map");
+        let base = map.with_extension("");
+        assert_eq!(sibling(&base, "bsp"), Path::new(r"C:\maps\pl_2.1.bsp"));
+        assert_eq!(sibling(&base, "p0"), Path::new(r"C:\maps\pl_2.1.p0"));
+        let commands = commands_for(&Options::default(), map);
+        assert!(commands
+            .iter()
+            .filter(|command| command.stage != Stage::Csg)
+            .all(|command| command.target == Path::new(r"C:\maps\pl_2.1.bsp")));
     }
 
     #[test]
