@@ -198,6 +198,26 @@ fn stage_enabled(opts: &Options, stage: Stage) -> bool {
     }
 }
 
+/// Exit code of a failed stage, with a hint for the crashes worth naming. A
+/// tool that crashes writes nothing to its log, so this is all there is.
+fn exit_detail(code: Option<i32>) -> String {
+    let Some(code) = code else {
+        return String::new();
+    };
+    let hex = code as u32;
+    let hint = match hex {
+        0xC000_0005 => ": se cerró por un acceso inválido a memoria",
+        0xC000_00FD => ": se quedó sin pila",
+        0xC000_0409 => ": se cerró por un error interno",
+        _ => "",
+    };
+    if hex >= 0xC000_0000 {
+        format!(" (código 0x{hex:08X}{hint})")
+    } else {
+        format!(" (código {code})")
+    }
+}
+
 /// `base` plus `.ext`. `Path::with_extension` would eat a dot that belongs to
 /// the map name: the base of `pl_2.1.map` is `pl_2.1`, and its bsp must be
 /// `pl_2.1.bsp`, not `pl_2.bsp`.
@@ -1164,7 +1184,11 @@ pub fn start(plan: CompilePlan) -> Job {
                 } else {
                     let _ = tx.send(Msg::Line(
                         LineKind::Error,
-                        format!("{} terminó con error. Se detiene aquí.", stage.name()),
+                        format!(
+                            "{} terminó con error{}. Se detiene aquí.",
+                            stage.name(),
+                            exit_detail(status.and_then(|s| s.code()))
+                        ),
                     ));
                 }
                 break;
@@ -1294,6 +1318,16 @@ mod tests {
         assert!(preview.contains("\"C:\\My Maps\\custom.rad\""), "{preview}");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn exit_detail_names_crashes_and_plain_codes() {
+        assert_eq!(exit_detail(None), "");
+        assert_eq!(exit_detail(Some(1)), " (código 1)");
+        assert_eq!(
+            exit_detail(Some(-1073741819)),
+            " (código 0xC0000005: se cerró por un acceso inválido a memoria)"
+        );
     }
 
     #[test]

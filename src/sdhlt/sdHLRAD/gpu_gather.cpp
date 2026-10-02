@@ -521,7 +521,7 @@ const char *GpuDeviceDescription ()
     }
     else
     {
-        desc = "none found (will use the CPU)";
+        desc = "unavailable, CPU: " + rad::gpu::last_error ();
     }
     return desc.c_str ();
 }

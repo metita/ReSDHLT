@@ -1,5 +1,6 @@
 #include "gpu.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -411,12 +412,66 @@ namespace rad
                 return true;
             }
 
+#ifdef _WIN32
+            // Overlays (RivaTuner, OBS, Overwolf, Steam, vendor panels) hook
+            // every Vulkan process through implicit layers, and a broken one
+            // takes RAD down with an access violation inside vkCreateInstance.
+            // RAD draws nothing on screen, so it opts out of them unless the
+            // variable is already set. SDHLT_GPU_LAYERS=1 keeps them.
+            void disable_implicit_layers()
+            {
+                if (env_flag("SDHLT_GPU_LAYERS"))
+                    return;
+                if (GetEnvironmentVariableA("VK_LOADER_LAYERS_DISABLE", nullptr, 0))
+                    return;
+                SetEnvironmentVariableA("VK_LOADER_LAYERS_DISABLE", "~implicit~");
+            }
+#endif
+
+#ifdef _MSC_VER
+            // A crash inside the driver or a layer would otherwise end RAD with
+            // no message at all. Caught here it becomes one more init error,
+            // and RAD goes on with the CPU. Nothing is torn down afterwards, so
+            // the half-built instance is simply left alone.
+            bool init_device_guarded(unsigned long *code)
+            {
+                __try
+                {
+                    if (env_flag("SDHLT_GPU_FAULTTEST"))
+                        *(volatile int *)nullptr = 0;
+                    return init_device_locked();
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER)
+                {
+                    *code = GetExceptionCode();
+                    return false;
+                }
+            }
+#endif
+
             bool ensure_device_locked()
             {
                 if (!g.initialized)
                 {
                     g.initialized = true;
+#ifdef _WIN32
+                    disable_implicit_layers();
+#endif
+#ifdef _MSC_VER
+                    unsigned long code = 0;
+                    g.ok = init_device_guarded(&code);
+                    if (code)
+                    {
+                        char text[128];
+                        snprintf(text, sizeof(text),
+                                 "the vulkan driver crashed while starting (exception 0x%08lX)",
+                                 code);
+                        g.error = text;
+                        g.ok = false;
+                    }
+#else
                     g.ok = init_device_locked();
+#endif
                 }
                 return g.ok;
             }

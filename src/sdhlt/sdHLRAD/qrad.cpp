@@ -3887,9 +3887,9 @@ int             main(const int argc, char** argv)
                     Log("expected value greater than 1 for '-texchop'\n");
                     Usage();
                 }
-                if (g_texchop < 32)
+                if (g_texchop < 16)
                 {
-                    Log("Warning: texchop values below 16 are not recommended.");
+                    Log("Warning: texchop values below 16 are not recommended.\n");
                 }
             }
             else
