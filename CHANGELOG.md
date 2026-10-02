@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.2] - 2026-10-02
+
+### Fixed
+- RAD (GPU): a Vulkan driver or overlay that crashed while starting took RAD
+  down with it, with exit code 0xC0000005 and nothing in the log after the
+  visibility matrix. RAD now starts Vulkan without the implicit layers that
+  overlays install (RivaTuner, OBS, Overwolf, Steam and the like), and if the
+  driver still crashes it says so and goes on with the CPU. An already set
+  `VK_LOADER_LAYERS_DISABLE` is respected, and `SDHLT_GPU_LAYERS=1` keeps the
+  layers. The settings table shows why there is no GPU instead of "none found".
+- RAD: the `-texchop` warning fired for every value under 32 although it talks
+  about 16, and ran into the next line of the log.
+- GUI: a stage that fails shows its exit code, and names the common crashes
+  (0xC0000005 is an invalid memory access). A crashing tool writes nothing to
+  its log, so that code was the only trace.
+
 ## [0.17.1] - 2026-09-26
 
 ### Fixed
