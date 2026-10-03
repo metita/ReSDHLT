@@ -185,7 +185,9 @@ extern void     MergeAll(surface_t* surfhead);
 //=============================================================================
 // surfaces.c
 extern void     MakeFaceEdges();
-extern int      GetEdge(const vec3_t p1, const vec3_t p2, face_t* f);
+extern int      GetEdge(const vec3_t p1, const vec3_t p2, face_t* f, bool exact1 = false, bool exact2 = false);
+extern void     HoldFaceExtents(face_t* f, bool* exact);
+extern int      NumHeldFaces();
 
 //=============================================================================
 // portals.c
@@ -298,6 +300,7 @@ extern bool     g_chart;
 extern bool     g_estimate;
 extern int      g_maxnode_size;
 extern int      g_subdivide_size;
+extern bool     g_gridsubdivide;
 extern int      g_hullnum;
 extern bool     g_bLeakOnly;
 extern bool     g_bLeaked;

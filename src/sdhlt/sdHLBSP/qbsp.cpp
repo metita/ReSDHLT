@@ -70,6 +70,7 @@ bool            g_info = DEFAULT_INFO;
 bool            g_bLeakOnly = DEFAULT_LEAKONLY; // leakonly mode "-leakonly"
 bool            g_bLeaked = false;
 int             g_subdivide_size = DEFAULT_SUBDIVIDE_SIZE;
+bool            g_gridsubdivide = false;        // count luxel cells instead of cutting every 224 units "-gridsubdivide"
 
 bool            g_bUseNullTex = DEFAULT_NULLTEX; // "-nonulltex"
 
@@ -1384,6 +1385,7 @@ static void     Usage()
 	Log("    -lang file     : localization file\n");
     Log("    -leakonly      : Run BSP only enough to check for LEAKs\n");
     Log("    -subdivide #   : Sets the face subdivide size\n");
+    Log("    -gridsubdivide : Cut faces by the lightmap cells they cover instead of every 224 units (fewer faces)\n");
     Log("    -maxnodesize # : Sets the maximum portal node size\n\n");
     Log("    -notjunc       : Don't break edges on t-junctions     (not for final runs)\n");
 	Log("    -nobrink       : Don't smooth brinks                  (not for final runs)\n");
@@ -1481,6 +1483,7 @@ static void     Settings()
 	Log("nobrink             [ %7s ] [ %7s ]\n", g_nobrink? "on": "off", DEFAULT_NOBRINK? "on": "off");
     Log("subdivide size      [ %7d ] [ %7d ] (Min %d) (Max %d)\n",
         g_subdivide_size, DEFAULT_SUBDIVIDE_SIZE, MIN_SUBDIVIDE_SIZE, MAX_SUBDIVIDE_SIZE);
+    Log("grid subdivide      [ %7s ] [ %7s ]\n", g_gridsubdivide ? "on" : "off", "off");
     Log("max node size       [ %7d ] [ %7d ] (Min %d) (Max %d)\n",
         g_maxnode_size, DEFAULT_MAXNODE_SIZE, MIN_MAXNODE_SIZE, MAX_MAXNODE_SIZE);
 	Log("remove hull 2       [ %7s ] [ %7s ]\n", g_nohull2? "on": "off", "off");
@@ -1817,6 +1820,10 @@ int             main(const int argc_input, char** argv_input)
             {
                 Usage();
             }
+        }
+        else if (!strcasecmp(argv[i], "-gridsubdivide"))
+        {
+            g_gridsubdivide = true;
         }
         else if (!strcasecmp(argv[i], "-maxnodesize"))
         {

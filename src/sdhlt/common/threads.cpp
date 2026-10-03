@@ -27,6 +27,7 @@
 #include "hlassert.h"
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <system_error>                                    // std::system_error
 #include <thread>
@@ -213,6 +214,8 @@ void            ThreadUnlock()
     g_threadmutex.unlock();
 }
 
+static std::atomic<long long> g_nextpacifier(0);            // steady clock, ms: when the progress line may redraw
+
 int             GetThreadWork()
 {
     int             r, f, i;
@@ -251,6 +254,31 @@ int             GetThreadWork()
     if (!pacifier)
     {
         return r;
+    }
+
+    //
+    // The progress line is redrawn at most every 50 ms. It used to be redrawn
+    // for every work unit, under the global lock and on an unbuffered stdout:
+    // RAD hands out one unit per patch on every bounce, so twelve bounces of a
+    // 20,000 patch map meant 240,000 locked console writes. The first and the
+    // last unit always draw, so the line still starts at 1 and ends at the total.
+    //
+    {
+        const long long now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        long long       next = g_nextpacifier.load(std::memory_order_relaxed);
+
+        if (r != 0 && r != workcount - 1)
+        {
+            if (now < next || !g_nextpacifier.compare_exchange_strong(next, now + 50, std::memory_order_relaxed))
+            {
+                return r;
+            }
+        }
+        else
+        {
+            g_nextpacifier.store(now + 50, std::memory_order_relaxed);
+        }
     }
 
     //

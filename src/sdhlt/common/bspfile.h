@@ -359,6 +359,7 @@ extern void     PrintBSPFileSizes();
 #ifdef PLATFORM_CAN_CALC_EXTENT
 extern void		WriteExtentFile (const char *const filename);
 extern bool		CalcFaceExtents_test ();
+extern float	CalculatePointVecsProduct (const volatile float *point, const volatile float *vecs);
 #else
 extern void		LoadExtentFile (const char *const filename);
 #endif

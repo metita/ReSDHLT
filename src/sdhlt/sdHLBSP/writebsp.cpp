@@ -462,9 +462,11 @@ void OutputEdges_face (face_t *f)
 	f->outputedges = (int *)malloc (f->numpoints * sizeof (int));
 	hlassume (f->outputedges != NULL, assume_NoMemory);
 	int i;
+	bool exact[MAXEDGES];
+	HoldFaceExtents (f, exact);
 	for (i = 0; i < f->numpoints; i++)
 	{
-		int e = GetEdge (f->pts[i], f->pts[(i + 1) % f->numpoints], f);
+		int e = GetEdge (f->pts[i], f->pts[(i + 1) % f->numpoints], f, exact[i], exact[(i + 1) % f->numpoints]);
 		f->outputedges[i] = e;
 	}
 }
@@ -1171,6 +1173,40 @@ void            FinishBSPFile()
 	}
 
 #ifdef PLATFORM_CAN_CALC_EXTENT
+	if (g_gridsubdivide)
+	{
+		// Every face was sized by counting cells instead of by the 224 unit
+		// rule; count them once more on what is about to be written.
+		int largest = 0;
+		for (int facenum = 0; facenum < g_numfaces; facenum++)
+		{
+			if (g_texinfo[ParseTexinfoForFace (&g_dfaces[facenum])].flags & TEX_SPECIAL)
+			{
+				continue;
+			}
+			int mins[2], maxs[2];
+			GetFaceExtents (facenum, mins, maxs);
+			for (int axis = 0; axis < 2; axis++)
+			{
+				if (maxs[axis] - mins[axis] > MAX_SURFACE_EXTENT)
+				{
+					const dface_t *df = &g_dfaces[facenum];
+					const int e = g_dsurfedges[df->firstedge];
+					const dvertex_t *v = &g_dvertexes[g_dedges[abs (e)].v[e >= 0? 0: 1]];
+					Error ("-gridsubdivide: face %d at (%.0f %.0f %.0f) covers %d lightmap cells, the engine takes %d. "
+						"Compile without -gridsubdivide and please report this map.",
+						facenum, v->point[0], v->point[1], v->point[2], maxs[axis] - mins[axis], MAX_SURFACE_EXTENT);
+				}
+				largest = qmax (largest, maxs[axis] - mins[axis]);
+			}
+		}
+		Log ("-gridsubdivide: %d faces, the largest %d of %d lightmap cells", g_numfaces, largest, MAX_SURFACE_EXTENT);
+		if (NumHeldFaces () > 0)
+		{
+			Log (", %d kept vertices of their own to stay inside", NumHeldFaces ());
+		}
+		Log ("\n");
+	}
 	WriteExtentFile (g_extentfilename);
 #else
 	Warning ("The " PLATFORM_VERSIONSTRING " version of hlbsp couldn't create extent file. The lack of extent file may cause hlrad error.");
