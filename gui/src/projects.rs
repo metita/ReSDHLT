@@ -76,6 +76,78 @@ pub struct Library {
     /// Which checks the Análisis tab runs. Global, not per project.
     #[serde(default)]
     pub analysis: crate::analysis::Prefs,
+    /// Where the game lives and what to do there with a finished map. Global.
+    #[serde(default)]
+    pub game: GamePrefs,
+}
+
+/// Trying a compiled map in the game: the folder with the executable, and
+/// what the GUI does there when a compile ends well.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GamePrefs {
+    /// Folder holding hl.exe or cstrike.exe.
+    pub dir: String,
+    /// Mod folder inside it; the maps go to `<dir>/<moddir>/maps`.
+    pub moddir: String,
+    /// Copy the .bsp there after a successful compile.
+    pub copy: bool,
+    /// Start the game on the map after a successful compile. Copies first.
+    pub launch: bool,
+    /// Extra launch parameters, split on spaces.
+    pub args: String,
+    /// Ask for attention in the taskbar when a compile ends and the window
+    /// is not the one in front.
+    pub notify: bool,
+}
+
+impl Default for GamePrefs {
+    fn default() -> Self {
+        Self {
+            dir: String::new(),
+            moddir: "cstrike".to_string(),
+            copy: false,
+            launch: false,
+            args: String::new(),
+            notify: true,
+        }
+    }
+}
+
+impl GamePrefs {
+    fn moddir(&self) -> &str {
+        let moddir = self.moddir.trim();
+        if moddir.is_empty() {
+            "cstrike"
+        } else {
+            moddir
+        }
+    }
+
+    /// `<dir>/<moddir>/maps`, or None while no game folder is set.
+    pub fn maps_dir(&self) -> Option<PathBuf> {
+        let dir = self.dir.trim();
+        (!dir.is_empty()).then(|| Path::new(dir).join(self.moddir()).join("maps"))
+    }
+
+    /// The first known executable present in the game folder.
+    pub fn executable(&self) -> Option<PathBuf> {
+        let dir = Path::new(self.dir.trim());
+        ["hl.exe", "cstrike.exe", "hl_linux", "hl.sh"]
+            .iter()
+            .map(|name| dir.join(name))
+            .find(|p| p.is_file())
+    }
+
+    /// `-game <moddir> <extra> +map <map>`. The map goes last so a `+` command
+    /// among the extra parameters cannot swallow it.
+    pub fn launch_args(&self, map: &str) -> Vec<String> {
+        let mut args = vec!["-game".to_string(), self.moddir().to_string()];
+        args.extend(self.args.split_whitespace().map(str::to_string));
+        args.push("+map".to_string());
+        args.push(map.to_string());
+        args
+    }
 }
 
 fn yes() -> bool {
@@ -90,6 +162,7 @@ impl Default for Library {
             check_updates: true,
             last_update_check: 0,
             analysis: crate::analysis::Prefs::default(),
+            game: GamePrefs::default(),
         }
     }
 }
@@ -383,6 +456,39 @@ pub fn fmt_age(t: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_launch_puts_the_map_after_the_extra_parameters() {
+        let mut game = GamePrefs::default();
+        assert_eq!(game.maps_dir(), None);
+        game.dir = " C:/Juegos/Half-Life ".to_string();
+        game.args = "-console  +sv_cheats 1".to_string();
+        assert_eq!(
+            game.maps_dir(),
+            Some(
+                Path::new("C:/Juegos/Half-Life")
+                    .join("cstrike")
+                    .join("maps")
+            )
+        );
+        assert_eq!(
+            game.launch_args("zm_hola"),
+            [
+                "-game",
+                "cstrike",
+                "-console",
+                "+sv_cheats",
+                "1",
+                "+map",
+                "zm_hola"
+            ]
+        );
+        // An old file without the block, or an emptied mod folder, still works.
+        let lib: Library = serde_json::from_str("{}").unwrap();
+        assert_eq!(lib.game, GamePrefs::default());
+        game.moddir = "  ".to_string();
+        assert_eq!(game.launch_args("a")[1], "cstrike");
+    }
 
     #[test]
     fn names_stay_unique_and_printable() {

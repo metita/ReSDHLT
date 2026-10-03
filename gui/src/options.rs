@@ -214,6 +214,8 @@ pub struct Options {
     pub leakonly: bool,
     /// Reorder faces to reduce wasted lightmap-atlas space.
     pub lmoptimize: bool,
+    /// Cut faces by the lightmap cells they cover instead of every 224 units.
+    pub gridsubdivide: bool,
     /// When the map leaks, keep surveying instead of stopping at the first hole.
     pub allleaks: bool,
     pub notjunc: bool,
@@ -314,6 +316,7 @@ impl Default for Options {
             maxnodesize: 1024,
             leakonly: false,
             lmoptimize: false,
+            gridsubdivide: false,
             allleaks: false,
             notjunc: false,
             noclip: false,
@@ -589,6 +592,9 @@ mod tests {
         let mut options = Options::default();
         options.lmoptimize = true;
         options.allleaks = true;
+        assert!(!options.bsp_args().contains(&"-gridsubdivide".to_string()));
+        options.gridsubdivide = true;
+        assert!(options.bsp_args().contains(&"-gridsubdivide".to_string()));
         assert!(options.bsp_args().contains(&"-lmoptimize".to_string()));
         assert!(options.bsp_args().contains(&"-allleaks".to_string()));
 
@@ -812,6 +818,9 @@ impl Options {
         }
         if self.lmoptimize {
             a.push("-lmoptimize".to_string());
+        }
+        if self.gridsubdivide {
+            a.push("-gridsubdivide".to_string());
         }
         if self.allleaks {
             a.push("-allleaks".to_string());

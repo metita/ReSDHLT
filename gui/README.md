@@ -141,6 +141,17 @@ Las preferencias se guardan solas al cerrar la ventana y al empezar cada
 compilación, en un `resdhlt-gui.json` junto al ejecutable. Si trabajas en varios
 mapas, la pestaña **Proyectos** te evita reconfigurar cada vez.
 
+### Probar en el juego
+
+En la pestaña **Compilar**, la tarjeta "Probar en el juego" guarda la carpeta donde está `hl.exe` o
+`cstrike.exe`. Con eso la GUI puede copiar el `.bsp` a `cstrike/maps` cada vez que una compilación
+termina bien, abrir el juego directamente en el mapa, o las dos cosas. "Probar ahora" y "Solo copiar"
+hacen lo mismo a mano con el último mapa compilado. Si el juego tiene ese mapa abierto, Windows no deja
+reemplazarlo: hay que cambiar de mapa o cerrarlo.
+
+La carpeta y los interruptores valen para todos los proyectos. "Avisar al terminar" hace parpadear el
+botón de la barra de tareas cuando la compilación termina y la ventana no está al frente.
+
 ### Carpeta de salida
 
 Si la dejas vacía, las herramientas escriben junto al `.map`: el `.bsp`, el

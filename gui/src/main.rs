@@ -141,6 +141,12 @@ struct App {
     analysis_status: String,
     /// .bsp picked by hand. Empty means the last compile's result.
     analysis_bsp: String,
+
+    // ---- game ----
+    /// What the last copy or launch did, shown next to its buttons.
+    game_status: String,
+    /// A compile just ended; ask for attention on the next frame.
+    want_attention: bool,
 }
 
 impl Default for App {
@@ -236,6 +242,8 @@ impl Default for App {
             analysis_report: None,
             analysis_status: String::new(),
             analysis_bsp: String::new(),
+            game_status: String::new(),
+            want_attention: false,
         }
     }
 }
@@ -541,6 +549,13 @@ impl App {
         }
         if finished {
             self.job = None;
+            self.want_attention = self.lib.game.notify;
+            if self.last_outcome == Some(RunOutcome::Succeeded)
+                && !self.opts.leakonly
+                && (self.lib.game.copy || self.lib.game.launch)
+            {
+                self.deliver_to_game(self.lib.game.launch);
+            }
             if self.last_outcome == Some(RunOutcome::Succeeded)
                 && self.lib.analysis.after_compile
                 && self.opts.run_bsp | self.opts.run_vis | self.opts.run_rad
@@ -548,6 +563,158 @@ impl App {
                 self.analysis_bsp.clear();
                 self.start_analysis();
             }
+        }
+    }
+
+    // ---------------- game ----------------
+
+    /// Copies the last compiled .bsp into the game's maps folder and, when
+    /// asked, starts the game on it. Says what happened in the log too, so an
+    /// automatic copy after a compile is not silent.
+    fn deliver_to_game(&mut self, launch: bool) {
+        let game = self.lib.game.clone();
+        let result = (|| -> Result<String, String> {
+            let bsp = self
+                .compiled_bsp()
+                .ok_or("No hay un .bsp compilado que copiar.")?;
+            let maps = game.maps_dir().ok_or("Indica la carpeta del juego.")?;
+            if !maps.is_dir() {
+                return Err(format!("No existe {}.", maps.display()));
+            }
+            let file = bsp.file_name().ok_or("El .bsp no tiene nombre.")?;
+            let dst = maps.join(file);
+            std::fs::copy(&bsp, &dst).map_err(|e| {
+                format!(
+                    "No pude copiar a {}: {e}. Si el juego tiene ese mapa abierto, ciérralo.",
+                    dst.display()
+                )
+            })?;
+            let mut done = format!("Copiado a {}", dst.display());
+            if launch {
+                let exe = game.executable().ok_or(format!(
+                    "{done}, pero no encontré hl.exe ni cstrike.exe en {}.",
+                    game.dir.trim()
+                ))?;
+                let name = bsp
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .ok_or("El nombre del mapa no es texto válido.")?;
+                std::process::Command::new(&exe)
+                    .current_dir(game.dir.trim())
+                    .args(game.launch_args(name))
+                    .spawn()
+                    .map_err(|e| format!("{done}, pero no pude abrir {}: {e}", exe.display()))?;
+                done.push_str(" y juego abierto en el mapa");
+            }
+            done.push('.');
+            Ok(done)
+        })();
+        match result {
+            Ok(text) => {
+                self.log.push((LineKind::Success, text.clone()));
+                self.game_status = text;
+            }
+            Err(text) => {
+                self.log.push((LineKind::Warning, text.clone()));
+                self.game_status = text;
+            }
+        }
+    }
+
+    fn ui_game_card(&mut self, ui: &mut egui::Ui, m: &Metrics) {
+        let before = self.lib.game.clone();
+        card(
+            ui,
+            "Probar en el juego",
+            "qué hacer con el mapa cuando termina de compilar",
+            |ui| {
+                row(
+                    ui,
+                    m,
+                    "Carpeta del juego",
+                    "La carpeta donde está hl.exe o cstrike.exe, por ejemplo la de \
+                     Half-Life en Steam. El mapa se copia a la subcarpeta cstrike/maps de \
+                     esa carpeta. Vale para todos los proyectos.",
+                    None,
+                    |ui| {
+                        let ok = (!self.lib.game.dir.trim().is_empty())
+                            .then(|| self.lib.game.maps_dir().is_some_and(|p| p.is_dir()));
+                        path_row(ui, m, &mut self.lib.game.dir, ok, "Buscar", pick_dir, true);
+                    },
+                );
+                toggle_row(
+                    ui,
+                    m,
+                    "Copiar el mapa al juego",
+                    "Cada vez que una compilación termina bien, copia el .bsp a la carpeta \
+                     maps del juego. Si el juego tiene ese mapa abierto, Windows no deja \
+                     reemplazarlo: cambia de mapa o cierra el juego antes.",
+                    None,
+                    &mut self.lib.game.copy,
+                );
+                toggle_row(
+                    ui,
+                    m,
+                    "Abrir el juego al terminar",
+                    "Cada vez que una compilación termina bien, copia el .bsp y abre el juego \
+                     directamente en el mapa. No aplica cuando solo se buscan leaks.",
+                    None,
+                    &mut self.lib.game.launch,
+                );
+                row(
+                    ui,
+                    m,
+                    "Parámetros del juego",
+                    "Parámetros extra para abrir el juego, separados por espacios. La GUI ya \
+                     agrega -game cstrike y +map con el nombre del mapa.",
+                    Some("opcional"),
+                    |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.lib.game.args)
+                                .desired_width((ui.available_width() - 8.0).max(120.0))
+                                .hint_text("-console -windowed -w 1280"),
+                        );
+                    },
+                );
+                toggle_row(
+                    ui,
+                    m,
+                    "Avisar al terminar",
+                    "Cuando una compilación termina y esta ventana no está al frente, su \
+                     botón en la barra de tareas parpadea.",
+                    Some("recomendado"),
+                    &mut self.lib.game.notify,
+                );
+
+                let ready = self.job.is_none()
+                    && self.compiled_bsp().is_some()
+                    && self.lib.game.maps_dir().is_some_and(|p| p.is_dir());
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            ready,
+                            egui::Button::new(RichText::new("Probar ahora").strong()),
+                        )
+                        .on_hover_text("Copia el último .bsp compilado y abre el juego en ese mapa")
+                        .clicked()
+                    {
+                        self.deliver_to_game(true);
+                    }
+                    if ui
+                        .add_enabled(ready, egui::Button::new("Solo copiar"))
+                        .on_hover_text("Copia el último .bsp compilado a la carpeta maps del juego")
+                        .clicked()
+                    {
+                        self.deliver_to_game(false);
+                    }
+                    ui.label(RichText::new(&self.game_status).color(MUTED).small());
+                });
+            },
+        );
+        // Global like the analysis switches; persist right away.
+        if self.lib.game != before {
+            self.save_library();
         }
     }
 
@@ -2417,6 +2584,8 @@ impl App {
             );
         });
 
+        self.ui_game_card(ui, m);
+
         let warnings = self.opts.warnings();
         if !warnings.is_empty() {
             card(ui, "Avisos", "cosas que probablemente no quieras", |ui| {
@@ -2774,6 +2943,25 @@ impl App {
                      la geometría ni la calidad de iluminación.",
                     Some("-lmoptimize"),
                     &mut self.opts.lmoptimize,
+                );
+                toggle_row(
+                    ui,
+                    m,
+                    "Subdividir por celdas de luz",
+                    "Activa -gridsubdivide. El motor acepta una cara mientras toque 16 celdas \
+                     de lightmap o menos. La regla clásica no cuenta celdas: corta cada 224 \
+                     unidades y deja pasar hasta 240, así que una pared de 256 alineada a la \
+                     grilla sale partida en 224 + 32.\n\n\
+                     Con esta opción BSP cuenta las celdas igual que el motor y corta solo \
+                     cuando la cara pasa de 16. Los mapas de prueba quedaron con entre 3 % y \
+                     20 % menos caras, sin cambiar la geometría ni la iluminación: menos wpoly \
+                     y RAD un poco más rápido.\n\n\
+                     BSP vuelve a contar al soldar los vértices y antes de escribir el archivo; \
+                     si una cara no cabe, la compilación se detiene con un error en vez de \
+                     dejar un mapa que no carga. Ignora el valor de Subdivide. Prueba el mapa \
+                     en el juego antes de publicarlo.",
+                    Some("-gridsubdivide, menos caras"),
+                    &mut self.opts.gridsubdivide,
                 );
             },
         );
@@ -4007,6 +4195,14 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_messages();
+        if self.want_attention {
+            self.want_attention = false;
+            if !ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                    egui::UserAttentionType::Informational,
+                ));
+            }
+        }
         self.drain_analysis();
         self.refresh_checks();
         self.sync_active_project();
