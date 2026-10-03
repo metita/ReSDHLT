@@ -353,6 +353,10 @@ void	FreeStyleArrays( )
 	
 	s_max_style_count = s_style_count = 0;
 }
+bool HasOpaqueStyles()
+{
+	return s_style_count != 0;
+}
 void GetStyle(const unsigned p1, const unsigned p2, int &style, unsigned int &next_index)
 {
 	style = -1;

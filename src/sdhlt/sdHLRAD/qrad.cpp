@@ -69,6 +69,62 @@ static vec3_t   (*emitlight)[MAXLIGHTMAPS]; //LRC
 static vec3_t   (*addlight)[MAXLIGHTMAPS]; //LRC
 static unsigned char (*newstyles)[MAXLIGHTMAPS];
 
+// What GatherLight reads from an emitting patch, flattened once per bounce.
+// patch_t is several hundred bytes and emitlight is a separate array, so the
+// loop over the transfers paid two cache misses per transfer and re-derived
+// the destination style of every light each time. Here each light the patch
+// emits is one entry with its destination style already resolved, in the order
+// the original loops visit them: directlight first, then the bounced light.
+struct bounce_emitter_t
+{
+	vec3_t			reflectivity;
+	unsigned char	count;
+	unsigned char	firsttotal;							// entries from here on are bounced light
+	unsigned char	style[2 * MAXLIGHTMAPS];			// 255: dropped by bouncestyle, never added
+	vec3_t			light[2 * MAXLIGHTMAPS];
+};
+static bounce_emitter_t* g_bounce_emitters;
+
+static void		PrepareBounceEmitters ()
+{
+	for (unsigned i = 0; i < g_num_patches; i++)
+	{
+		const patch_t *patch = &g_patches[i];
+		bounce_emitter_t *e = &g_bounce_emitters[i];
+		unsigned n = 0;
+		VectorCopy (patch->bouncereflectivity, e->reflectivity);
+		for (unsigned s = 0; s < MAXLIGHTMAPS && patch->directstyle[s] != 255; s++)
+		{
+			int addstyle = patch->directstyle[s];
+			if (patch->bouncestyle != -1)
+			{
+				if (addstyle != 0 && addstyle != patch->bouncestyle)
+				{
+					continue;
+				}
+				addstyle = patch->bouncestyle;
+			}
+			e->style[n] = (unsigned char)addstyle;
+			VectorCopy (patch->directlight[s], e->light[n]);
+			n++;
+		}
+		e->firsttotal = (unsigned char)n;
+		for (unsigned s = 0; s < MAXLIGHTMAPS && patch->totalstyle[s] != 255; s++)
+		{
+			int addstyle = patch->totalstyle[s];
+			if (patch->bouncestyle != -1)
+			{
+				// kept so a non finite value is still reported
+				addstyle = (addstyle != 0 && addstyle != patch->bouncestyle)? 255: patch->bouncestyle;
+			}
+			e->style[n] = (unsigned char)addstyle;
+			VectorCopy (emitlight[i][s], e->light[n]);
+			n++;
+		}
+		e->count = (unsigned char)n;
+	}
+}
+
 vec3_t          g_face_offset[MAX_MAP_FACES];              // for rotating bmodels
 
 vec_t           g_direct_scale = DEFAULT_DLIGHT_SCALE;
@@ -2323,21 +2379,52 @@ static void     GatherLight(int threadnum)
 			VectorAdd (adds[patch->totalstyle[m]], patch->totallight[m], adds[patch->totalstyle[m]]);
 		}
 
+		const size_t	tsize = float_size[g_transfer_compress_type];
+		const bool		anystyles = HasOpaqueStyles ();
+
         for (k = 0; k < iIndex; k++, tIndex++)
         {
             unsigned        l;
             unsigned        size = (tIndex->size + 1);
             unsigned        patchnum = tIndex->index;
 
-            for (l = 0; l < size; l++, tData+=float_size[g_transfer_compress_type], patchnum++)
+            for (l = 0; l < size; l++, tData+=tsize, patchnum++)
             {
                 vec3_t          v;
                  //LRC:
-				patch_t*		emitpatch = &g_patches[patchnum];
 				unsigned		emitstyle;
 				int				opaquestyle = -1;
-				GetStyle (j, patchnum, opaquestyle, fastfind_index);
+				if (anystyles)
+				{
+					GetStyle (j, patchnum, opaquestyle, fastfind_index);
+				}
 				float_decompress (g_transfer_compress_type, tData, &f);
+
+				const bounce_emitter_t &e = g_bounce_emitters[patchnum];
+				if (opaquestyle == -1)
+				{
+					// Same operations in the same order as the loops below:
+					// (light * f) * reflectivity, then the add.
+					for (unsigned n = 0; n < e.count; n++)
+					{
+						VectorScale (e.light[n], f, v);
+						VectorMultiply (v, e.reflectivity, v);
+						if (isPointFinite (v))
+						{
+							if (e.style[n] != 255)
+							{
+								VectorAdd (adds[e.style[n]], v, adds[e.style[n]]);
+							}
+						}
+						else if (n >= e.firsttotal)
+						{
+							Verbose("GatherLight, v (%4.3f %4.3f %4.3f)@(%4.3f %4.3f %4.3f)\n",
+								v[0], v[1], v[2], patch->origin[0], patch->origin[1], patch->origin[2]);
+						}
+					}
+					continue;
+				}
+				patch_t*		emitpatch = &g_patches[patchnum];
 
 				// for each style on the emitting patch
 				for (emitstyle = 0; emitstyle < MAXLIGHTMAPS && emitpatch->directstyle[emitstyle] != 255; emitstyle++)
@@ -2757,7 +2844,10 @@ static void     BounceLight()
 	if(g_rgb_transfers)
 	       	{NamedRunThreadsOn(g_num_patches, g_estimate, GatherRGBLight);}
         else
-        	{NamedRunThreadsOn(g_num_patches, g_estimate, GatherLight);}
+        	{
+			PrepareBounceEmitters ();
+			NamedRunThreadsOn(g_num_patches, g_estimate, GatherLight);
+		}
         CollectLight();
 	}
 
@@ -3043,6 +3133,7 @@ static void     RadWorld()
 		emitlight = (vec3_t (*)[MAXLIGHTMAPS])AllocBlock ((g_num_patches + 1) * sizeof (vec3_t [MAXLIGHTMAPS]));
 		addlight = (vec3_t (*)[MAXLIGHTMAPS])AllocBlock ((g_num_patches + 1) * sizeof (vec3_t [MAXLIGHTMAPS]));
 		newstyles = (unsigned char (*)[MAXLIGHTMAPS])AllocBlock ((g_num_patches + 1) * sizeof (unsigned char [MAXLIGHTMAPS]));
+		g_bounce_emitters = (bounce_emitter_t *)AllocBlock ((g_num_patches + 1) * sizeof (bounce_emitter_t));
         // spread light around
         BounceLight();
 
@@ -3052,6 +3143,8 @@ static void     RadWorld()
 		addlight = NULL;
 		FreeBlock (newstyles);
 		newstyles = NULL;
+		FreeBlock (g_bounce_emitters);
+		g_bounce_emitters = NULL;
     }
 
     FreeTransfers();

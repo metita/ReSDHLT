@@ -159,13 +159,28 @@ inline unsigned int rotr(unsigned value, unsigned int amt)
 //
 
 
+// finite() is a call into the C runtime on Windows (_finite, and std::isfinite
+// ends in _fdtest). RAD asks this six times per patch transfer on every bounce,
+// and those calls were most of the bounce time. The exponent bits say the same.
+inline bool    isFiniteValue(const float x)
+{
+    unsigned int    bits;
+
+    memcpy(&bits, &x, sizeof(bits));
+    return (bits & 0x7f800000u) != 0x7f800000u;
+}
+
+inline bool    isFiniteValue(const double x)
+{
+    unsigned long long bits;
+
+    memcpy(&bits, &x, sizeof(bits));
+    return (bits & 0x7ff0000000000000ull) != 0x7ff0000000000000ull;
+}
+
 inline bool    isPointFinite(const vec_t* p)
 {
-    if (finite(p[0]) && finite(p[1]) && finite(p[2]))
-    {
-        return true;
-    }
-    return false;
+    return isFiniteValue(p[0]) && isFiniteValue(p[1]) && isFiniteValue(p[2]);
 }
 
 

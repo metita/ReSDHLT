@@ -663,6 +663,7 @@ extern void	AddTransparencyToRawArray(const unsigned p1, const unsigned p2, cons
 extern void	CreateFinalTransparencyArrays(const char *print_name);
 extern void	FreeTransparencyArrays();
 extern void GetStyle(const unsigned p1, const unsigned p2, int &style, unsigned int &next_index);
+extern bool HasOpaqueStyles();
 extern void	AddStyleToStyleArray(const unsigned p1, const unsigned p2, const int style);
 extern void	CreateFinalStyleArrays(const char *print_name);
 extern void	FreeStyleArrays();
