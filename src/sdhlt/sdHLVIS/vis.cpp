@@ -1024,8 +1024,13 @@ static void     LoadPortals(char* portal_image)
 		g_leafcount_all += g_leafcounts[i];
 	}
 	if (g_leafcount_all != g_dmodels[0].visleafs)
-	{ // internal error (this should never happen)
-		Error ("Corrupted leaf mapping (g_leafcount_all(%d) != g_dmodels[0].visleafs(%d)).", g_leafcount_all, g_dmodels[0].visleafs);
+	{
+		// The usual way to get here is running VIS a second time: when it finishes it
+		// rewrites the .prt in the plain format the editors load, without the leaf
+		// counts read above, so the portal lines get parsed as counts.
+		Error ("The .prt does not match the .bsp (%d leafs in the .prt, %d in the .bsp). "
+			"VIS rewrites the .prt for the editor when it finishes, so it cannot run twice on the same BSP output: run BSP again, then VIS.",
+			g_leafcount_all, g_dmodels[0].visleafs);
 	}
 	for (i = 0; i < g_portalleafs; i++)
 	{

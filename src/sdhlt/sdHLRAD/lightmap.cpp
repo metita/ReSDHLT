@@ -3025,6 +3025,26 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 							// move emitter back to its plane
 							VectorMA (delta, -PATCH_HUNT_OFFSET, l->normal, delta);
 						}
+						// A sample behind a texlight's plane, or a point light behind
+						// the sample's own surface, is dropped by the tests further
+						// down. Those tests read the normalized vector; its sign shows
+						// on the raw one, a square root and three divides earlier. The
+						// band is far wider than the rounding of the normalization, and
+						// whatever falls inside it takes the original path.
+						{
+							const vec_t band = 0.01 + 1e-5 * (fabs (delta[0]) + fabs (delta[1]) + fabs (delta[2]));
+							if (l->type == emit_surface)
+							{
+								if (DotProduct (delta, l->normal) >= band)
+								{
+									continue;
+								}
+							}
+							else if (DotProduct (delta, normal) <= -band)
+							{
+								continue;
+							}
+						}
                         dist = VectorNormalize(delta);
                         dot = DotProduct(delta, normal);
                         //                        if (dot <= 0.0)
