@@ -78,6 +78,13 @@ el HLDS. Así que "compilo con subdivide grande y gano FPS" no es una opción re
 
 Lo que sí se puede es evitar cortes innecesarios:
 
+- **`-gridsubdivide`** (BSP, o "Subdividir por celdas de luz" en la GUI): el límite real del motor no
+  son 240 unidades sino 16 celdas de lightmap por eje. La regla clásica corta cada 224 unidades sin
+  mirar dónde cae la cara en la grilla, y una pared de 256 alineada sale partida en 224 + 32. Con esta
+  opción BSP cuenta las celdas como el motor y corta solo cuando hacen falta: entre 3 % y 20 % menos
+  caras en los mapas de prueba, sin tocar el mapa. Rinde más cuanto más alineada a la grilla de 16
+  esté la geometría y las texturas estén a escala 1 sin rotar. Detalle en `docs/BENCHMARKS.md` §10.4.
+
 - **SOLIDHINT**: elimina la subdivisión de caras que provoca ese brush sobre las caras que toca.
   Clásico en terreno, rampas, escaleras y formas complejas, donde el BSP genera un picadillo de
   caras chiquitas sin necesidad.

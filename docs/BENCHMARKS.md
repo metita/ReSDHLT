@@ -628,6 +628,108 @@ GPU trabajaba 14,6 s y la CPU 7,4 s (5,1 s preparando muestras, 2,3 s terminando
 
 Lo que queda: el kernel de gather, 16 s de GPU en 6,6 millones de muestras.
 
+## 10. Rebotes, BSP y subdivisión por celdas (octubre 2026)
+
+Entorno: Windows 11, MSVC 19.44, Ryzen 5 5600G (12 hilos), GTX 1060 3GB. Mapas: `fp_squidgame_thno`
+(7.742 caras, 20.623 parches, 81,6 millones de transferencias), `zm_eichen_v2`, `zm_azteca`,
+`ar_pokemon`, `ba_dust_island`, `ba_coliseum`. Argumentos de la GUI. Perfil con un muestreador externo
+(suspende los hilos y anota el contador de programa, resuelve con el PDB), sin tocar el código.
+
+### 10.1 Dónde se iba el tiempo
+
+`fp_squidgame_thno`, v0.17.2: CSG 0,3 s, BSP 0,9 s, VIS 29 a 32 s, RAD 16,7 s con GPU y 19,0 s en CPU.
+
+Dentro de RAD los 12 rebotes costaban 0,44 s cada uno: 5,3 s, más que el gather en la GPU. El muestreo
+mostraba a `GatherLight` casi sin muestras dentro del ejecutable y a los hilos "fuera": no estaban
+ociosos, estaban dentro de `ucrtbase.dll`. `isPointFinite` llamaba a `_finite` por cada componente, seis
+veces por transferencia. `std::isfinite` no lo arregla: en MSVC termina en `_fdtest`, otra llamada a la CRT.
+
+### 10.2 Lo que entró (misma salida byte a byte) ✅
+
+| cambio | medición |
+|---|---|
+| `isPointFinite` leyendo los bits del exponente | rebote 0,44 s → 0,26 s |
+| emisores aplanados una vez por rebote, con el estilo destino ya resuelto | rebote 0,26 s → 0,18 s |
+| descartar la luz por el signo del vector crudo, antes de normalizar | BuildFacelights en CPU −7 % |
+| `GetEdge` con un mapa por par de vértices en vez de recorrer todas las aristas | BSP 0,88 s → 0,73 s |
+| barra de progreso redibujada cada 50 ms (afecta a `-estimate`, default en Linux) | una escritura por parche y por rebote menos |
+
+Un primer camino corto solo para parches con estilo 0 no sirvió en este mapa: tiene luces con estilo, y
+después del primer rebote quedaban 680 de 20.623 parches "simples", y 11 al noveno. El que entró cubre
+todos los estilos.
+
+RAD completo: 16,7 s → 14,6 s con GPU, 19,0 s → 16,8 s en CPU. El `.bsp` es idéntico al de v0.17.2 en
+los seis mapas, con GPU y sin ella, y con `-aoall -pcf 3 -blurclamp 0.5`, `-ao -rgbtransfers`,
+`-vismatrix sparse -bounce 3` y `-gpu`.
+
+### 10.3 Lo que se probó y no entró ❌
+
+- **`/Ob2` y enlace no incremental.** Los binarios publicados se compilan como RelWithDebInfo, que en
+  MSVC trae `/O2 /Ob1` y `/INCREMENTAL`. Con `/Ob2 /INCREMENTAL:NO /OPT:REF /OPT:ICF`: VIS 32,9 y 33,8 s
+  contra 32,3 y 34,1 s; RAD 17,7 s contra 18,0 s. Dentro del ruido. El código caliente ya está escrito
+  con macros y funciones `inline`.
+- **Tiempo ocioso en VIS.** El muestreo sugería un tercio de los hilos fuera del ejecutable. El tiempo
+  de proceso dice otra cosa: 336 s de CPU en 29,3 s de reloj con 12 hilos, 96 % de uso. No hay espera
+  que recuperar; `ClipToSeperators` y `ChopWinding` son el 87 % y ya se trabajaron en §8.2.
+- **VIS normal en vez de `-full`.** En este mapa tarda lo mismo (32,9 s contra 31,6 s) y deja el PVS
+  casi igual (4.570 caras de media por hoja contra 4.561). `-fast` sí cambia: 6.881.
+- **`-maxnodesize` como palanca de wpoly.** Mueve la media de caras en el PVS un ±5 %, pero el mejor
+  valor cambia con el mapa:
+
+  | `-maxnodesize` | zm_eichen_v2 | zm_azteca |
+  |---|---|---|
+  | 512 | 524 | 656 |
+  | 1024 (default) | 542 | 630 |
+  | 2048 | 577 | 672 |
+  | 4096 | 549 | 680 |
+
+  Elegirlo bien exige compilar BSP y VIS varias veces por mapa. Queda como algo que el mapper puede
+  probar con la pestaña Análisis, no como default.
+- **`-vismatrix auto` con GPU.** En este mapa la matriz normal en CPU gana (BuildVisLeafs 2,3 s +
+  MakeScales 1,0 s) a sparse con GPU (2,8 s + 3,1 s); en `ze_elysium_b1` se midió lo contrario (§9.4).
+  Sin ese mapa a mano no hay con qué elegir un umbral, así que `auto` queda como está.
+
+### 10.4 `-gridsubdivide`: cortar por celdas de lightmap ✅ (opcional)
+
+El motor rechaza una cara cuando `ceil(max / 16) - floor(min / 16)` pasa de 16 en un eje de textura
+(`extents > 256`, verificado en `CalcSurfaceExtents` de ReHLDS). La regla clásica no cuenta celdas: deja
+pasar hasta 240 unidades y corta lo demás cada 224, que es seguro en cualquier posición de la grilla pero
+desperdicia hasta dos celdas por pieza. Una pared de 256 que empieza en un borde de celda cabe exacta, y
+salía como 224 + 32; una de 256 × 512, como 6 caras en vez de 2.
+
+Con `-gridsubdivide` BSP cuenta las celdas con la aritmética del motor (`CalculatePointVecsProduct`) y
+corta solo al pasar de 16. Cada extremo de la cara lleva un margen, salvo que su posición sea segura: el
+eje de textura sigue un eje del mundo y el vértice está en coordenada entera. El corte va en un borde de
+celda cuando los vértices nuevos también caen en enteros, y si no, por el medio de una celda.
+
+Dos comprobaciones cierran el riesgo de "Bad surface extents":
+
+1. Al emitir las aristas se cuentan las celdas con las posiciones que `GetVertex` va a soldar. Una cara
+   que se pasaría conserva vértices propios. Probado con un mapa sintético: losas de 256 con vecinos de
+   lado inclinado cuya arista cae a 0,012 de la losa; 7 caras conservaron sus vértices.
+2. Antes de escribir, se recorren todas las caras con `GetFaceExtents`. Una sola sobre el límite detiene
+   la compilación.
+
+| mapa | caras | con `-gridsubdivide` | |
+|---|---|---|---|
+| ba_coliseum | 815 | 655 | −19,6 % |
+| ba_dust_island | 653 | 576 | −11,8 % |
+| ar_pokemon | 363 | 326 | −10,2 % |
+| zm_eichen_v2 | 2.786 | 2.635 | −5,4 % |
+| zm_azteca | 1.789 | 1.730 | −3,3 % |
+| ar_azteca | 1.203 | 1.163 | −3,3 % |
+| fp_squidgame_thno | 7.742 | 7.494 | −3,2 % |
+
+Caras del mundo que el PVS manda al renderer (`wpolymap.py`), media y peor hoja: `zm_eichen_v2` 542 →
+504 y 1.090 → 999; `zm_azteca` 630 → 608 y 1.330 → 1.278. `bspcheck.py` da la misma área total y
+geometría válida, y los pares de caras todavía fusionables en `zm_eichen_v2` bajan de 159 a 91. RAD
+también gana algo, porque hay menos caras que iluminar: `ba_coliseum` 2,7 s → 2,3 s.
+
+Sin la opción, BSP escribe el mismo archivo que antes en los 10 mapas del corpus que compilan aquí.
+
+**Lo que falta:** abrir un mapa compilado así en CS 1.6. La cuenta de celdas coincide con la del motor y
+con la de RAD, pero no se probó en el juego.
+
 ## Cómo reproducir
 
 ```sh

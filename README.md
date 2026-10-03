@@ -205,6 +205,7 @@ large texture library, and CSG aborted rather than ignoring the excess.
 | CSG | `-convexgap N` | Smallest editor/plane mismatch that rebuilds a brush, default 0.2 |
 | CSG | `-autonull` | NULL world faces fully hidden inside a static func_wall |
 | BSP | `-lmoptimize` | Reorder faces to waste fewer lightmap atlas pages |
+| BSP | `-gridsubdivide` | Cut faces by the lightmap cells they cover instead of every 224 units: 3% to 20% fewer faces |
 | BSP | `-allleaks` | Mark every hole, not just the first one found |
 | RAD | `-skylevel N` | Sky sampling fineness, 4 to 8, default 6 |
 | RAD | `-gpu` | Compute direct lighting and Sparse transfer factors with Vulkan |

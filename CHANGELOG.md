@@ -4,6 +4,75 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- BSP: `-gridsubdivide` cuts a face by the lightmap cells it covers instead of
+  every 224 units. The engine takes a face that touches 16 cells or fewer along
+  each texture axis. The classic rule never counts them: it keeps anything up to
+  240 units and cuts the rest every 224, safe wherever the face sits on the
+  16-unit grid, but a 256 unit wall that starts on a cell boundary fits exactly
+  and still came out as 224 + 32. With the flag BSP counts the cells with the
+  engine's own arithmetic and only cuts past 16: on a cell boundary when the new
+  vertices land on integer coordinates, through the middle of a cell otherwise.
+  The count is repeated when the vertices are welded (a face that welding would
+  push over keeps vertices of its own) and once more on the finished file, where
+  a face over the limit stops the compile instead of leaving a map that dies
+  with "Bad surface extents". Geometry, textures and lighting do not change;
+  there are fewer faces to draw and to light:
+
+  | map | faces | with `-gridsubdivide` | |
+  |---|---|---|---|
+  | ba_coliseum | 815 | 655 | -19.6% |
+  | ba_dust_island | 653 | 576 | -11.8% |
+  | ar_pokemon | 363 | 326 | -10.2% |
+  | zm_eichen_v2 | 2786 | 2635 | -5.4% |
+  | zm_azteca | 1789 | 1730 | -3.3% |
+  | fp_squidgame_thno | 7742 | 7494 | -3.2% |
+
+  On zm_eichen_v2 the faces a leaf's PVS sends to the renderer drop from 542 to
+  504 on average and from 1090 to 999 in the worst leaf. Off by default, and
+  without it BSP writes the same file as 0.17.2. It ignores `-subdivide`. Not
+  checked in the game yet: try the map before publishing it.
+- GUI: "Subdividir por celdas de luz" in the BSP tab turns `-gridsubdivide` on.
+- GUI: "Probar en el juego" in the Compilar tab. Give it the folder with hl.exe
+  or cstrike.exe and it can copy the `.bsp` to `cstrike/maps` after every
+  successful compile, open the game on the map, or both; "Probar ahora" and
+  "Solo copiar" do it by hand with the last compiled map. The folder and the
+  switches are global, not per project.
+- GUI: when a compile ends and the window is not in front, its taskbar button
+  asks for attention. "Avisar al terminar" turns it off.
+
+### Changed
+- RAD: each bounce is 2.4 times faster. Checking that a transfer is finite went
+  through the C runtime, a call into ucrtbase per component and six per patch
+  transfer; it now reads the exponent bits. GatherLight also reads each emitting
+  patch from a compact array built once per bounce, with the destination style
+  of every light already resolved, instead of `patch_t` plus a second array. The
+  float operations and their order are the same. fp_squidgame_thno (20,623
+  patches, 81.6 million transfers): 0.44 s to 0.18 s per bounce.
+- RAD: a sample behind a texlight's plane, or a point light behind the sample's
+  surface, is dropped before the vector to the light is normalized instead of
+  after. About 7% off BuildFacelights on the CPU.
+- BSP: GetEdge finds the reverse of an edge through a map keyed by its two
+  vertices instead of scanning every edge of the model, and takes the same
+  first match. BSP on fp_squidgame_thno: 0.88 s to 0.73 s.
+- All tools: the progress line of `-estimate` (the default on Linux) is redrawn
+  every 50 ms instead of once per work unit under the global lock. RAD hands
+  out one unit per patch on every bounce.
+
+RAD on fp_squidgame_thno with the GUI's arguments: 16.7 s to 14.6 s with the
+GPU, 19.0 s to 16.8 s on the CPU. The `.bsp` is byte for byte the one 0.17.2
+writes on the six maps checked, with the GPU and without it, and with `-aoall`,
+`-pcf`, `-blurclamp`, `-rgbtransfers` and `-vismatrix sparse`.
+docs/BENCHMARKS.md §10 has the measurements and what was tried and left out.
+
+### Fixed
+- VIS: running it twice on the same BSP output failed with "Corrupted leaf
+  mapping". VIS rewrites the `.prt` for the editor when it finishes, so the
+  second run reads portals where it expects leaf counts. The error now says
+  that, and to run BSP again first.
+
 ## [0.17.2] - 2026-10-02
 
 ### Fixed
