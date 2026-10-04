@@ -223,6 +223,11 @@ typedef struct model_s
 	int		body;		// sets by level-designer
 	int		skin;		// e.g. various alpha-textures
 	int		trace_mode;	// 0 - ultra fast, 1 - med, 2 - slow
+
+	// the lightmap texel the engine reads to light this model in game
+	bool		has_lightspot;
+	vec3_t		lightspot;
+	vec_t		lightspot_radius;
     
 	void		*extradata;	// model
 	void		*anims;		// studio animations

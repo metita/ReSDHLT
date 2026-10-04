@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- RAD: `-studioshadowall` makes every point entity with a `.mdl` model cast a
+  shadow (`cycler_sprite` and the like), without `zhlt_studioshadow 1` on each
+  one. Models drawn see-through (additive, or any other non-normal
+  rendermode under renderamt 255) are left out, and `zhlt_studioshadow 0` opts a
+  single model out.
+- RAD: a model no longer goes dark from its own shadow. The game lights a whole
+  model with one lightmap texel: when the line toward the sun does not reach
+  the sky, it follows that direction (straight down without a
+  light_environment) and reads the first face it crosses. RAD now walks the BSP
+  the same way and keeps that texel, and the samples its blur takes, out of the
+  model's own shadow. In a test room a tree right under a light read 69 from its
+  own shadow and now reads 159, against 160 for the same tree without shadows.
+  The floor right under the model comes out lighter: 25 texels without `-extra`,
+  9 with it. `-nostudiolightspot` turns it off.
+- RAD: a warning for every `.mdl` the game will draw black because no lightmap
+  is found along that line, saying when the origin is inside a solid. The log
+  counts how many models the game lights with the sun, with a texel and black.
+- GUI: "Sombras de todos los modelos" and "Dejar que el modelo tape su luz" in
+  the RAD tab.
+
 ## [0.18.0] - 2026-10-04
 
 ### Added

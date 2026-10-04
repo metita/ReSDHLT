@@ -3316,6 +3316,34 @@ impl App {
             toggle_row(
                 ui,
                 m,
+                "Sombras de todos los modelos",
+                "Hace que todo modelo .mdl puesto como entidad (cycler_sprite y \
+                 similares) proyecte sombra, sin poner zhlt_studioshadow en cada uno.\n\n\
+                 QUÉ CAMBIA: árboles, cajas y estatuas oscurecen el piso y las paredes \
+                 como un sólido. Quedan afuera los modelos transparentes o aditivos \
+                 (rendermode), y uno puntual se excluye con zhlt_studioshadow 0.\n\n\
+                 Los .mdl se buscan en la carpeta del juego, un nivel arriba de maps\\. \
+                 Trazar las mallas es caro: con muchos modelos, el compilado tarda más.",
+                None,
+                &mut self.opts.studioshadowall,
+            );
+            toggle_row(
+                ui,
+                m,
+                "Dejar que el modelo tape su luz",
+                "Desactiva la protección del texel con el que el juego ilumina cada modelo.\n\n\
+                 QUÉ CAMBIA: el juego ilumina un modelo entero con un solo texel del \
+                 lightmap, el que tiene debajo. Si el modelo da sombra sobre ese texel, \
+                 se ve negro. Por defecto RAD deja ese texel sin la sombra del propio \
+                 modelo: el modelo recibe la luz del lugar y queda una mancha algo más \
+                 clara justo debajo (unos 5x5 texels, 3x3 con -extra).\n\n\
+                 Actívalo solo si esa mancha se nota más que el modelo oscuro.",
+                None,
+                &mut self.opts.nostudiolightspot,
+            );
+            toggle_row(
+                ui,
+                m,
                 "Perfilar RAD",
                 "Imprime al final en qué gasta RAD el tiempo, con conteos de llamadas. \
                  Sirve para entender un compilado lento, no para uso normal.",

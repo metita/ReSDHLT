@@ -6,6 +6,7 @@
 //	[
 //		"": "Normal"
 //		1: "Opaque (Blocks Light)"
+//		0: "Never (even with -studioshadowall)"
 //	]
 //	zhlt_shadowmode(choices) : "Shadow mode" : 1 =
 //	[

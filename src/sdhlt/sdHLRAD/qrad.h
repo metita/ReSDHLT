@@ -51,6 +51,8 @@
 #define DEFAULT_METHOD eMethodSparseVismatrix
 #define DEFAULT_LERP_ENABLED        true
 #define DEFAULT_STUDIOSHADOW        true //seedee
+#define DEFAULT_STUDIOSHADOWALL     false
+#define DEFAULT_STUDIOLIGHTSPOT     true
 #define DEFAULT_FADE                1.0
 #define DEFAULT_BOUNCE              8
 #define DEFAULT_DUMPPATCHES         false
@@ -704,5 +706,7 @@ extern void FreeStudioModels(void);
 extern bool TestSegmentAgainstStudioList(const vec_t* p1, const vec_t* p2);
 extern uint64_t StudioModelFingerprint(void);
 extern bool g_studioshadow;
+extern bool g_studioshadowall;
+extern bool g_studiolightspot;
 
 #endif //HLRAD_H__

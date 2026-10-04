@@ -38,6 +38,8 @@
 bool            g_pre25update = DEFAULT_PRE25UPDATE;
 bool			g_fastmode = DEFAULT_FASTMODE;
 bool g_studioshadow = DEFAULT_STUDIOSHADOW;
+bool g_studioshadowall = DEFAULT_STUDIOSHADOWALL;
+bool g_studiolightspot = DEFAULT_STUDIOLIGHTSPOT;
 
 typedef enum
 {
@@ -3260,7 +3262,9 @@ static void     Usage()
     Log("    -circus         : Enable 'circus' mode for locating unlit lightmaps\n");
 	Log("    -nospread       : Disable sunlight spread angles for this compile\n");
     Log("    -nopaque        : Disable the opaque zhlt_lightflags for this compile\n\n");
-	Log("    -nostudioshadow : Disable opaque studiomodels, ignore zhlt_studioshadow for this compile\n\n");
+	Log("    -nostudioshadow : Disable opaque studiomodels, ignore zhlt_studioshadow for this compile\n");
+	Log("    -studioshadowall : Every point entity with a .mdl casts shadows (zhlt_studioshadow 0 opts out)\n");
+	Log("    -nostudiolightspot : Let a model shadow the lightmap texel the game lights it from\n\n");
 	Log("    -pcf #          : Shadow taps per axis for soft shadow edges (1 = off, up to %d; cost grows with #^2)\n", MAX_PCF);
 	Log("    -blurclamp #    : Keep blurred light from bleeding into thin shadows (0 = off, up to 1)\n");
 	Log("    -ao             : Enable ray-traced ambient occlusion\n");
@@ -3539,6 +3543,8 @@ static void     Settings()
 	Log("spread angles        [ %17s ] [ %17s ]\n", g_allow_spread ? "on" : "off", DEFAULT_ALLOW_SPREAD ? "on" : "off");
     Log("opaque brush models  [ %17s ] [ %17s ]\n", g_allow_opaques ? "on" : "off", DEFAULT_ALLOW_OPAQUES ? "on" : "off");
 	Log("opaque studio models [ %17s ] [ %17s ]\n", g_studioshadow ? "on" : "off", DEFAULT_STUDIOSHADOW ? "on" : "off");
+	Log("all studio models    [ %17s ] [ %17s ]\n", g_studioshadowall ? "on" : "off", DEFAULT_STUDIOSHADOWALL ? "on" : "off");
+	Log("studio light spot    [ %17s ] [ %17s ]\n", g_studiolightspot ? "on" : "off", DEFAULT_STUDIOLIGHTSPOT ? "on" : "off");
     Log("sky lighting fix     [ %17s ] [ %17s ]\n", g_sky_lighting_fix ? "on" : "off", DEFAULT_SKY_LIGHTING_FIX ? "on" : "off");
     Log("incremental          [ %17s ] [ %17s ]\n", g_incremental ? "on" : "off", DEFAULT_INCREMENTAL ? "on" : "off");
     Log("dump                 [ %17s ] [ %17s ]\n", g_dumppatches ? "on" : "off", DEFAULT_DUMPPATCHES ? "on" : "off");
@@ -4424,6 +4430,14 @@ int             main(const int argc, char** argv)
 		else if (!strcasecmp(argv[i], "-nostudioshadow"))
 		{
 			g_studioshadow = false;
+		}
+		else if (!strcasecmp(argv[i], "-studioshadowall"))
+		{
+			g_studioshadowall = true;
+		}
+		else if (!strcasecmp(argv[i], "-nostudiolightspot"))
+		{
+			g_studiolightspot = false;
 		}
 		else if (!strcasecmp(argv[i], "-ao"))
 		{

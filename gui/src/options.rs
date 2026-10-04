@@ -251,6 +251,8 @@ pub struct Options {
     pub gpu_adapter: i32,
     pub pre25: bool,
     pub nostudioshadow: bool,
+    pub studioshadowall: bool,
+    pub nostudiolightspot: bool,
     pub profile: bool,
     pub ao: AoMode,
     pub ao_scale: f32,
@@ -350,6 +352,8 @@ impl Default for Options {
             // checked in the exact client/server combination they target.
             pre25: true,
             nostudioshadow: false,
+            studioshadowall: false,
+            nostudiolightspot: false,
             profile: false,
             ao: AoMode::Off,
             ao_scale: DEFAULT_AO_SCALE,
@@ -906,6 +910,12 @@ impl Options {
         }
         if self.nostudioshadow {
             a.push("-nostudioshadow".to_string());
+        }
+        if self.studioshadowall {
+            a.push("-studioshadowall".to_string());
+        }
+        if self.nostudiolightspot {
+            a.push("-nostudiolightspot".to_string());
         }
         if self.profile {
             a.push("-profile".to_string());
