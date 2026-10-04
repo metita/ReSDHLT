@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.18.0] - 2026-10-04
 
 ### Added
 - BSP: `-gridsubdivide` cuts a face by the lightmap cells it covers instead of
@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   | map | faces | with `-gridsubdivide` | |
   |---|---|---|---|
   | ba_coliseum | 815 | 655 | -19.6% |
+  | ze_sanctorum | 5882 | 5256 | -10.6% |
   | ba_dust_island | 653 | 576 | -11.8% |
   | ar_pokemon | 363 | 326 | -10.2% |
   | zm_eichen_v2 | 2786 | 2635 | -5.4% |
