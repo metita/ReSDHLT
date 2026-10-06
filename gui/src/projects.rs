@@ -124,6 +124,14 @@ impl GamePrefs {
         }
     }
 
+    /// `<dir>/<moddir>`, when it exists. RAD reads the .mdl files there.
+    pub fn mod_dir(&self) -> Option<PathBuf> {
+        let dir = self.dir.trim();
+        (!dir.is_empty())
+            .then(|| Path::new(dir).join(self.moddir()))
+            .filter(|p| p.is_dir())
+    }
+
     /// `<dir>/<moddir>/maps`, or None while no game folder is set.
     pub fn maps_dir(&self) -> Option<PathBuf> {
         let dir = self.dir.trim();

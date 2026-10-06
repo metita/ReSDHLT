@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- RAD: the `.mdl` files for model shadows are also read from the game. After
+  the folder above the map's, RAD looks in `-moddir <folder>` (for example
+  `Half-Life/cstrike`), and without it in Counter-Strike in any Steam library.
+  In the game it reads `<mod>_addon`, `<mod>`, `<mod>_downloads` and `valve`,
+  like the engine. A map compiled outside the game no longer loses the shadows
+  of its models.
+- GUI: RAD gets `-moddir` from the game folder set for "Probar en el juego".
+
+### Fixed
+- RAD: player spawns and other `info_`, `light` and `path_` entities no longer
+  count as models. Their `model` key (gsg9.mdl on the CS spawns) only tells the
+  editor what to draw; the game never shows it, so with `-studioshadowall` they
+  cast shadows of players that are not there.
+- RAD: a missing model gives one warning with the number of entities using it,
+  then the folders it was looked for in, instead of one warning per entity.
+- RAD: a model path longer than 63 characters overflowed the model's name.
+
 ## [0.19.0] - 2026-10-04
 
 ### Added

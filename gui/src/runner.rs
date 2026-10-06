@@ -186,6 +186,8 @@ struct PlannedCommand {
 #[derive(Debug, Clone)]
 pub struct CompilePlan {
     opts: Options,
+    /// The game's mod folder, where RAD reads the .mdl files from.
+    mod_dir: Option<PathBuf>,
     commands: Vec<PlannedCommand>,
 }
 
@@ -235,7 +237,7 @@ fn predicted_map(opts: &Options) -> PathBuf {
         .unwrap_or(source)
 }
 
-fn commands_for(opts: &Options, map: &Path) -> Vec<PlannedCommand> {
+fn commands_for(opts: &Options, map: &Path, mod_dir: Option<&Path>) -> Vec<PlannedCommand> {
     let base = map.with_extension("");
     let work_dir = map.parent().map(Path::to_path_buf);
     STAGES
@@ -249,7 +251,14 @@ fn commands_for(opts: &Options, map: &Path) -> Vec<PlannedCommand> {
                 Stage::Csg => opts.csg_args(),
                 Stage::Bsp => opts.bsp_args(),
                 Stage::Vis => opts.vis_args(),
-                Stage::Rad => opts.rad_args(),
+                Stage::Rad => {
+                    let mut args = opts.rad_args();
+                    // First, so a -moddir among the extra parameters wins.
+                    if let Some(dir) = mod_dir {
+                        args.splice(0..0, ["-moddir".to_string(), dir.display().to_string()]);
+                    }
+                    args
+                }
             };
             PlannedCommand {
                 stage,
@@ -368,25 +377,29 @@ pub fn validation_errors(opts: &Options) -> Vec<String> {
 }
 
 impl CompilePlan {
-    pub fn new(mut opts: Options) -> Result<Self, Vec<String>> {
+    pub fn new(mut opts: Options, mod_dir: Option<PathBuf>) -> Result<Self, Vec<String>> {
         opts.normalize_paths();
         let errors = validation_errors(&opts);
         if !errors.is_empty() {
             return Err(errors);
         }
         let map = predicted_map(&opts);
-        let commands = commands_for(&opts, &map);
-        Ok(Self { opts, commands })
+        let commands = commands_for(&opts, &map, mod_dir.as_deref());
+        Ok(Self {
+            opts,
+            mod_dir,
+            commands,
+        })
     }
 
     /// Human-readable representation of exactly the same argv and working
     /// directory that execution uses. WAD resolution is explicitly marked as
     /// conditional because that file is produced only after inspecting the map.
-    pub fn preview(opts: &Options) -> String {
+    pub fn preview(opts: &Options, mod_dir: Option<&Path>) -> String {
         let mut normalized = opts.clone();
         normalized.normalize_paths();
         let map = predicted_map(&normalized);
-        let commands = commands_for(&normalized, &map);
+        let commands = commands_for(&normalized, &map, mod_dir);
         let mut out = String::new();
         for command in commands {
             out.push_str(&command.display());
@@ -1082,7 +1095,7 @@ pub fn start(plan: CompilePlan) -> Job {
         let commands = if map == predicted_map(&opts) {
             plan.commands
         } else {
-            commands_for(&opts, &map)
+            commands_for(&opts, &map, plan.mod_dir.as_deref())
         };
 
         for command in commands {
@@ -1303,7 +1316,7 @@ mod tests {
         options.project_name = "test".to_string();
         options.rad_extra = r#"-lights "C:\My Maps\custom.rad""#.to_string();
 
-        let plan = CompilePlan::new(options.clone()).unwrap();
+        let plan = CompilePlan::new(options.clone(), None).unwrap();
         assert_eq!(plan.commands.len(), 4);
         assert!(plan.commands[0]
             .target
@@ -1313,9 +1326,19 @@ mod tests {
             .target
             .extension()
             .is_some_and(|ext| ext == "bsp"));
-        let preview = CompilePlan::preview(&options);
+        let preview = CompilePlan::preview(&options, None);
         assert!(preview.contains("map with spaces.map\""), "{preview}");
         assert!(preview.contains("\"C:\\My Maps\\custom.rad\""), "{preview}");
+        assert!(!preview.contains("-moddir"), "{preview}");
+
+        // RAD reads the .mdl files from the game; the extra parameters still win
+        let game = Path::new(r"C:\Juegos\Half-Life\cstrike");
+        let preview = CompilePlan::preview(&options, Some(game));
+        let rad = preview.lines().last().unwrap();
+        let moddir = rad
+            .find(r#"-moddir C:\Juegos\Half-Life\cstrike"#)
+            .expect(rad);
+        assert!(moddir < rad.find("-lights").unwrap(), "{rad}");
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1336,7 +1359,7 @@ mod tests {
         let base = map.with_extension("");
         assert_eq!(sibling(&base, "bsp"), Path::new(r"C:\maps\pl_2.1.bsp"));
         assert_eq!(sibling(&base, "p0"), Path::new(r"C:\maps\pl_2.1.p0"));
-        let commands = commands_for(&Options::default(), map);
+        let commands = commands_for(&Options::default(), map, None);
         assert!(commands
             .iter()
             .filter(|command| command.stage != Stage::Csg)

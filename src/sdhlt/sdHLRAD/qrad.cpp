@@ -3264,7 +3264,8 @@ static void     Usage()
     Log("    -nopaque        : Disable the opaque zhlt_lightflags for this compile\n\n");
 	Log("    -nostudioshadow : Disable opaque studiomodels, ignore zhlt_studioshadow for this compile\n");
 	Log("    -studioshadowall : Every point entity with a .mdl casts shadows (zhlt_studioshadow 0 opts out)\n");
-	Log("    -nostudiolightspot : Let a model shadow the lightmap texel the game lights it from\n\n");
+	Log("    -nostudiolightspot : Let a model shadow the lightmap texel the game lights it from\n");
+	Log("    -moddir folder  : Game mod folder (e.g. Half-Life/cstrike) to read .mdl files from\n\n");
 	Log("    -pcf #          : Shadow taps per axis for soft shadow edges (1 = off, up to %d; cost grows with #^2)\n", MAX_PCF);
 	Log("    -blurclamp #    : Keep blurred light from bleeding into thin shadows (0 = off, up to 1)\n");
 	Log("    -ao             : Enable ray-traced ambient occlusion\n");
@@ -3545,6 +3546,7 @@ static void     Settings()
 	Log("opaque studio models [ %17s ] [ %17s ]\n", g_studioshadow ? "on" : "off", DEFAULT_STUDIOSHADOW ? "on" : "off");
 	Log("all studio models    [ %17s ] [ %17s ]\n", g_studioshadowall ? "on" : "off", DEFAULT_STUDIOSHADOWALL ? "on" : "off");
 	Log("studio light spot    [ %17s ] [ %17s ]\n", g_studiolightspot ? "on" : "off", DEFAULT_STUDIOLIGHTSPOT ? "on" : "off");
+	Log("model folder         [ %17s ] [ %17s ]\n", *g_moddir ? "set" : "auto", "auto");
     Log("sky lighting fix     [ %17s ] [ %17s ]\n", g_sky_lighting_fix ? "on" : "off", DEFAULT_SKY_LIGHTING_FIX ? "on" : "off");
     Log("incremental          [ %17s ] [ %17s ]\n", g_incremental ? "on" : "off", DEFAULT_INCREMENTAL ? "on" : "off");
     Log("dump                 [ %17s ] [ %17s ]\n", g_dumppatches ? "on" : "off", DEFAULT_DUMPPATCHES ? "on" : "off");
@@ -4438,6 +4440,17 @@ int             main(const int argc, char** argv)
 		else if (!strcasecmp(argv[i], "-nostudiolightspot"))
 		{
 			g_studiolightspot = false;
+		}
+		else if (!strcasecmp(argv[i], "-moddir"))
+		{
+			if (i + 1 < argc)
+			{
+				safe_strncpy(g_moddir, argv[++i], _MAX_PATH);
+			}
+			else
+			{
+				Usage();
+			}
 		}
 		else if (!strcasecmp(argv[i], "-ao"))
 		{

@@ -3,10 +3,152 @@
 #include "filelib.h"
 #include "stringlib.h"
 
+#include <map>
+#include <string>
+#include <sys/stat.h>
+
+#ifdef SYSTEM_WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 #define MAX_MODELS		1024
 
 model_t models[MAX_MODELS];
 int num_models;
+
+char g_moddir[_MAX_PATH] = "";	// -moddir
+
+// =====================================================================================
+//  Where the .mdl files are
+//      First the folder above the map's (a map compiled from <mod>/maps finds
+//      them there), then the game: the -moddir folder, or Counter-Strike in a
+//      Steam library when none is given. In the game the same folders the
+//      engine reads: <mod>_addon, <mod>, <mod>_downloads and valve.
+// =====================================================================================
+static std::vector<std::string> g_modelpaths;
+static std::map<std::string, int> g_missingmodels;	// name -> entities using it
+
+static bool IsDir( const std::string &path )
+{
+	struct stat st;
+	return !stat( path.c_str(), &st ) && ( st.st_mode & S_IFDIR );
+}
+
+static std::string TrimSlashes( std::string path )
+{
+	while( !path.empty() && ( path.back() == '/' || path.back() == '\\' ))
+		path.pop_back();
+	return path;
+}
+
+static void AddModelPath( const std::string &dir )
+{
+	// stat fails on Windows with a trailing slash
+	std::string path = TrimSlashes( dir );
+	if( path.empty() || !IsDir( path )) return;
+	path += "/";
+	FlipSlashes( &path[0] );
+	for( const std::string &known : g_modelpaths )
+	{
+		if( !Q_stricmp( known.c_str(), path.c_str() )) return;
+	}
+	g_modelpaths.push_back( path );
+}
+
+static void AddGamePaths( const std::string &moddir )
+{
+	const std::string mod = TrimSlashes( moddir );
+	const size_t slash = mod.find_last_of( "/\\" );
+	const std::string root = slash == std::string::npos ? "." : mod.substr( 0, slash );
+	AddModelPath( mod + "_addon" );
+	AddModelPath( mod );
+	AddModelPath( mod + "_downloads" );
+	AddModelPath( root + "/valve" );
+}
+
+// Steam folders that may hold steamapps: the install itself, and every
+// library listed in its libraryfolders.vdf
+static std::vector<std::string> SteamLibraries( void )
+{
+	std::vector<std::string> roots, libraries;
+#ifdef SYSTEM_WIN32
+	char steam[MAX_PATH];
+	DWORD size = sizeof( steam );
+	if( RegGetValueA( HKEY_CURRENT_USER, "Software\\Valve\\Steam", "SteamPath", RRF_RT_REG_SZ, NULL, steam, &size ) == ERROR_SUCCESS )
+		roots.push_back( steam );
+#else
+	const char *home = getenv( "HOME" );
+	if( home )
+	{
+		roots.push_back( std::string( home ) + "/.steam/steam" );
+		roots.push_back( std::string( home ) + "/.local/share/Steam" );
+	}
+#endif
+	for( const std::string &root : roots )
+	{
+		libraries.push_back( root );
+
+		FILE *f = fopen(( root + "/steamapps/libraryfolders.vdf" ).c_str(), "rb" );
+		if( !f ) continue;
+		char line[1024];
+		while( fgets( line, sizeof( line ), f ))
+		{
+			// "path"		"D:\\SteamLibrary"
+			const char *key = strstr( line, "\"path\"" );
+			if( !key ) continue;
+			const char *open = strchr( key + 6, '"' );
+			if( !open ) continue;
+			std::string path;
+			for( const char *c = open + 1; *c && *c != '"'; c++ )
+			{
+				if( *c == '\\' && c[1] ) c++;
+				path += *c;
+			}
+			libraries.push_back( path );
+		}
+		fclose( f );
+	}
+	return libraries;
+}
+
+static void FindModelPaths( void )
+{
+	g_modelpaths.clear();
+	// empty when the map was given without a folder: the current one
+	AddModelPath( *g_Wadpath ? g_Wadpath : "." );
+
+	if( *g_moddir )
+	{
+		if( !IsDir( g_moddir ))
+			Warning( "-moddir: %s is not a folder", g_moddir );
+		AddGamePaths( g_moddir );
+		return;
+	}
+
+	for( const std::string &library : SteamLibraries() )
+	{
+		const std::string cstrike = library + "/steamapps/common/Half-Life/cstrike";
+		if( IsDir( cstrike ))
+		{
+			AddGamePaths( cstrike );
+			return;
+		}
+	}
+}
+
+// Full path of a model in the first folder that has it
+static bool FindModelFile( const char *modelname, char *out, size_t outsize )
+{
+	for( const std::string &dir : g_modelpaths )
+	{
+		snprintf( out, outsize, "%s%s", dir.c_str(), modelname );
+		FlipSlashes( out );
+		if( q_exists( out )) return true;
+	}
+	return false;
+}
 
 static void StudioFingerprintBytes(uint64_t& hash, const void* data, size_t size)
 {
@@ -53,30 +195,35 @@ model_t *LoadStudioModel( const char *modelname, const vec3_t origin, const vec3
 		Developer( DEVELOPER_LEVEL_ERROR, "LoadStudioModel: MAX_MODELS exceeded\n" );
 		return NULL;
 	}
-	model_t *m = &models[num_models];
-	sprintf(m->name, "%s%s", g_Wadpath, modelname);
-	FlipSlashes(m->name);
-
-	if (!q_exists(m->name))
+	char path[_MAX_PATH];
+	if( !FindModelFile( modelname, path, sizeof( path )))
 	{
-		Warning("LoadStudioModel: couldn't load %s\n", m->name);
+		std::string key = modelname;
+		for( char &c : key )
+			c = c == '\\' ? '/' : (char)tolower( (unsigned char)c );
+		g_missingmodels[key]++;
 		return NULL;
 	}
-	LoadFile(m->name, (char**)&m->extradata);
+
+	// the name, not the full path: it has to fit name[64]
+	model_t *m = &models[num_models];
+	safe_strncpy(m->name, modelname, sizeof(m->name));
+	FlipSlashes(m->name);
+	LoadFile(path, (char**)&m->extradata);
 
 	studiohdr_t *phdr = (studiohdr_t *)m->extradata;
 
 	// well the textures place in separate file (very stupid case)
 	if( phdr->numtextures == 0 )
 	{
-		char texname[128], texpath[128];
+		char texpath[_MAX_PATH];
 		byte *texdata, *moddata;
 		studiohdr_t *thdr, *newhdr;
-		safe_strncpy(texname, modelname, 128);
-		StripExtension(texname);
 
-		sprintf(texpath, "%s%sT.mdl", g_Wadpath, texname);
-		FlipSlashes(texpath);
+		// <name>T.mdl, next to the model
+		safe_strncpy(texpath, path, sizeof(texpath));
+		StripExtension(texpath);
+		safe_strncat(texpath, "T.mdl", sizeof(texpath));
 
 		LoadFile(texpath, (char**)&texdata);
 		moddata = (byte *)m->extradata;
@@ -330,6 +477,16 @@ static bool IsOpaqueRenderMode( const entity_t *e )
 	return IntForKey( e, "renderamt" ) >= 255;
 }
 
+// Point entities whose model key only tells the editor what to draw. The game
+// never sets that model on them, so they are invisible: the player spawns
+// carry models/player/gsg9/gsg9.mdl in the CS FGD.
+static bool GameDrawsModel( const char *classname )
+{
+	return Q_strnicmp( classname, "info_", 5 )
+		&& Q_strnicmp( classname, "light", 5 )
+		&& Q_strnicmp( classname, "path_", 5 );
+}
+
 // =====================================================================================
 //  LoadStudioModels
 // =====================================================================================
@@ -339,6 +496,8 @@ void LoadStudioModels( void )
 	num_models = 0;
 
 	FindGameSkyVec();
+	FindModelPaths();
+	g_missingmodels.clear();
 
 	int count_sky = 0, count_texel = 0, count_dark = 0, count_spots = 0;
 
@@ -356,7 +515,7 @@ void LoadStudioModels( void )
 		gamelight_t gamelight = GAMELIGHT_NONE;
 		vec3_t lightspot;
 		vec_t lightspot_radius = 0;
-		const bool studio = IsStudioModelName( model );
+		const bool studio = IsStudioModelName( model ) && GameDrawsModel( name );
 		if( studio )
 		{
 			gamelight = FindGameLightSpot( origin, lightspot, lightspot_radius );
@@ -441,6 +600,19 @@ void LoadStudioModels( void )
 	}
 
 	Log( "%i opaque studio models\n", num_models );
+	if( !g_missingmodels.empty() )
+	{
+		for( const auto &missing : g_missingmodels )
+		{
+			Warning( "LoadStudioModel: couldn't find %s (%i %s), it casts no shadow",
+				missing.first.c_str(), missing.second, missing.second == 1 ? "entity" : "entities" );
+		}
+		Log( "Models were looked for in:\n" );
+		for( const std::string &dir : g_modelpaths )
+			Log( "    %s\n", dir.c_str() );
+		if( !*g_moddir )
+			Log( "Use -moddir <game>/cstrike (or the mod's folder) to read them from the game\n" );
+	}
 	if( count_sky + count_texel + count_dark )
 	{
 		Log( "studio models lit in game: %i by the sun, %i by a lightmap texel, %i black\n", count_sky, count_texel, count_dark );

@@ -634,7 +634,8 @@ impl App {
                     "Carpeta del juego",
                     "La carpeta donde está hl.exe o cstrike.exe, por ejemplo la de \
                      Half-Life en Steam. El mapa se copia a la subcarpeta cstrike/maps de \
-                     esa carpeta. Vale para todos los proyectos.",
+                     esa carpeta, y RAD lee de ahí los .mdl para las sombras de los \
+                     modelos. Vale para todos los proyectos.",
                     None,
                     |ui| {
                         let ok = (!self.lib.game.dir.trim().is_empty())
@@ -1240,7 +1241,7 @@ impl App {
 
     fn start(&mut self) {
         self.opts.normalize_paths();
-        let plan = match CompilePlan::new(self.opts.clone()) {
+        let plan = match CompilePlan::new(self.opts.clone(), self.lib.game.mod_dir()) {
             Ok(plan) => plan,
             Err(errors) => {
                 self.status = errors
@@ -2604,7 +2605,7 @@ impl App {
             ui.checkbox(&mut self.show_command, "Mostrar");
             if self.show_command {
                 ui.add_space(4.0);
-                let mut text = CompilePlan::preview(&self.opts);
+                let mut text = CompilePlan::preview(&self.opts, self.lib.game.mod_dir().as_deref());
                 if text.is_empty() {
                     text = "(ninguna etapa seleccionada)".to_string();
                 }

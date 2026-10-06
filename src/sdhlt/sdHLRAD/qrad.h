@@ -708,5 +708,6 @@ extern uint64_t StudioModelFingerprint(void);
 extern bool g_studioshadow;
 extern bool g_studioshadowall;
 extern bool g_studiolightspot;
+extern char g_moddir[_MAX_PATH];
 
 #endif //HLRAD_H__
