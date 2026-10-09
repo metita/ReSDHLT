@@ -1,4 +1,6 @@
 #include "qrad.h"
+
+#define PROOF_UNSET -1                  // a group's state for a face, not looked at yet
 #include <algorithm>
 #include <vector>
 #ifdef _MSC_VER
@@ -38,6 +40,8 @@ static std::vector<std::vector<int> > s_leaffaces;           // faces with a pat
 // =====================================================================================
 static void     TestPatchToFace(const unsigned patchnum, const int facenum, const int head, const unsigned int bitpos
 								, byte *pvs
+								, const double (*groupbox)[3]             // the box around the patch's group, with proof
+								, signed char *proof                      // what is known of the group to this face
 								)
 {
     patch_t*        patch = &g_patches[patchnum];
@@ -100,7 +104,12 @@ static void     TestPatchToFace(const unsigned patchnum, const int facenum, cons
 					{
 						continue;
 					}
-                    if (TestLine(
+					// a proof for the whole group and face holds for rays
+					// between the patch origins, not the alternate ones
+					const bool exact = proof && origin1[0] == patch->origin[0] && origin1[1] == patch->origin[1] && origin1[2] == patch->origin[2]
+						&& origin2[0] == patch2->origin[0] && origin2[1] == patch2->origin[1] && origin2[2] == patch2->origin[2];
+					if (exact? BeamRayBlocked (origin1, origin2, proof, groupbox, 8, FacePatchBox (facenum), 8):
+						TestLine(
 						origin1, origin2
 						) != CONTENTS_EMPTY)
 					{
@@ -165,6 +174,9 @@ static void     BuildVisLeafs(int threadnum)
     unsigned        bitpos;
     unsigned        patchnum;
     std::vector<int> candidates;
+    std::vector<signed char> proofs;
+    std::vector<const patch_t*> group;
+    double          groupbox[8][3];
 
     while (1)
     {
@@ -214,9 +226,22 @@ static void     BuildVisLeafs(int threadnum)
         // actually have origins inside
         //
 		// (the patches of each leaf, listed once, in face then patch order)
-		for (const leafpatch_t& lp : s_leafpatches[i])
+		const std::vector<leafpatch_t>& leafpatches = s_leafpatches[i];
+		for (size_t lpi = 0; lpi < leafpatches.size(); lpi++)
 		{
+			const leafpatch_t& lp = leafpatches[lpi];
 			facenum = lp.facenum;
+			if (lpi == 0 || leafpatches[lpi - 1].facenum != facenum)
+			{
+				// a new group: this face's patches in this leaf
+				group.clear ();
+				for (size_t g = lpi; g < leafpatches.size() && leafpatches[g].facenum == facenum; g++)
+				{
+					group.push_back (&g_patches[leafpatches[g].patchnum]);
+				}
+				PatchGroupBox (group.data (), (int)group.size (), groupbox);
+				proofs.assign (candidates.size (), PROOF_UNSET);
+			}
 			patch = &g_patches[lp.patchnum];
 			(void)patch;
 			patchnum = lp.patchnum;
@@ -229,7 +254,12 @@ static void     BuildVisLeafs(int threadnum)
 			for (; target != candidates.end (); ++target)
 			{
 				facenum2 = *target;
-				TestPatchToFace (patchnum, facenum2, head, bitpos, pvs);
+				signed char& proof = proofs[target - candidates.begin ()];
+				if (proof == PROOF_UNSET)
+				{
+					proof = PatchGroupFaceState ((int)group.size (), facenum2);
+				}
+				TestPatchToFace (patchnum, facenum2, head, bitpos, pvs, groupbox, &proof);
 			}
 		}
 
@@ -283,7 +313,9 @@ static void     BuildVisMatrix()
         }
     }
 
+    BuildFacePatchBoxes();
     NamedRunThreadsOn(g_dmodels[0].visleafs, g_estimate, BuildVisLeafs);
+    FreeFacePatchBoxes();
     std::vector<std::vector<leafpatch_t> >().swap(s_leafpatches);
     std::vector<std::vector<int> >().swap(s_leaffaces);
 }

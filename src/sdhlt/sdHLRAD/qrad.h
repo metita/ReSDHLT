@@ -562,6 +562,26 @@ extern void		FreeFacelightDependencyList ();
 extern int      TestLine(const vec3_t start, const vec3_t stop
 						 , vec_t *skyhitout = NULL
 						 );
+extern bool     TestBeamClear(const double (*a)[3], int na, const double (*b)[3], int nb, int budget);
+extern void     BuildFacePatchBoxes();
+extern void     FreeFacePatchBoxes();
+extern void     PatchGroupBox(const patch_t* const* patches, int n, double box[8][3]);
+extern const double (*FacePatchBox(int facenum))[3];
+extern signed char PatchGroupFaceState(int groupsize, int facenum);
+// What is known about the rays between two sets of points (a block of samples
+// and a light, a group of patches and a face). The first ray needed is traced;
+// what it finds says which proof is worth trying - a clear ray, that all are
+// clear; a blocked one, that all are blocked - and the other is tried only if
+// a later ray disagrees.
+#define BEAM_UNTRIED    0
+#define BEAM_CLEAR      1               // every ray gets through
+#define BEAM_BLOCKED    2               // none does
+#define BEAM_NOTCLEAR   3               // "all clear" failed; "all blocked" not tried
+#define BEAM_NOTBLOCKED 4               // "all blocked" failed; "all clear" not tried
+#define BEAM_MIXED      5               // neither holds
+extern bool     BeamRayBlocked(const vec3_t start, const vec3_t stop, signed char* state,
+                               const double (*a)[3], int na, const double (*b)[3], int nb);
+extern bool     TestBeamBlocked(const double (*a)[3], int na, const double (*b)[3], int nb, const vec3_t probestart, const vec3_t probestop);
 #define OPAQUE_NODE_INLINECALL
 #ifdef OPAQUE_NODE_INLINECALL
 typedef struct

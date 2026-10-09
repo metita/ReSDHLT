@@ -739,3 +739,86 @@ void            DumpTransfersMemoryUsage()
 }
 
 
+
+// =====================================================================================
+//  Patch pairs proven visible in bulk
+//      BuildVisLeafs traces one ray per pair of patches. The patches of one face
+//      in one leaf all test the same target faces, so the rays from such a group
+//      to one target face run between two small boxes: around the group's
+//      origins and around the target face's. When TestBeamClear proves every
+//      segment between the boxes unoccluded, or every one of them blocked, no
+//      pair of them needs its ray (BeamRayBlocked). The per-pair tests around
+//      the ray (planes, PVS, opaque entities) still run.
+// =====================================================================================
+static std::vector<double> s_facepatchbox;              // 8 corners per face: its patch origins
+static std::vector<int> s_facepatchcount;
+
+static void     PatchOriginBox(const patch_t* const* patches, int n, double* box)
+{
+    double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
+    for (int i = 0; i < n; i++)
+    {
+        for (int k = 0; k < 3; k++)
+        {
+            lo[k] = qmin (lo[k], (double)patches[i]->origin[k]);
+            hi[k] = qmax (hi[k], (double)patches[i]->origin[k]);
+        }
+    }
+    for (int k = 0; k < 3; k++)
+    {
+        const double pad = 0.01 + 1e-6 * qmax (fabs (lo[k]), fabs (hi[k]));
+        lo[k] -= pad;
+        hi[k] += pad;
+    }
+    for (int c = 0; c < 8; c++)
+    {
+        box[c * 3 + 0] = (c & 1)? hi[0]: lo[0];
+        box[c * 3 + 1] = (c & 2)? hi[1]: lo[1];
+        box[c * 3 + 2] = (c & 4)? hi[2]: lo[2];
+    }
+}
+
+void            BuildFacePatchBoxes()
+{
+    s_facepatchbox.assign ((size_t)g_numfaces * 24, 0.0);
+    s_facepatchcount.assign (g_numfaces, 0);
+    std::vector<const patch_t*> list;
+    for (int facenum = 0; facenum < g_numfaces; facenum++)
+    {
+        list.clear ();
+        for (const patch_t* p = g_face_patches[facenum]; p; p = p->next)
+        {
+            list.push_back (p);
+        }
+        s_facepatchcount[facenum] = (int)list.size ();
+        if (!list.empty ())
+        {
+            PatchOriginBox (list.data (), (int)list.size (), &s_facepatchbox[(size_t)facenum * 24]);
+        }
+    }
+}
+
+void            FreeFacePatchBoxes()
+{
+    std::vector<double> ().swap (s_facepatchbox);
+    std::vector<int> ().swap (s_facepatchcount);
+}
+
+void            PatchGroupBox(const patch_t* const* patches, int n, double box[8][3])
+{
+    PatchOriginBox (patches, n, &box[0][0]);
+}
+
+// A proof costs about as much as a handful of rays; below this many pairs
+// between a group and a face it cannot pay for itself.
+#define PAIRBEAM_MINPAIRS 8
+
+signed char     PatchGroupFaceState(int groupsize, int facenum)
+{
+    return groupsize * s_facepatchcount[facenum] >= PAIRBEAM_MINPAIRS? BEAM_UNTRIED: BEAM_MIXED;
+}
+
+const double (*FacePatchBox(int facenum))[3]
+{
+    return (const double (*)[3])&s_facepatchbox[(size_t)facenum * 24];
+}

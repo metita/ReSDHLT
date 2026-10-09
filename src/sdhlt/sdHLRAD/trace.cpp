@@ -470,6 +470,402 @@ int             TestLine(const vec3_t start, const vec3_t stop
 		);
 }
 
+// =====================================================================================
+//  TestBeamClear
+//      Whether TestLine returns CONTENTS_EMPTY for every segment from a point
+//      of one convex set to a point of another, without tracing any of them.
+//      Each set is given by points whose hull it is: a box's corners, or a
+//      single point.
+//
+//      The segments are a + t (b - a), t from 0 to 1. TestLine_r splits a
+//      segment at each plane it crosses and walks each piece down its own side;
+//      the walk here does the same for the whole bundle, carrying the range of t
+//      the bundle can still be in. At a plane the distance of a + t (b - a) is
+//      (1 - t) d(a) + t d(b), so over the bundle it lies between
+//      (1 - t) min d(a) + t min d(b) and the same with the maxima: two lines,
+//      and the range a child needs is where the right one is on its side by
+//      more than the margin.
+//
+//      The margin is ON_EPSILON plus a little per unit of coordinate size.
+//      TestLine_r sends a piece to one side only when it clears ON_EPSILON/2,
+//      and its midpoints drift off the segment by float rounding; the rest of
+//      the margin covers that drift.
+//
+//      TestLine returns CONTENTS_EMPTY exactly when the leaves along the segment
+//      are neither solid nor sky and all of one contents. If every leaf the walk
+//      reaches is like that, each segment's leaves - a subset - are too. The
+//      test is symmetric, so which end a caller traces from does not matter.
+//
+//      false only means "not proven", and the caller traces as before. A walk
+//      that passes budget nodes gives up.
+// =====================================================================================
+struct beamset_t
+{
+    const double (*a)[3];
+    int na;
+    const double (*b)[3];
+    int nb;
+    double margin;
+};
+
+static bool     TestBeamClear_r(int node, const beamset_t& s, double t0, double t1, int& content, int& budget)
+{
+    while (1)
+    {
+        if (node < 0)
+        {
+            if (node == CONTENTS_SOLID || node == CONTENTS_SKY)
+            {
+                return false;
+            }
+            if (!content)
+            {
+                content = node;
+            }
+            return node == content;
+        }
+        if (--budget < 0)
+        {
+            return false;
+        }
+        const tnode_t* tnode = &tnodes[node];
+        double mina = 1e30, maxa = -1e30, minb = 1e30, maxb = -1e30;
+        if (tnode->type < plane_anyx)
+        {
+            const int axis = tnode->type;
+            for (int k = 0; k < s.na; k++)
+            {
+                const double d = s.a[k][axis] - tnode->dist;
+                mina = d < mina? d: mina;
+                maxa = d > maxa? d: maxa;
+            }
+            for (int k = 0; k < s.nb; k++)
+            {
+                const double d = s.b[k][axis] - tnode->dist;
+                minb = d < minb? d: minb;
+                maxb = d > maxb? d: maxb;
+            }
+        }
+        else
+        {
+            const double n[3] = {tnode->normal[0], tnode->normal[1], tnode->normal[2]};
+            for (int k = 0; k < s.na; k++)
+            {
+                const double d = s.a[k][0] * n[0] + s.a[k][1] * n[1] + s.a[k][2] * n[2] - tnode->dist;
+                mina = d < mina? d: mina;
+                maxa = d > maxa? d: maxa;
+            }
+            for (int k = 0; k < s.nb; k++)
+            {
+                const double d = s.b[k][0] * n[0] + s.b[k][1] * n[1] + s.b[k][2] * n[2] - tnode->dist;
+                minb = d < minb? d: minb;
+                maxb = d > maxb? d: maxb;
+            }
+        }
+        // front: where (1 - t) maxa + t maxb >= -margin
+        double flo = t0, fhi = t1;
+        {
+            const double g0 = maxa + s.margin, g1 = maxb + s.margin;            // wanted >= 0
+            const double ga = g0 + (g1 - g0) * t0, gb = g0 + (g1 - g0) * t1;
+            if (ga < 0 && gb < 0)
+            {
+                flo = 2;
+                fhi = -1;
+            }
+            else if (ga < 0)
+            {
+                flo = -g0 / (g1 - g0);                                     // rises through 0
+            }
+            else if (gb < 0)
+            {
+                fhi = -g0 / (g1 - g0);                                     // falls through 0
+            }
+        }
+        // back: where (1 - t) mina + t minb <= margin
+        double blo = t0, bhi = t1;
+        {
+            const double g0 = s.margin - mina, g1 = s.margin - minb;            // wanted >= 0
+            const double ga = g0 + (g1 - g0) * t0, gb = g0 + (g1 - g0) * t1;
+            if (ga < 0 && gb < 0)
+            {
+                blo = 2;
+                bhi = -1;
+            }
+            else if (ga < 0)
+            {
+                blo = -g0 / (g1 - g0);
+            }
+            else if (gb < 0)
+            {
+                bhi = -g0 / (g1 - g0);
+            }
+        }
+        const bool front = flo <= fhi;
+        const bool back = blo <= bhi;
+        if (front && back)
+        {
+            if (!TestBeamClear_r (tnode->children[0], s, flo, fhi, content, budget))
+            {
+                return false;
+            }
+            node = tnode->children[1];
+            t0 = blo;
+            t1 = bhi;
+        }
+        else if (front)
+        {
+            node = tnode->children[0];
+            t0 = flo;
+            t1 = fhi;
+        }
+        else if (back)
+        {
+            node = tnode->children[1];
+            t0 = blo;
+            t1 = bhi;
+        }
+        else
+        {
+            return true;                                                // cannot happen: every t is on some side
+        }
+    }
+}
+
+static double   BeamSize(const double (*p)[3], int n, double size)
+{
+    for (int k = 0; k < n; k++)
+    {
+        size = qmax (size, fabs (p[k][0]) + fabs (p[k][1]) + fabs (p[k][2]));
+    }
+    return size;
+}
+
+bool            TestBeamClear(const double (*a)[3], int na, const double (*b)[3], int nb, int budget)
+{
+    beamset_t s;
+    s.a = a;
+    s.na = na;
+    s.b = b;
+    s.nb = nb;
+    s.margin = ON_EPSILON + 4e-6 * BeamSize (b, nb, BeamSize (a, na, 0));
+    int content = 0;
+    return TestBeamClear_r (0, s, 0.0, 1.0, content, budget);
+}
+
+#define MAX_PROBE_DEPTH 256
+// =====================================================================================
+//  TestBeamBlocked
+//      The other half of the bundle test: whether TestLine returns something
+//      other than CONTENTS_EMPTY for every segment from a point of one set to a
+//      point of the other (each the hull of up to 8 points).
+//
+//      A segment that crosses the inside of a solid or sky leaf, by more than
+//      the margin from each of the leaf's planes, reaches that leaf in
+//      TestLine_r (each plane sends the piece of the segment beyond it to the
+//      leaf's side), and TestLine cannot return CONTENTS_EMPTY after a solid or
+//      sky leaf - nor before one, since anything it returns early is not
+//      CONTENTS_EMPTY either.
+//
+//      The leaf to try is the one that stopped a segment already known to be
+//      blocked: probe is that segment, walked again recording its path. If the
+//      segments between every corner of one set and every corner of the other
+//      cross that leaf's inside, every segment between the sets does. For a
+//      fixed end, the other ends whose segment crosses a convex cell form a
+//      convex set; so a corner of b reaches the cell from all of a, and then
+//      any point of a reaches it from all of b.
+// =====================================================================================
+static int      TestLineProbe_r(const int node, const vec3_t start, const vec3_t stop, int& linecontent,
+                                int* stack, int depth, int* out, int& outdepth)
+{
+    if (node < 0)
+    {
+        if (node == linecontent)
+            return CONTENTS_EMPTY;
+        if (node == CONTENTS_SOLID || node == CONTENTS_SKY)
+        {
+            memcpy (out, stack, depth * sizeof (int));
+            outdepth = depth;
+            return node;
+        }
+        if (linecontent)
+        {
+            outdepth = 0;                   // stopped by a change of contents, not by one leaf
+            return CONTENTS_SOLID;
+        }
+        linecontent = node;
+        return CONTENTS_EMPTY;
+    }
+    if (depth >= MAX_PROBE_DEPTH)
+    {
+        outdepth = 0;
+        return CONTENTS_SOLID;              // too deep to record: no proof, the caller traces
+    }
+    const tnode_t* tnode = &tnodes[node];
+    float front, back;
+    switch (tnode->type)
+    {
+    case plane_x:
+        front = start[0] - tnode->dist;
+        back = stop[0] - tnode->dist;
+        break;
+    case plane_y:
+        front = start[1] - tnode->dist;
+        back = stop[1] - tnode->dist;
+        break;
+    case plane_z:
+        front = start[2] - tnode->dist;
+        back = stop[2] - tnode->dist;
+        break;
+    default:
+        front = (start[0] * tnode->normal[0] + start[1] * tnode->normal[1] + start[2] * tnode->normal[2]) - tnode->dist;
+        back = (stop[0] * tnode->normal[0] + stop[1] * tnode->normal[1] + stop[2] * tnode->normal[2]) - tnode->dist;
+        break;
+    }
+    if (front > ON_EPSILON/2 && back > ON_EPSILON/2)
+    {
+        stack[depth] = node * 2;
+        return TestLineProbe_r (tnode->children[0], start, stop, linecontent, stack, depth + 1, out, outdepth);
+    }
+    if (front < -ON_EPSILON/2 && back < -ON_EPSILON/2)
+    {
+        stack[depth] = node * 2 + 1;
+        return TestLineProbe_r (tnode->children[1], start, stop, linecontent, stack, depth + 1, out, outdepth);
+    }
+    if (fabs(front) <= ON_EPSILON && fabs(back) <= ON_EPSILON)
+    {
+        stack[depth] = node * 2;
+        int r1 = TestLineProbe_r (tnode->children[0], start, stop, linecontent, stack, depth + 1, out, outdepth);
+        if (r1 == CONTENTS_SOLID)
+            return CONTENTS_SOLID;
+        stack[depth] = node * 2 + 1;
+        int r2 = TestLineProbe_r (tnode->children[1], start, stop, linecontent, stack, depth + 1, out, outdepth);
+        if (r2 == CONTENTS_SOLID)
+            return CONTENTS_SOLID;
+        if (r1 == CONTENTS_SKY || r2 == CONTENTS_SKY)
+            return CONTENTS_SKY;
+        return CONTENTS_EMPTY;
+    }
+    int side = (front - back) < 0;
+    float frac = front / (front - back);
+    if (frac < 0) frac = 0;
+    if (frac > 1) frac = 1;
+    vec3_t mid;
+    mid[0] = start[0] + (stop[0] - start[0]) * frac;
+    mid[1] = start[1] + (stop[1] - start[1]) * frac;
+    mid[2] = start[2] + (stop[2] - start[2]) * frac;
+    stack[depth] = node * 2 + side;
+    int r = TestLineProbe_r (tnode->children[side], start, mid, linecontent, stack, depth + 1, out, outdepth);
+    if (r != CONTENTS_EMPTY)
+        return r;
+    stack[depth] = node * 2 + !side;
+    return TestLineProbe_r (tnode->children[!side], mid, stop, linecontent, stack, depth + 1, out, outdepth);
+}
+
+bool            TestBeamBlocked(const double (*a)[3], int na, const double (*b)[3], int nb, const vec3_t probestart, const vec3_t probestop)
+{
+    int stack[MAX_PROBE_DEPTH];
+    int path[MAX_PROBE_DEPTH];
+    int pathlen = 0;
+    int linecontent = 0;
+    const int r = TestLineProbe_r (0, probestart, probestop, linecontent, stack, 0, path, pathlen);
+    if ((r != CONTENTS_SOLID && r != CONTENTS_SKY) || pathlen == 0)
+    {
+        return false;
+    }
+    double size = 0;
+    for (int k = 0; k < na; k++)
+    {
+        size = qmax (size, fabs (a[k][0]) + fabs (a[k][1]) + fabs (a[k][2]));
+    }
+    for (int k = 0; k < nb; k++)
+    {
+        size = qmax (size, fabs (b[k][0]) + fabs (b[k][1]) + fabs (b[k][2]));
+    }
+    const double margin = ON_EPSILON + 4e-6 * size;
+    // each corner's distance to each plane of the path, signed so that the
+    // leaf's side is positive and shrunk by the margin
+    double da[MAX_PROBE_DEPTH][8], db[MAX_PROBE_DEPTH][8];
+    if (na > 8 || nb > 8)
+    {
+        return false;
+    }
+    for (int i = 0; i < pathlen; i++)
+    {
+        const tnode_t* tnode = &tnodes[path[i] >> 1];
+        const double s = (path[i] & 1)? -1.0: 1.0;
+        for (int k = 0; k < na; k++)
+        {
+            da[i][k] = s * (a[k][0] * tnode->normal[0] + a[k][1] * tnode->normal[1] + a[k][2] * tnode->normal[2] - tnode->dist) - margin;
+        }
+        for (int k = 0; k < nb; k++)
+        {
+            db[i][k] = s * (b[k][0] * tnode->normal[0] + b[k][1] * tnode->normal[1] + b[k][2] * tnode->normal[2] - tnode->dist) - margin;
+        }
+    }
+    for (int ka = 0; ka < na; ka++)
+    {
+        for (int kb = 0; kb < nb; kb++)
+        {
+            // the part of this corner pair's segment inside the leaf, shrunk
+            // by the margin: where every g(t) = (1 - t) ga + t gb is positive
+            double t0 = 0, t1 = 1;
+            for (int i = 0; i < pathlen; i++)
+            {
+                const double ga = da[i][ka], gb = db[i][kb];
+                if (ga <= 0 && gb <= 0)
+                {
+                    return false;
+                }
+                if (ga <= 0)
+                {
+                    t0 = qmax (t0, ga / (ga - gb));                 // rises through 0
+                }
+                else if (gb <= 0)
+                {
+                    t1 = qmin (t1, ga / (ga - gb));                 // falls through 0
+                }
+                if (!(t0 < t1))
+                {
+                    return false;                                   // a strict inside, or nothing
+                }
+            }
+        }
+    }
+    return true;
+}
+
+// =====================================================================================
+//  BeamRayBlocked
+//      TestLine (start, stop) != CONTENTS_EMPTY for one ray of a set whose rays
+//      all run between the hulls a and b, using and updating what is known of
+//      the set (state, BEAM_*). The answer is the ray's own either way.
+// =====================================================================================
+#define BEAM_BUDGET 1024
+bool            BeamRayBlocked(const vec3_t start, const vec3_t stop, signed char* state,
+                               const double (*a)[3], int na, const double (*b)[3], int nb)
+{
+    if (*state == BEAM_CLEAR)
+    {
+        return false;
+    }
+    if (*state == BEAM_BLOCKED)
+    {
+        return true;
+    }
+    const bool blocked = TestLine (start, stop) != CONTENTS_EMPTY;
+    if (blocked && (*state == BEAM_UNTRIED || *state == BEAM_NOTCLEAR))
+    {
+        *state = TestBeamBlocked (a, na, b, nb, start, stop)? BEAM_BLOCKED:
+            *state == BEAM_UNTRIED? BEAM_NOTBLOCKED: BEAM_MIXED;
+    }
+    else if (!blocked && (*state == BEAM_UNTRIED || *state == BEAM_NOTBLOCKED))
+    {
+        *state = TestBeamClear (a, na, b, nb, BEAM_BUDGET)? BEAM_CLEAR:
+            *state == BEAM_UNTRIED? BEAM_NOTCLEAR: BEAM_MIXED;
+    }
+    return blocked;
+}
+
 
 typedef struct
 {

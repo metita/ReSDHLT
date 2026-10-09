@@ -2701,6 +2701,7 @@ struct gatherlights_t
     std::vector<byte>           pvs;        // the key: the PVS bytes the list was built from
     std::vector<directlight_t*> lights;     // leaf ascending, then each leaf's list order
     unsigned long long          lastuse;
+    unsigned long long          built;      // clock at the build: names this list, never repeats
     bool                        valid;
 };
 
@@ -2710,7 +2711,7 @@ struct gatherlights_t
 static thread_local gatherlights_t t_gatherlights[GATHERLIGHTS_CACHE];
 static thread_local unsigned long long t_gatherlights_clock;
 
-static const std::vector<directlight_t*>& GatherLightsForPVS(const byte* const pvs)
+static const std::vector<directlight_t*>& GatherLightsForPVS(const byte* const pvs, unsigned long long* built = NULL)
 {
     const int       visleafs = g_dmodels[0].visleafs;
     const size_t    bytes = (size_t)((visleafs + 7) >> 3);
@@ -2722,6 +2723,10 @@ static const std::vector<directlight_t*>& GatherLightsForPVS(const byte* const p
         if (e->valid && e->pvs.size() == bytes && !memcmp(e->pvs.data(), pvs, bytes))
         {
             e->lastuse = t_gatherlights_clock;
+            if (built)
+            {
+                *built = e->built;
+            }
             return e->lights;
         }
         if (!e->valid || e->lastuse < oldest->lastuse)
@@ -2744,8 +2749,212 @@ static const std::vector<directlight_t*>& GatherLightsForPVS(const byte* const p
     }
     oldest->valid = true;
     oldest->lastuse = t_gatherlights_clock;
+    oldest->built = t_gatherlights_clock;
+    if (built)
+    {
+        *built = oldest->built;
+    }
     return oldest->lights;
 }
+
+// =====================================================================================
+//  Lights a block of samples can receive
+//      A sample walks every light its PVS lists: hundreds on a big map, and most
+//      of them are dropped one by one - behind the sample's surface, or too far
+//      to add more than -lightskip. Neighbouring samples drop the same ones. A
+//      block of samples of one face (gathertile_t) drops them once, with bounds
+//      that hold for every sample in the block, so a light leaves the block's
+//      list only when each of its samples would have skipped it anyway. The
+//      list keeps the PVS list's order, so the sums do not change.
+//
+//      The block also remembers, per light, whether TestBeamClear proved the
+//      light unoccluded from the whole block; then none of its samples needs
+//      the shadow ray.
+//
+//      The bounds are taken wide on purpose: vec_t is float, and a bound that
+//      is too tight by a rounding error would drop a light a sample keeps.
+// =====================================================================================
+
+struct tilelight_t
+{
+    directlight_t*  l;
+    signed char     beam;                   // BEAM_*: the shadow rays from the block to l
+};
+
+struct gathertile_t
+{
+    double          corners[8][3];          // box around the samples, in world space
+    double          beamcorners[8][3];      // box around the samples that use the proof
+    bool            hasbeam;
+    double          axis[3][3];             // the box's axes: two along the face, its normal
+    double          lo[3], hi[3];           // the box, along those axes
+    double          nbar[3];                // mean phong normal of the samples
+    double          maxdev;                 // no sample normal is farther than this from nbar
+    int             step;
+    unsigned long long key;                 // the PVS list the lights were taken from
+    std::vector<tilelight_t> lights;
+};
+
+static double   TileDistance(const gathertile_t* tile, const double p[3])
+{
+    double d2 = 0;
+    for (int a = 0; a < 3; a++)
+    {
+        const double x = p[0] * tile->axis[a][0] + p[1] * tile->axis[a][1] + p[2] * tile->axis[a][2];
+        const double out = x < tile->lo[a]? tile->lo[a] - x: x > tile->hi[a]? x - tile->hi[a]: 0;
+        d2 += out * out;
+    }
+    return sqrt(d2);
+}
+
+// Whether every sample of the block would skip light l before its shadow ray.
+// lightingpower is the face texture's lighting cone power, 0 when the texture
+// has none (plain cosine).
+static bool     TileSkipsLight(const gathertile_t* tile, const directlight_t* l, double lightingpower, double lightingscale)
+{
+    if ((int)l->topatch != tile->step)
+    {
+        return true;
+    }
+    if (!(l->intensity[0] || l->intensity[1] || l->intensity[2]))
+    {
+        return true;
+    }
+    double origin[3] = {l->origin[0], l->origin[1], l->origin[2]};
+    if (l->type == emit_surface)
+    {
+        for (int k = 0; k < 3; k++)
+        {
+            origin[k] -= PATCH_HUNT_OFFSET * l->normal[k];
+        }
+    }
+    // delta = origin - sample, over the corners of the block's box. Its dot
+    // with the light's normal is linear, so the corners bound it; its dot with
+    // a sample's normal is bounded through the normals' mean and spread.
+    double mindotn = 1e30, maxdotnbar = -1e30, maxlen = 0, maxl1 = 0, maxabs = 0;
+    for (int c = 0; c < 8; c++)
+    {
+        double d[3];
+        for (int k = 0; k < 3; k++)
+        {
+            d[k] = origin[k] - tile->corners[c][k];
+        }
+        const double l1 = fabs(d[0]) + fabs(d[1]) + fabs(d[2]);
+        maxl1 = qmax(maxl1, l1);
+        maxlen = qmax(maxlen, sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]));
+        maxabs = qmax(maxabs, fabs(tile->corners[c][0]) + fabs(tile->corners[c][1]) + fabs(tile->corners[c][2]));
+        mindotn = qmin(mindotn, d[0] * l->normal[0] + d[1] * l->normal[1] + d[2] * l->normal[2]);
+        maxdotnbar = qmax(maxdotnbar, d[0] * tile->nbar[0] + d[1] * tile->nbar[1] + d[2] * tile->nbar[2]);
+    }
+    // slack for the float rounding of the sample's own arithmetic
+    const double slack = 0.001 + 1e-5 * (maxabs + fabs(origin[0]) + fabs(origin[1]) + fabs(origin[2]));
+    const double band = 0.01 + 1e-5 * maxl1 + slack;
+    // the most delta . normal can be at any sample of the block
+    const double maxdot = maxdotnbar + maxlen * tile->maxdev + slack;
+    // and the least delta . lightnormal (texlights and spots face along -normal)
+    const double mindot2 = mindotn - slack;
+    const double dist = qmax(1.0, TileDistance(tile, origin) - slack);
+    // A texlight's near path (below range, which is at most twice the
+    // emitter's because range_scale is clamped to 2) integrates the sight
+    // area instead, with no bound here.
+    const bool far = l->type != emit_surface || dist >= 2 * l->patch_emitter_range + 1;
+
+    // The side tests. Per sample: behind a texlight's plane, or a point or
+    // spot light behind the surface, against a band of 0.01 + 1e-5 * |delta|
+    // (L1); here against the widest band any corner gives.
+    if (l->type == emit_surface)
+    {
+        if (mindotn >= band)
+        {
+            return true;
+        }
+    }
+    else if (maxdot <= -band)
+    {
+        return true;
+    }
+    // dot = delta . normal / |delta|, at most maxdot / dist. Point, spot and a
+    // texlight's far path drop the sample when dot <= NORMAL_EPSILON.
+    if (far && maxdot <= 0.5 * NORMAL_EPSILON * dist)
+    {
+        return true;
+    }
+    const double cosmax = qmin(1.0, qmax(0.0, maxdot) / dist);
+    // dot2 = -delta . lightnormal / |delta|, for spots and texlights
+    const double cos2max = qmin(1.0, qmax(0.0, -mindot2) / dist);
+    if (l->type == emit_spotlight && cos2max <= l->stopdot2 - 1e-4)
+    {
+        return true;                        // outside the cone everywhere
+    }
+    if (l->type == emit_surface && far && l->stopdot > 0.0 && cos2max <= l->stopdot2 - 1e-4)
+    {
+        return true;                        // past the spot texlight's cone, out of range
+    }
+
+    // -lightskip: the most this light can add to any sample of the block.
+    // Point: dot / (dist^2 fade); spot: dot dot2 / (dist^2 fade), and less
+    // inside the penumbra; texlight, far: dot dot2 / dist^2, and less with a
+    // cone, and at most 0.4 / area. With a lighting cone the sample's dot
+    // becomes scale * dot^power, still increasing in dot.
+    if (g_lightskip <= 0 || !far || lightingpower < 0)
+    {
+        return false;
+    }
+    const double maxi = qmax(l->intensity[0], qmax(l->intensity[1], l->intensity[2]));
+    if (maxi <= 0)
+    {
+        return true;                        // adds nothing positive anywhere: skipped per sample too
+    }
+    const double dotfactor = lightingpower > 0? fabs(lightingscale) * pow(cosmax, lightingpower): cosmax;
+    double bound;
+    switch (l->type)
+    {
+    case emit_point:
+        if (!(l->fade > 0))
+        {
+            return false;
+        }
+        bound = maxi * dotfactor / (dist * dist * l->fade);
+        break;
+    case emit_spotlight:
+        if (!(l->fade > 0))
+        {
+            return false;
+        }
+        bound = maxi * dotfactor * cos2max / (dist * dist * l->fade);
+        break;
+    case emit_surface:
+        bound = maxi * dotfactor * cos2max / (dist * dist);
+        if (l->patch_area > 0)
+        {
+            bound = qmin(bound, maxi * 0.4 / l->patch_area);
+        }
+        break;
+    default:
+        return false;
+    }
+    return bound * 1.001 < g_lightskip;
+}
+
+// The block's list for the PVS list a sample brings: rebuilt only when that
+// changes, which inside one block is rare.
+static void     TileLightsFor(gathertile_t* tile, const std::vector<directlight_t*>& pvslights, unsigned long long key, double lightingpower, double lightingscale)
+{
+    if (tile->key == key)
+    {
+        return;
+    }
+    tile->key = key;
+    tile->lights.clear();
+    for (directlight_t* l : pvslights)
+    {
+        if (l->type == emit_skylight || !TileSkipsLight(tile, l, lightingpower, lightingscale))
+        {
+            tile->lights.push_back({l, BEAM_UNTRIED});
+        }
+    }
+}
+
 
 static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const vec3_t normal, vec3_t* sample
 								  , byte* styles
@@ -2753,6 +2962,8 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 								  , int miptex
 								  , int texlightgap_surfacenum
 								  , vec3_t* emitteroccl = NULL // -ao: texlight light AO must not darken, per style slot
+								  , gathertile_t* tile = NULL // the block of samples pos belongs to, if any
+								  , bool tilebeam = false // pos is inside the block's proof box
 								  )
 {
     PROF_SCOPE(PROF_GATHERSAMPLELIGHT);
@@ -2816,12 +3027,29 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 		PCFPlaneForFace (texlightgap_surfacenum, &pcfplane);
 	}
 
+	// The block's lights only make sense for its own samples, and the shadow
+	// rays it saves are TestLine's, which PCF does not use.
+	if (pcf)
+	{
+		tile = NULL;
+	}
+	unsigned long long pvslistkey;
+	const std::vector<directlight_t*>& pvslights = GatherLightsForPVS (pvs, &pvslistkey);
+	if (tile)
+	{
+		// 0: plain cosine; -1: a cone the bound cannot follow
+		const double tilepower = !lighting_diversify? 0.0: lighting_power > 0? (double)lighting_power: -1.0;
+		TileLightsFor (tile, pvslights, pvslistkey, tilepower, lighting_scale);
+	}
+	const size_t numgather = tile? tile->lights.size (): pvslights.size ();
+
     {
         {
             {
-                for (directlight_t* const gl : GatherLightsForPVS (pvs))
+                for (size_t gi = 0; gi < numgather; gi++)
                 {
-                    l = gl;
+                    tilelight_t* const tl = tile? &tile->lights[gi]: NULL;
+                    l = tile? tl->l: pvslights[gi];
                     // skylights work fundamentally differently than normal lights
                     if (l->type == emit_skylight)
                     {
@@ -3250,11 +3478,27 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 								continue;
 							}
 						}
-						else if (TestLine (pos, 
-							testline_origin
-							) != CONTENTS_EMPTY)
+						else
 						{
-							continue;
+							// The block's proofs are for rays to the light's own
+							// origin; the near path of a texlight aims elsewhere.
+							const bool beam = tl && tilebeam && testline_origin[0] == l->origin[0] && testline_origin[1] == l->origin[1] && testline_origin[2] == l->origin[2];
+							bool blocked;
+							if (beam)
+							{
+								const double apex[1][3] = {{l->origin[0], l->origin[1], l->origin[2]}};
+								blocked = BeamRayBlocked (pos, testline_origin, &tl->beam, tile->beamcorners, 8, apex, 1);
+							}
+							else
+							{
+								blocked = TestLine (pos,
+									testline_origin
+									) != CONTENTS_EMPTY;
+							}
+							if (blocked)
+							{
+								continue;
+							}
 						}
 						vec3_t transparency;
 						int opaquestyle;
@@ -3761,6 +4005,182 @@ static void ApplyAmbientOcclusion (const vec3_t spot, const vec3_t pointnormal, 
 	}
 }
 
+// What CalcLightmap works out for one lmcache point before it gathers light:
+// the preparation is done for the whole face first, so that the samples can be
+// grouped into blocks (gathertile_t) before any of them gathers.
+typedef struct
+{
+	vec3_t			spot;
+	vec3_t			pointnormal;
+	vec3_t			spot2;
+	vec3_t			pointnormal2;
+	int				surface;
+	int				visofs;
+	int				visofs2;
+	bool			blocked;
+	bool			nudged;
+	bool			beam;                       // lies on the face itself, unmoved: inside the proof box
+}
+lmsample_t;
+
+static thread_local std::vector<lmsample_t> t_lmsamples;
+static thread_local std::vector<gathertile_t> t_gathertiles;
+
+// Side of a block, in lmcache points. With -extra that is 8/3 luxels: small
+// enough that a block's box stays close to its samples, big enough that one
+// proof or one light list serves dozens of them.
+#define GATHERTILE_SIDE 8
+
+// Fills t_gathertiles with the blocks of a face: a box around each block's
+// samples, on the axes of the face plane, and the spread of their normals.
+static void BuildGatherTiles (const lightinfo_t *l, const std::vector<lmsample_t> &prep, int step)
+{
+	const int w = l->lmcachewidth;
+	const int h = l->lmcacheheight;
+	const int tw = (w + GATHERTILE_SIDE - 1) / GATHERTILE_SIDE;
+	const int th = (h + GATHERTILE_SIDE - 1) / GATHERTILE_SIDE;
+	std::vector<gathertile_t> &tiles = t_gathertiles;
+	if ((int)tiles.size () < tw * th)
+	{
+		tiles.resize (tw * th);
+	}
+
+	// a frame on the face plane: n, and two directions along it
+	double axis[3][3];
+	{
+		const double n[3] = {l->facenormal[0], l->facenormal[1], l->facenormal[2]};
+		double u[3];
+		if (fabs (n[0]) < 0.6)
+		{
+			u[0] = 0; u[1] = n[2]; u[2] = -n[1];       // n x (1,0,0)
+		}
+		else
+		{
+			u[0] = -n[2]; u[1] = 0; u[2] = n[0];       // n x (0,1,0)
+		}
+		const double ul = sqrt (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+		for (int k = 0; k < 3; k++)
+		{
+			u[k] /= ul;
+		}
+		const double v[3] = {n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2], n[0] * u[1] - n[1] * u[0]};
+		for (int k = 0; k < 3; k++)
+		{
+			axis[0][k] = u[k];
+			axis[1][k] = v[k];
+			axis[2][k] = n[k];
+		}
+	}
+
+	for (int ty = 0; ty < th; ty++)
+	{
+		for (int tx = 0; tx < tw; tx++)
+		{
+			gathertile_t &tile = tiles[tx + ty * tw];
+			memcpy (tile.axis, axis, sizeof (axis));
+			tile.step = step;
+			tile.key = 0;
+			tile.lights.clear ();
+			double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
+			double blo[3] = {1e30, 1e30, 1e30}, bhi[3] = {-1e30, -1e30, -1e30};
+			double nsum[3] = {0, 0, 0};
+			int count = 0;
+			int beamcount = 0;
+			for (int y = ty * GATHERTILE_SIDE; y < qmin (h, (ty + 1) * GATHERTILE_SIDE); y++)
+			{
+				for (int x = tx * GATHERTILE_SIDE; x < qmin (w, (tx + 1) * GATHERTILE_SIDE); x++)
+				{
+					const lmsample_t &p = prep[x + y * w];
+					if (p.blocked)
+					{
+						continue;
+					}
+					for (int a = 0; a < 3; a++)
+					{
+						const double d = p.spot[0] * axis[a][0] + p.spot[1] * axis[a][1] + p.spot[2] * axis[a][2];
+						lo[a] = qmin (lo[a], d);
+						hi[a] = qmax (hi[a], d);
+						if (p.beam)
+						{
+							blo[a] = qmin (blo[a], d);
+							bhi[a] = qmax (bhi[a], d);
+						}
+					}
+					beamcount += p.beam? 1: 0;
+					for (int k = 0; k < 3; k++)
+					{
+						nsum[k] += p.pointnormal[k];
+					}
+					count++;
+				}
+			}
+			if (!count)
+			{
+				continue;                           // nobody in this block gathers
+			}
+			double nl = sqrt (nsum[0] * nsum[0] + nsum[1] * nsum[1] + nsum[2] * nsum[2]);
+			if (nl < 1e-6)
+			{
+				nsum[0] = axis[2][0]; nsum[1] = axis[2][1]; nsum[2] = axis[2][2];
+				nl = 1;
+			}
+			for (int k = 0; k < 3; k++)
+			{
+				tile.nbar[k] = nsum[k] / nl;
+			}
+			tile.maxdev = 0;
+			for (int y = ty * GATHERTILE_SIDE; y < qmin (h, (ty + 1) * GATHERTILE_SIDE); y++)
+			{
+				for (int x = tx * GATHERTILE_SIDE; x < qmin (w, (tx + 1) * GATHERTILE_SIDE); x++)
+				{
+					const lmsample_t &p = prep[x + y * w];
+					if (p.blocked)
+					{
+						continue;
+					}
+					double dev = 0;
+					for (int k = 0; k < 3; k++)
+					{
+						const double e = p.pointnormal[k] - tile.nbar[k];
+						dev += e * e;
+					}
+					tile.maxdev = qmax (tile.maxdev, sqrt (dev));
+				}
+			}
+			// a hair of slack on the box; the normals already carry theirs in the bounds
+			for (int a = 0; a < 3; a++)
+			{
+				const double pad = 0.01 + 1e-6 * qmax (fabs (lo[a]), fabs (hi[a]));
+				tile.lo[a] = lo[a] - pad;
+				tile.hi[a] = hi[a] + pad;
+			}
+			for (int c = 0; c < 8; c++)
+			{
+				const double e[3] = {(c & 1)? tile.hi[0]: tile.lo[0], (c & 2)? tile.hi[1]: tile.lo[1], (c & 4)? tile.hi[2]: tile.lo[2]};
+				for (int k = 0; k < 3; k++)
+				{
+					tile.corners[c][k] = e[0] * axis[0][k] + e[1] * axis[1][k] + e[2] * axis[2][k];
+				}
+			}
+			tile.hasbeam = beamcount > 0;
+			for (int a = 0; a < 3 && tile.hasbeam; a++)
+			{
+				const double pad = 0.01 + 1e-6 * qmax (fabs (blo[a]), fabs (bhi[a]));
+				blo[a] -= pad;
+				bhi[a] += pad;
+			}
+			for (int c = 0; c < 8 && tile.hasbeam; c++)
+			{
+				const double e[3] = {(c & 1)? bhi[0]: blo[0], (c & 2)? bhi[1]: blo[1], (c & 4)? bhi[2]: blo[2]};
+				for (int k = 0; k < 3; k++)
+				{
+					tile.beamcorners[c][k] = e[0] * axis[0][k] + e[1] * axis[1][k] + e[2] * axis[2][k];
+				}
+			}
+		}
+	}
+}
+
 void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflags)
 {
 	int facenum;
@@ -3769,42 +4189,30 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 	int lastoffset = -2;   // -2 = nothing decompressed yet
 	byte pvs2[(MAX_MAP_LEAFS + 7) / 8];
 	int lastoffset2 = -2;
+	const int numpoints = l->lmcachewidth * l->lmcacheheight;
 
 	facenum = l->surfnum;
-	memset (l->lmcache, 0, l->lmcachewidth * l->lmcacheheight * sizeof (vec3_t [ALLSTYLES]));
+	memset (l->lmcache, 0, numpoints * sizeof (vec3_t [ALLSTYLES]));
 
-	// for each sample whose light we need to calculate
-	for (i = 0; i < l->lmcachewidth * l->lmcacheheight; i++)
+	std::vector<lmsample_t> &prep = t_lmsamples;
+	if (pass != LM_APPLY)
+	{
+		prep.resize (numpoints);
+	}
+
+	// for each sample whose light we need to calculate: where it is, its
+	// normal and its leaf
+	for (i = 0; pass != LM_APPLY && i < numpoints; i++)
 	{
 		vec_t s, t;
 		vec_t s_vec, t_vec;
 		int nearest_s, nearest_t;
-		vec3_t spot;
 		vec_t square[2][2];  // the max possible range in which this sample point affects the lighting on a face
 		vec3_t surfpt; // the point on the surface (with no HUNT_OFFSET applied), used for getting phong normal and doing patch interpolation
-		int surface;
-		vec3_t pointnormal;
-		bool blocked;
-		vec3_t spot2;
-		vec3_t pointnormal2;
-		vec3_t *sampled;
-		vec3_t *normal_out;
-		bool nudged;
-		int *wallflags_out;
-
-		sampled = l->lmcache[i];
-		normal_out = &l->lmcache_normal[i];
-		wallflags_out = &l->lmcache_wallflags[i];
-		if (pass == LM_APPLY)
-		{
-			// the two things the tail below needs that it cannot recompute
-			// without redoing the whole preparation
-			blocked = (lmflags[i] & 1) != 0;
-			nudged = (lmflags[i] & 2) != 0;
-		}
+		lmsample_t &p = prep[i];
+		int *wallflags_out = &l->lmcache_wallflags[i];
 
 		// prepare input parameter and output parameter
-		if (pass != LM_APPLY)
 		{
 			s = ((i % l->lmcachewidth) - l->lmcache_offset) / (vec_t)l->lmcache_density;
 			t = ((i / l->lmcachewidth) - l->lmcache_offset) / (vec_t)l->lmcache_density;
@@ -3812,9 +4220,6 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 			t_vec = l->texmins[1] * TEXTURE_STEP + t * TEXTURE_STEP;
 			nearest_s = qmax (0, qmin ((int)floor (s + 0.5), l->texsize[0]));
 			nearest_t = qmax (0, qmin ((int)floor (t + 0.5), l->texsize[1]));
-			sampled = l->lmcache[i];
-			normal_out = &l->lmcache_normal[i];
-			wallflags_out = &l->lmcache_wallflags[i];
 //
 // The following graph illustrates the range in which a sample point can affect the lighting of a face when g_blur = 1.5 and g_extra = on
 //              X : the sample point. They are placed on every TEXTURE_STEP/lmcache_density (=16.0/3) texture pixels. We calculate light for each sample point, which is the main time sink.
@@ -3858,13 +4263,12 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 			square[1][1] = l->texmins[1] * TEXTURE_STEP + floor (t + (l->lmcache_side + 0.5) / (vec_t)l->lmcache_density) * TEXTURE_STEP + TEXTURE_STEP;
 		}
 		// find world's position for the sample
-		if (pass != LM_APPLY)
 		{
 			{
-				blocked = false;
+				p.blocked = false;
 				if (SetSampleFromST (
-									surfpt, spot, &surface,
-									&nudged,
+									surfpt, p.spot, &p.surface,
+									&p.nudged,
 									l, s_vec, t_vec,
 									square,
 									g_face_lightmode[facenum]) == LightOutside)
@@ -3872,54 +4276,101 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 					j = nearest_s + (l->texsize[0] + 1) * nearest_t;
 					if (l->surfpt_lightoutside[j])
 					{
-						blocked = true;
+						p.blocked = true;
 					}
 					else
 					{
 						// the area this light sample has effect on is completely covered by solid, so take whatever valid position.
 						VectorCopy (l->surfpt[j], surfpt);
-						VectorCopy (l->surfpt_position[j], spot);
-						surface = l->surfpt_surface[j];
+						VectorCopy (l->surfpt_position[j], p.spot);
+						p.surface = l->surfpt_surface[j];
 					}
 				}
 			}
 			if (l->translucent_b)
 			{
-				const dplane_t *surfaceplane = getPlaneFromFaceNumber (surface);
-				Winding *surfacewinding = new Winding (g_dfaces[surface]);
-				
-				VectorCopy (spot, spot2);
+				const dplane_t *surfaceplane = getPlaneFromFaceNumber (p.surface);
+				Winding *surfacewinding = new Winding (g_dfaces[p.surface]);
+
+				VectorCopy (p.spot, p.spot2);
 				for (int x = 0; x < surfacewinding->m_NumPoints; x++)
 				{
-					VectorAdd (surfacewinding->m_Points[x], g_face_offset[surface], surfacewinding->m_Points[x]);
+					VectorAdd (surfacewinding->m_Points[x], g_face_offset[p.surface], surfacewinding->m_Points[x]);
 				}
-				if (!point_in_winding_noedge (*surfacewinding, *surfaceplane, spot2, 0.2))
+				if (!point_in_winding_noedge (*surfacewinding, *surfaceplane, p.spot2, 0.2))
 				{
-					snap_to_winding_noedge (*surfacewinding, *surfaceplane, spot2, 0.2, 4 * 0.2);
+					snap_to_winding_noedge (*surfacewinding, *surfaceplane, p.spot2, 0.2, 4 * 0.2);
 				}
-				VectorMA (spot2, -(g_translucentdepth + 2 * DEFAULT_HUNT_OFFSET), surfaceplane->normal, spot2);
+				VectorMA (p.spot2, -(g_translucentdepth + 2 * DEFAULT_HUNT_OFFSET), surfaceplane->normal, p.spot2);
 
 				delete surfacewinding;
 			}
 			*wallflags_out = WALLFLAG_NONE;
-			if (blocked)
+			if (p.blocked)
 			{
 				*wallflags_out |= (WALLFLAG_BLOCKED | WALLFLAG_NUDGED);
 			}
-			if (nudged)
+			if (p.nudged)
 			{
 				*wallflags_out |= WALLFLAG_NUDGED;
 			}
 		}
 		// calculate normal for the sample
-		if (pass != LM_APPLY)
 		{
-			GetPhongNormal (surface, surfpt, pointnormal);
+			GetPhongNormal (p.surface, surfpt, p.pointnormal);
 			if (l->translucent_b)
 			{
-				VectorSubtract (vec3_origin, pointnormal, pointnormal2);
+				VectorSubtract (vec3_origin, p.pointnormal, p.pointnormal2);
 			}
-			VectorCopy (pointnormal, *normal_out);
+			VectorCopy (p.pointnormal, l->lmcache_normal[i]);
+		}
+		// the leaf whose PVS the sample gathers with
+		if (g_visdatasize)
+		{
+			p.visofs = PointInLeaf (p.spot)->visofs;
+			if (l->translucent_b)
+			{
+				p.visofs2 = PointInLeaf (p.spot2)->visofs;
+			}
+		}
+		if (lmflags)
+		{
+			lmflags[i] = (unsigned char)((p.blocked? 1: 0) | (p.nudged? 2: 0));
+		}
+		// Samples of the blur margin land on neighbouring faces, often hard
+		// against a wall; one of them in a block's proof box would make every
+		// proof of the block touch solid. They keep their own shadow rays.
+		p.beam = !p.blocked;
+	}
+
+	// The blocks are for the CPU gather alone: the GPU collect records each
+	// call as it comes, and the apply pass gathers nothing.
+	const bool tiled = pass == LM_NORMAL && g_gpu_phase != 1;
+	const int tilesw = (l->lmcachewidth + GATHERTILE_SIDE - 1) / GATHERTILE_SIDE;
+	if (tiled)
+	{
+		BuildGatherTiles (l, prep, 0);
+	}
+
+	// then the gather, in the same order as ever
+	for (i = 0; i < numpoints; i++)
+	{
+		vec3_t *sampled = l->lmcache[i];
+		bool blocked;
+		bool nudged;
+		lmsample_t *p = pass != LM_APPLY? &prep[i]: NULL;
+
+		if (pass == LM_APPLY)
+		{
+			// the two things the tail below needs that it cannot recompute
+			// without redoing the whole preparation
+			blocked = (lmflags[i] & 1) != 0;
+			nudged = (lmflags[i] & 2) != 0;
+		}
+		else
+		{
+			blocked = p->blocked;
+			nudged = p->nudged;
 		}
 		// calculate visibility for the sample
 		if (pass != LM_APPLY)
@@ -3933,8 +4384,7 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 			}
 			else
 			{
-				dleaf_t *leaf = PointInLeaf(spot);
-				int thisoffset = leaf->visofs;
+				int thisoffset = p->visofs;
 				if (i == 0 || thisoffset != lastoffset)
 				{
 					if (thisoffset == -1)
@@ -3943,7 +4393,7 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 					}
 					else
 					{
-						DecompressVis(&g_dvisdata[leaf->visofs], pvs, (MAX_MAP_LEAFS + 7) / 8);
+						DecompressVis(&g_dvisdata[thisoffset], pvs, (MAX_MAP_LEAFS + 7) / 8);
 					}
 				}
 				lastoffset = thisoffset;
@@ -3959,8 +4409,7 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 				}
 				else
 				{
-					dleaf_t *leaf2 = PointInLeaf(spot2);
-					int thisoffset2 = leaf2->visofs;
+					int thisoffset2 = p->visofs2;
 					if (i == 0 || thisoffset2 != lastoffset2)
 					{
 						if (thisoffset2 == -1)
@@ -3969,15 +4418,11 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 						}
 						else
 						{
-							DecompressVis(&g_dvisdata[leaf2->visofs], pvs2, (MAX_MAP_LEAFS + 7) / 8);
+							DecompressVis(&g_dvisdata[thisoffset2], pvs2, (MAX_MAP_LEAFS + 7) / 8);
 						}
 					}
 					lastoffset2 = thisoffset2;
 				}
-			}
-			if (lmflags)
-			{
-				lmflags[i] = (unsigned char)((blocked? 1: 0) | (nudged? 2: 0));
 			}
 		}
 		// gather light
@@ -3992,6 +4437,7 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 			const bool ao = g_ao_enable && pass == LM_NORMAL && !g_face_ao_skip[facenum];
 			const bool aoexempt = ao && !g_ao_all;
 			vec3_t emitterlight[ALLSTYLES];
+			gathertile_t *tile = tiled? &t_gathertiles[(i % l->lmcachewidth) / GATHERTILE_SIDE + (i / l->lmcachewidth) / GATHERTILE_SIDE * tilesw]: NULL;
 			if (ao)
 			{
 				memset (emitterlight, 0, sizeof (emitterlight));
@@ -4004,12 +4450,14 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 				}
 				else
 				{
-				GatherSampleLight(spot, pvs, pointnormal, sampled
+				GatherSampleLight(p->spot, pvs, p->pointnormal, sampled
 					, styles
 					, 0
 					, l->miptex
-					, surface
+					, p->surface
 					, aoexempt? emitterlight: NULL
+					, tile
+					, tile && tile->hasbeam && p->beam
 					);
 				}
 			}
@@ -4030,11 +4478,11 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 					}
 					else
 					{
-					GatherSampleLight(spot2, pvs2, pointnormal2, sampled2
+					GatherSampleLight(p->spot2, pvs2, p->pointnormal2, sampled2
 						, styles
 						, 0
 						, l->miptex
-						, surface
+						, p->surface
 						, aoexempt? emitterlight2: NULL
 						);
 					}
@@ -4053,11 +4501,11 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 			}
 			if (ao && g_ao_all)
 			{
-				l->lmcache_ao[i] = blocked? 0: AmbientOcclusionAlpha (spot, pointnormal);
+				l->lmcache_ao[i] = blocked? 0: AmbientOcclusionAlpha (p->spot, p->pointnormal);
 			}
 			else if (ao && !blocked)
 			{
-				ApplyAmbientOcclusion (spot, pointnormal, sampled, emitterlight, styles);
+				ApplyAmbientOcclusion (p->spot, p->pointnormal, sampled, emitterlight, styles);
 			}
 			if (g_drawnudge)
 			{

@@ -1,4 +1,6 @@
 #include "qrad.h"
+
+#define PROOF_UNSET -1                  // a group's state for a face, not looked at yet
 #include "profiling.h"
 #include "gpu_gather.h"
 
@@ -196,6 +198,8 @@ static void     TestPatchToFace(const unsigned patchnum, const int facenum, cons
 								, uint32_t* visible_generation
 								, uint32_t generation
 								, std::vector<unsigned>& visible_patches
+								, const double (*groupbox)[3]             // the box around the patch's group, with proof
+								, signed char *proof                      // what is known of the group to this face
 								)
 {
     (void)head;
@@ -259,7 +263,12 @@ static void     TestPatchToFace(const unsigned patchnum, const int facenum, cons
 					{
 						continue;
 					}
-                    if (TestLine(
+					// a proof for the whole group and face holds for rays
+					// between the patch origins, not the alternate ones
+					const bool exact = proof && origin1[0] == patch->origin[0] && origin1[1] == patch->origin[1] && origin1[2] == patch->origin[2]
+						&& origin2[0] == patch2->origin[0] && origin2[1] == patch2->origin[1] && origin2[2] == patch2->origin[2];
+					if (exact? BeamRayBlocked (origin1, origin2, proof, groupbox, 8, FacePatchBox (facenum), 8):
+						TestLine(
 						origin1, origin2
 						) != CONTENTS_EMPTY)
 					{
@@ -316,6 +325,9 @@ static void     BuildVisLeafs(int threadnum)
 	std::vector<uint32_t> visible_generation(g_num_patches, 0);
 	std::vector<unsigned> visible_patches;
 	std::vector<int> candidate_faces;
+	std::vector<signed char> proofs;
+	std::vector<const patch_t*> group;
+	double groupbox[8][3];
 	uint32_t generation = 0;
 	uint64_t local_source_patches = 0;
 	uint64_t local_candidate_faces = 0;
@@ -369,6 +381,17 @@ static void     BuildVisLeafs(int threadnum)
 		{
 			const unsigned patchnum = source_patches[source];
 			const int source_face = g_patches[patchnum].faceNumber;
+			if (source == 0 || g_patches[source_patches[source - 1]].faceNumber != source_face)
+			{
+				// a new group: the run of this face's patches in this leaf
+				group.clear ();
+				for (size_t g = source; g < source_patches.size () && g_patches[source_patches[g]].faceNumber == source_face; g++)
+				{
+					group.push_back (&g_patches[source_patches[g]]);
+				}
+				PatchGroupBox (group.data (), (int)group.size (), groupbox);
+				proofs.assign (candidate_faces.size (), PROOF_UNSET);
+			}
 			if (++generation == 0)
 			{
 				std::fill(visible_generation.begin(), visible_generation.end(), 0);
@@ -381,8 +404,14 @@ static void     BuildVisLeafs(int threadnum)
 			local_candidate_faces += candidate_faces.end() - target;
 			for (; target != candidate_faces.end(); ++target)
 			{
+				signed char& proof = proofs[target - candidate_faces.begin()];
+				if (proof == PROOF_UNSET)
+				{
+					proof = PatchGroupFaceState((int)group.size(), *target);
+				}
 				TestPatchToFace(patchnum, *target, head, pvs,
-				                visible_generation.data(), generation, visible_patches);
+				                visible_generation.data(), generation, visible_patches,
+				                groupbox, &proof);
 			}
 			local_visible_pairs += SetVisColumn((int)patchnum, visible_patches);
 		}
@@ -433,7 +462,9 @@ static void     BuildVisMatrix()
 	s_sparse_candidate_faces.store(0, std::memory_order_relaxed);
 	s_sparse_visible_pairs.store(0, std::memory_order_relaxed);
 	const double started = I_FloatTime();
+    BuildFacePatchBoxes();
     NamedRunThreadsOn(g_dmodels[0].visleafs, g_estimate, BuildVisLeafs);
+    FreeFacePatchBoxes();
 	Log("Sparse visibility: %llu source patches, %.2fM candidate faces, %.2fM visible pairs (%.2f seconds)\n",
 		(unsigned long long)s_sparse_source_patches.load(std::memory_order_relaxed),
 		s_sparse_candidate_faces.load(std::memory_order_relaxed) / 1000000.0,
