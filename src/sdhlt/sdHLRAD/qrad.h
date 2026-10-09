@@ -698,10 +698,28 @@ extern void InterpolateSampleLight (const vec3_t position, int surface, int nums
 extern void FreeTriangulations ();
 
 // mathutil.c
-extern bool     TestSegmentAgainstOpaqueList(const vec_t* p1, const vec_t* p2
+extern bool     TestSegmentAgainstOpaqueListFull(const vec_t* p1, const vec_t* p2
 					, vec3_t &scaleout
 					, int &opaquestyleout
 					);
+extern int      num_models;                                // studio.cpp: models that cast shadows
+// Called for every shadow ray that reaches its light - over a hundred million
+// times on a big map - and on most maps there is nothing it could hit: no
+// opaque entity and no shadow-casting model. Then the answer is known without
+// the call.
+inline bool     TestSegmentAgainstOpaqueList(const vec_t* p1, const vec_t* p2
+					, vec3_t &scaleout
+					, int &opaquestyleout
+					)
+{
+	if (g_opaque_face_count == 0 && num_models == 0)
+	{
+		VectorFill (scaleout, 1.0);
+		opaquestyleout = -1;
+		return false;
+	}
+	return TestSegmentAgainstOpaqueListFull (p1, p2, scaleout, opaquestyleout);
+}
 extern bool     intersect_line_plane(const dplane_t* const plane, const vec_t* const p1, const vec_t* const p2, vec3_t point);
 extern bool     intersect_linesegment_plane(const dplane_t* const plane, const vec_t* const p1, const vec_t* const p2,vec3_t point);
 extern void     plane_from_points(const vec3_t p1, const vec3_t p2, const vec3_t p3, dplane_t* plane);

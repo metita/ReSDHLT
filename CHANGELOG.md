@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- RAD: samples gather light in blocks of 8x8 lightmap-cache points. A block
+  drops, once, every light that each of its samples would have dropped one by
+  one: behind the light's plane or the surface, outside a spot cone, or under
+  `-lightskip` with the distance and both cosines bounded over the block. The
+  list keeps the PVS order, so the sums are the same. On fp_squidgame_thno the
+  light loop went from 1,469 million iterations to 190 million.
+- RAD: shadow rays are proven in bundles. The first ray of a block toward a
+  light is traced; if it gets through, the whole bundle from the block's box to
+  the light is walked down the BSP, clipping it at every plane the way
+  TestLine splits a ray, and when it only meets leaves of one contents no
+  sample of the block traces that ray. If it is blocked, the leaf that stopped
+  it is tested against the bundle's corners: when all of them cross it, so does
+  every ray. On fp_squidgame_thno 25 million of 168 million rays are still
+  traced, on ze_sanctorum 34 of 99 million.
+- RAD: BuildVisLeafs proves patch pairs the same way, between the patches of
+  one face in one leaf and a target face, when there are at least 8 pairs to
+  save.
+- RAD: with `-vismatrix auto` and the GPU, maps under 32,768 patches keep the
+  plain matrix on the CPU. The GPU transfer factors only beat it on the largest
+  maps; on fp_squidgame_thno they took 3.5 s against 1.2 s, on guard 2.1 s
+  against 0.6 s. The GPU still gathers the direct light, and the result is now
+  the CPU's to within a few bytes of ±1.
+
+The `.bsp` RAD writes on the CPU is byte for byte the one 0.20.0 writes on all
+eleven maps measured, among them de_inferno, de_aztec and three ZE maps.
+
 ## [0.20.0] - 2026-10-06
 
 ### Added

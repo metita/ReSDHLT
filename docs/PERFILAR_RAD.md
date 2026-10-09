@@ -110,6 +110,9 @@ sentido son algorítmicas:
 3. **Early-out más agresivo.** Si la contribución de una luz va a quedar por debajo del umbral de
    `-limiter`, el rayo no hace falta.
 
+> Las tres se hicieron después **sin cambiar la iluminación**: descartando por bloques de muestras con
+> cotas conservadoras y probando haces enteros de rayos libres o bloqueados. Ver `BENCHMARKS.md` §11.
+
 Cualquiera de esas **cambia la iluminación**, así que hay que decidir explícitamente cuánta desviación es
 aceptable. Y ahí la validación cambia: ya no sirve exigir el lump `lighting` byte-idéntico.
 

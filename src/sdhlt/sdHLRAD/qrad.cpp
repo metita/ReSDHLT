@@ -52,6 +52,7 @@ eVisMethods;
 eVisMethods		g_method = DEFAULT_METHOD;
 bool			g_method_auto = false;                     // -vismatrix auto
 #define VISMATRIX_AUTO_MAX_BYTES (512.0 * 1024.0 * 1024.0)
+#define GPU_SPARSE_MIN_PATCHES 32768           // -vismatrix auto with -gpu: sparse from here on
 
 int RadVisMatrixMethodId()
 {
@@ -2881,10 +2882,12 @@ static void     CheckMaxPatches()
     if (g_method_auto)
     {
         const double bytes = ((double)g_num_patches + 1) * ((double)g_num_patches + 1) / 16.0;
-        // The GPU only computes transfer factors for the sparse matrix, and that
-        // beats the plain matrix on the CPU: sparse with the GPU took 3.2 s less
-        // on ze_elysium_b1 than the plain matrix did.
-        const bool gpu_sparse = g_gpu && g_gpu_transfers && !g_rgb_transfers;
+        // The GPU only computes transfer factors for the sparse matrix. That
+        // beat the plain matrix on the CPU on ze_elysium_b1 (43.376 patches, by
+        // 3.2 s) and loses on smaller maps: fp_squidgame_thno (20.623) 3.5 s
+        // against 1.2 s, guard (8.647) 2.1 s against 0.6 s. The plain matrix
+        // stays the choice below GPU_SPARSE_MIN_PATCHES.
+        const bool gpu_sparse = g_gpu && g_gpu_transfers && !g_rgb_transfers && g_num_patches >= GPU_SPARSE_MIN_PATCHES;
         const bool normal = !gpu_sparse && g_num_patches < MAX_VISMATRIX_PATCHES && bytes <= VISMATRIX_AUTO_MAX_BYTES;
         g_method = normal ? eMethodVismatrix : eMethodSparseVismatrix;
         Log("vismatrix auto: %d patches, plain matrix %.0f MB -> %s%s\n",

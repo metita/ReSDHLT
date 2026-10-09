@@ -730,6 +730,128 @@ Sin la opción, BSP escribe el mismo archivo que antes en los 10 mapas del corpu
 **Lo que falta:** abrir un mapa compilado así en CS 1.6. La cuenta de celdas coincide con la del motor y
 con la de RAD, pero no se probó en el juego.
 
+## 11. RAD por bloques: listas de luces y haces de rayos (octubre 2026)
+
+Entorno: el de §10 (Windows 11, MSVC 19.44, Ryzen 5 5600G de 12 hilos, GTX 1060 3GB), argumentos de la
+GUI (`-extra -bounce 12 -skylevel 6 -softsky 1 -vismatrix auto -pre25`, más `-gpuauto` en la columna de
+GPU). Además de los mapas de §10, RAD se corrió sobre BSPs ya compilados: `de_inferno` y `de_aztec` del
+juego, y `ze_labs_eeas_zg`, `ze_rats_lg` y `ze_fanb_area51_fix1`. RAD reilumina un BSP visado sin tocar
+nada más, así que sirven para medir aunque no esté el `.map`.
+
+### 11.1 Dónde se iba el tiempo
+
+Contadores dentro de `GatherSampleLight` en `fp_squidgame_thno` (687 luces directas, 2,79 millones de
+muestras):
+
+| | cantidad | |
+|---|---|---|
+| iteraciones muestra-luz | 1.469 millones | 526 por muestra |
+| descartadas por el lado (luz detrás del plano o de la superficie) | 740 millones | 50 % |
+| descartadas por `-lightskip` | 391 millones | 27 % |
+| con rayo de sombra | 168 millones | 11 % |
+| rayos que llegan a la luz | 123 millones | 73 % de los rayos |
+
+La mitad del tiempo de `BuildFacelights` no era trazar: era recorrer luces que la muestra iba a
+descartar, y la mayoría de los rayos que sí se trazaban no encontraban nada. En `ze_sanctorum` (212 luces)
+eran 214 millones de iteraciones y 99 millones de rayos, 40 % libres.
+
+### 11.2 Lo que entró (mismo `.bsp` byte a byte) ✅
+
+**Muestras por bloques.** `CalcLightmap` primero ubica todas las muestras de la cara y después junta la
+luz, en el mismo orden. Las muestras se agrupan en bloques de 8×8 puntos del lmcache (8/3 de luxel con
+`-extra`), con una caja sobre los ejes de la cara y la dispersión de sus normales.
+
+**Lista de luces por bloque.** El bloque descarta una vez cada luz que todas sus muestras descartarían
+una por una: detrás del plano de la texlight o de la superficie, fuera del cono de un spot, o bajo
+`-lightskip` con la distancia y los dos cosenos acotados sobre la caja. La lista conserva el orden de la
+lista del PVS, así que las sumas no cambian. Las cotas son holgadas a propósito: `vec_t` es `float` en
+RAD, y una cota justa por un redondeo descartaría una luz que la muestra conserva.
+
+| `fp_squidgame_thno` | antes | ahora |
+|---|---|---|
+| iteraciones muestra-luz | 1.469 millones | 190 millones |
+
+**Haces de rayos probados.** El primer rayo de un bloque hacia una luz se traza igual. Según lo que
+encuentre se intenta una de dos pruebas, y la otra solo si un rayo posterior no coincide:
+
+- *Todos libres* (`TestBeamClear`): el conjunto de segmentos entre la caja y la luz baja por el árbol
+  como baja `TestLine_r` un segmento, partiéndolo en cada plano. La distancia a un plano a lo largo de
+  `a + t (b - a)` es lineal en `t`, así que cada hijo recibe el rango de `t` donde alguna esquina está de
+  su lado por más del margen. Si todas las hojas alcanzadas son de un mismo contenido, ni sólido ni
+  cielo, `TestLine` devolvería `CONTENTS_EMPTY` para cada uno.
+- *Todos bloqueados* (`TestBeamBlocked`): el rayo bloqueado se repite anotando el camino hasta la hoja
+  sólida. Si los segmentos de las esquinas cruzan el interior de esa hoja, la cruzan todos: con un
+  extremo fijo, los otros extremos cuyo segmento corta una celda convexa forman un conjunto convexo.
+
+El margen es `ON_EPSILON` más una fracción del tamaño de las coordenadas: `TestLine_r` manda un tramo a
+un solo lado cuando supera `ON_EPSILON/2`, y sus puntos medios se corren del segmento por redondeo.
+
+| rayos de sombra de luces | trazados antes | trazados ahora |
+|---|---|---|
+| fp_squidgame_thno | 168 millones | 25 millones |
+| ze_sanctorum | 99 millones | 34 millones |
+
+Lección de la primera versión: clasificar el haz **entero** en cada nodo, sin recortarlo, daba 0,13 % de
+pruebas exitosas en `ze_sanctorum`, incluso con bloques de una sola muestra. En un árbol profundo el haz
+sin recortar "cruza" planos que el rayo nunca toca dentro de esa celda y cae en hojas sólidas que no
+están en su camino. Recortando el rango de `t` pasó a 36 %.
+
+**Pares de parches en `BuildVisLeafs`.** La misma prueba entre los parches de una cara en una hoja y los
+de una cara destino, para las dos variantes de la matriz. Solo se intenta cuando hay al menos 8 pares en
+juego: con menos, la prueba cuesta más que los rayos. En `fp_squidgame_thno` se trazan 41 de 76
+millones de pares.
+
+**`TestSegmentAgainstOpaqueList` en línea.** Se llamaba por cada rayo que llega a su luz aunque el mapa no
+tenga entidades opacas ni modelos con sombra. Ahora, en ese caso, la respuesta sale sin la llamada.
+
+**`-vismatrix auto` con GPU.** Elegía la matriz sparse para que la GPU calculara las transferencias. Eso
+ganó en `ze_elysium_b1` (43.376 parches, §9.4) y pierde en mapas menores: `fp_squidgame_thno` 3,5 s
+contra 1,2 s de la matriz normal en CPU, `guard` 2,1 s contra 0,6 s. Ahora la GPU calcula transferencias
+desde 32.768 parches; debajo, la GPU junta la luz directa y la matriz normal queda en CPU. De paso el
+resultado con GPU queda a pocos bytes (±1) del de CPU: 3 en `fp_squidgame_thno`, 4 en `ze_sanctorum`;
+antes hasta cambiaba el tamaño del lump.
+
+### 11.3 Lo que se probó y no entró ❌
+
+- **Haces para el domo de cielo.** Con `-softsky` el cielo se junta por parche: en `de_inferno` son 153
+  millones de rayos y el 59 % del tiempo de RAD. Se agruparon las direcciones por celda de un cubo
+  (4×4 por cara) y se probó el abanico de cada grupo, con la celda del rayo sonda y un punto dentro de
+  ella por cada dirección esquina. Es correcto (mismo `.bsp`), pero los bloqueados que se saltan, 33
+  millones, son rayos cortos que chocan con una pared cerca, y los que llegan al cielo casi nunca se
+  prueban: el abanico roza paredes o termina en distintas hojas del pincel de cielo. Con grupos de 8×8
+  se saltan más pero las pruebas cuestan más de lo que ahorran. Sin ganancia neta; no entró.
+- **Rebotes.** Acumular el estilo 0 en registros y empaquetar el emisor en una línea de caché con
+  prefetch: −13 % con un hilo, nada con los 12. Con todos los hilos el rebote está limitado por memoria.
+- **Bloques de 4×4.** Las pruebas de rayos libres pasan de 77 a 78 millones en `fp_squidgame_thno`: los
+  libres que faltan están pegados a la geometría, no son un problema de tamaño de bloque.
+- **Pruebas de pares para cualquier grupo.** Con 2,7 parches por cara en `fp_squidgame_thno`,
+  `BuildVisLeafs` empeoraba (4,7 a 6,1 s contra 3,6 a 3,7 s). De ahí el mínimo de 8 pares.
+
+### 11.4 Resultado
+
+RAD completo, mínimo de 3 corridas intercaladas con 0.20.0 (la máquina tenía otra carga de fondo; las
+corridas sueltas están en el log de la medición). "Igual" es el lump de luz byte a byte.
+
+| mapa | CPU 0.20.0 | CPU ahora | | GPU 0.20.0 | GPU ahora | |
+|---|---:|---:|---|---:|---:|---|
+| fp_squidgame_thno | 17,31 s | 12,47 s | **1,39×**, igual | 17,87 s | 13,74 s | **1,30×** |
+| ze_sanctorum | 10,53 s | 8,69 s | 1,21×, igual | 9,85 s | 8,48 s | 1,16× |
+| ze_labs_eeas_zg | 5,34 s | 4,73 s | 1,13×, igual | 6,38 s | 5,37 s | 1,19× |
+| ze_fanb_area51_fix1 | 23,30 s | 21,97 s | 1,06×, igual | 24,43 s | 22,80 s | 1,07×, igual |
+| de_inferno | 11,93 s | 11,67 s | 1,02×, igual | 12,65 s | 11,30 s | 1,12× |
+| zm_eichen_v2 | 2,63 s | 2,37 s | 1,11×, igual | 3,09 s | 2,62 s | 1,18× |
+| guard | 3,84 s | 3,61 s | 1,06×, igual | 6,13 s | 3,93 s | **1,56×** |
+
+La fase que se atacó baja mucho más que el total: `BuildFacelights` en CPU pasa de 12,7 a 5,5–6 s en
+`fp_squidgame_thno` y de 8,9 a 5,9 s en `ze_sanctorum`. Lo que queda (`BuildVisLeafs`, `MakeScales`, los
+rebotes y `AddPatchLights`) no depende de cuántas luces tenga el mapa, y en los mapas con pocas luces y
+mucho cielo, como `de_inferno`, el 59 % del tiempo es el domo de cielo por parche (§11.3).
+
+Con GPU la diferencia contra 0.20.0 viene de la política de `-vismatrix auto`: el resultado ahora es el
+de CPU, salvo en `fp_squidgame_thno` (3 bytes, ±1) y donde la GPU junta la luz directa. En
+`ze_fanb_area51_fix1` (45.590 parches) se siguen usando las transferencias en GPU, con el mismo resultado
+que antes. El build portable da el mismo `.bsp` que el AVX2.
+
 ## Cómo reproducir
 
 ```sh

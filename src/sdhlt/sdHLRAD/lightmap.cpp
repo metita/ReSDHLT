@@ -2767,9 +2767,9 @@ static const std::vector<directlight_t*>& GatherLightsForPVS(const byte* const p
 //      list only when each of its samples would have skipped it anyway. The
 //      list keeps the PVS list's order, so the sums do not change.
 //
-//      The block also remembers, per light, whether TestBeamClear proved the
-//      light unoccluded from the whole block; then none of its samples needs
-//      the shadow ray.
+//      The block also remembers, per light, what is known of the shadow rays
+//      from its box to the light (BeamRayBlocked): once they are proven all
+//      clear or all blocked, none of its samples traces one.
 //
 //      The bounds are taken wide on purpose: vec_t is float, and a bound that
 //      is too tight by a rounding error would drop a light a sample keeps.
@@ -2784,12 +2784,12 @@ struct tilelight_t
 struct gathertile_t
 {
     double          corners[8][3];          // box around the samples, in world space
-    double          beamcorners[8][3];      // box around the samples that use the proof
-    bool            hasbeam;
     double          axis[3][3];             // the box's axes: two along the face, its normal
     double          lo[3], hi[3];           // the box, along those axes
     double          nbar[3];                // mean phong normal of the samples
     double          maxdev;                 // no sample normal is farther than this from nbar
+    double          center[3];              // a sphere around the box, for the quick test
+    double          radius;
     int             step;
     unsigned long long key;                 // the PVS list the lights were taken from
     std::vector<tilelight_t> lights;
@@ -2826,6 +2826,36 @@ static bool     TileSkipsLight(const gathertile_t* tile, const directlight_t* l,
         for (int k = 0; k < 3; k++)
         {
             origin[k] -= PATCH_HUNT_OFFSET * l->normal[k];
+        }
+    }
+    // The quick test first: most lights of a big PVS are simply too far. The
+    // sphere around the box is no closer than the box and the cosines are at
+    // most 1, so this bound is never below the full one further down, and
+    // what it drops the full test would drop too.
+    if (g_lightskip > 0 && lightingpower >= 0)
+    {
+        const double maxi = qmax(l->intensity[0], qmax(l->intensity[1], l->intensity[2]));
+        if (maxi <= 0)
+        {
+            return true;
+        }
+        const double dc[3] = {origin[0] - tile->center[0], origin[1] - tile->center[1], origin[2] - tile->center[2]};
+        const double qslack = 0.001 + 1e-5 * (fabs(tile->center[0]) + fabs(tile->center[1]) + fabs(tile->center[2]) + 2 * tile->radius
+            + fabs(origin[0]) + fabs(origin[1]) + fabs(origin[2]));
+        const double qdist = qmax(1.0, sqrt(dc[0] * dc[0] + dc[1] * dc[1] + dc[2] * dc[2]) - tile->radius - qslack);
+        const double qscale = lightingpower > 0? fabs(lightingscale): 1.0;
+        double qbound = -1;
+        if ((l->type == emit_point || l->type == emit_spotlight) && l->fade > 0)
+        {
+            qbound = maxi * qscale / (qdist * qdist * l->fade);
+        }
+        else if (l->type == emit_surface && qdist >= 2 * l->patch_emitter_range + 1)
+        {
+            qbound = maxi * qscale / (qdist * qdist);
+        }
+        if (qbound >= 0 && qbound * 1.001 < g_lightskip)
+        {
+            return true;
         }
     }
     // delta = origin - sample, over the corners of the block's box. Its dot
@@ -2963,7 +2993,6 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 								  , int texlightgap_surfacenum
 								  , vec3_t* emitteroccl = NULL // -ao: texlight light AO must not darken, per style slot
 								  , gathertile_t* tile = NULL // the block of samples pos belongs to, if any
-								  , bool tilebeam = false // pos is inside the block's proof box
 								  )
 {
     PROF_SCOPE(PROF_GATHERSAMPLELIGHT);
@@ -3482,12 +3511,12 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 						{
 							// The block's proofs are for rays to the light's own
 							// origin; the near path of a texlight aims elsewhere.
-							const bool beam = tl && tilebeam && testline_origin[0] == l->origin[0] && testline_origin[1] == l->origin[1] && testline_origin[2] == l->origin[2];
+							const bool beam = tl && testline_origin[0] == l->origin[0] && testline_origin[1] == l->origin[1] && testline_origin[2] == l->origin[2];
 							bool blocked;
 							if (beam)
 							{
 								const double apex[1][3] = {{l->origin[0], l->origin[1], l->origin[2]}};
-								blocked = BeamRayBlocked (pos, testline_origin, &tl->beam, tile->beamcorners, 8, apex, 1);
+								blocked = BeamRayBlocked (pos, testline_origin, &tl->beam, tile->corners, 8, apex, 1);
 							}
 							else
 							{
@@ -4019,7 +4048,6 @@ typedef struct
 	int				visofs2;
 	bool			blocked;
 	bool			nudged;
-	bool			beam;                       // lies on the face itself, unmoved: inside the proof box
 }
 lmsample_t;
 
@@ -4082,10 +4110,8 @@ static void BuildGatherTiles (const lightinfo_t *l, const std::vector<lmsample_t
 			tile.key = 0;
 			tile.lights.clear ();
 			double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
-			double blo[3] = {1e30, 1e30, 1e30}, bhi[3] = {-1e30, -1e30, -1e30};
 			double nsum[3] = {0, 0, 0};
 			int count = 0;
-			int beamcount = 0;
 			for (int y = ty * GATHERTILE_SIDE; y < qmin (h, (ty + 1) * GATHERTILE_SIDE); y++)
 			{
 				for (int x = tx * GATHERTILE_SIDE; x < qmin (w, (tx + 1) * GATHERTILE_SIDE); x++)
@@ -4100,13 +4126,7 @@ static void BuildGatherTiles (const lightinfo_t *l, const std::vector<lmsample_t
 						const double d = p.spot[0] * axis[a][0] + p.spot[1] * axis[a][1] + p.spot[2] * axis[a][2];
 						lo[a] = qmin (lo[a], d);
 						hi[a] = qmax (hi[a], d);
-						if (p.beam)
-						{
-							blo[a] = qmin (blo[a], d);
-							bhi[a] = qmax (bhi[a], d);
-						}
 					}
-					beamcount += p.beam? 1: 0;
 					for (int k = 0; k < 3; k++)
 					{
 						nsum[k] += p.pointnormal[k];
@@ -4162,20 +4182,15 @@ static void BuildGatherTiles (const lightinfo_t *l, const std::vector<lmsample_t
 					tile.corners[c][k] = e[0] * axis[0][k] + e[1] * axis[1][k] + e[2] * axis[2][k];
 				}
 			}
-			tile.hasbeam = beamcount > 0;
-			for (int a = 0; a < 3 && tile.hasbeam; a++)
 			{
-				const double pad = 0.01 + 1e-6 * qmax (fabs (blo[a]), fabs (bhi[a]));
-				blo[a] -= pad;
-				bhi[a] += pad;
-			}
-			for (int c = 0; c < 8 && tile.hasbeam; c++)
-			{
-				const double e[3] = {(c & 1)? bhi[0]: blo[0], (c & 2)? bhi[1]: blo[1], (c & 4)? bhi[2]: blo[2]};
+				const double m[3] = {(tile.lo[0] + tile.hi[0]) / 2, (tile.lo[1] + tile.hi[1]) / 2, (tile.lo[2] + tile.hi[2]) / 2};
+				const double h[3] = {(tile.hi[0] - tile.lo[0]) / 2, (tile.hi[1] - tile.lo[1]) / 2, (tile.hi[2] - tile.lo[2]) / 2};
 				for (int k = 0; k < 3; k++)
 				{
-					tile.beamcorners[c][k] = e[0] * axis[0][k] + e[1] * axis[1][k] + e[2] * axis[2][k];
+					tile.center[k] = m[0] * axis[0][k] + m[1] * axis[1][k] + m[2] * axis[2][k];
 				}
+				// a hair over the half diagonal, for the rounding of the center
+				tile.radius = sqrt (h[0] * h[0] + h[1] * h[1] + h[2] * h[2]) * (1 + 1e-9) + 1e-6;
 			}
 		}
 	}
@@ -4337,10 +4352,6 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 		{
 			lmflags[i] = (unsigned char)((p.blocked? 1: 0) | (p.nudged? 2: 0));
 		}
-		// Samples of the blur margin land on neighbouring faces, often hard
-		// against a wall; one of them in a block's proof box would make every
-		// proof of the block touch solid. They keep their own shadow rays.
-		p.beam = !p.blocked;
 	}
 
 	// The blocks are for the CPU gather alone: the GPU collect records each
@@ -4457,7 +4468,6 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 					, p->surface
 					, aoexempt? emitterlight: NULL
 					, tile
-					, tile && tile->hasbeam && p->beam
 					);
 				}
 			}
