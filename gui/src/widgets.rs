@@ -9,6 +9,7 @@
 use eframe::egui;
 use egui::{Align, Color32, Layout, Response, RichText, Sense, Ui, Vec2};
 
+use crate::i18n::tr;
 use crate::theme::*;
 
 /// Column widths for one panel, recomputed each frame from its width.
@@ -232,9 +233,13 @@ pub fn toggle_row(
     row(ui, m, label, help, badge, |ui| {
         let changed = toggle(ui, on, label).changed();
         ui.label(
-            RichText::new(if *on { "activado" } else { "desactivado" })
-                .color(if *on { OK } else { MUTED })
-                .small(),
+            RichText::new(if *on {
+                tr("activado")
+            } else {
+                tr("desactivado")
+            })
+            .color(if *on { OK } else { MUTED })
+            .small(),
         );
         changed
     });
@@ -290,14 +295,14 @@ pub fn path_row(
     ui.add(
         egui::TextEdit::singleline(value)
             .desired_width(field_w)
-            .hint_text("sin definir"),
+            .hint_text(tr("sin definir")),
     );
     if ui.button(browse).clicked() {
         if let Some(p) = on_browse() {
             *value = p;
         }
     }
-    if clearable && ui.button("Limpiar").clicked() {
+    if clearable && ui.button(tr("Limpiar")).clicked() {
         value.clear();
     }
 }

@@ -162,7 +162,8 @@ pick a preset, press compile, watch the log. Every option carries a tooltip
 saying what it does and when to use it, and there is a tab summarising the
 recommendations that the benchmarks actually support. Every flag this fork adds
 has a control there, ambient occlusion, soft shadows and the non-planar brush fix
-included.
+included. It speaks English and Spanish: it follows the system language, and the
+🌐 button at the top switches it.
 
 Its "Análisis" tab checks the compiled map after every successful compile, no
 Python needed: see-through holes, the areas with the most wpoly, faces covered

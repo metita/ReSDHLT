@@ -13,6 +13,7 @@ use std::time::Instant;
 
 use fs2::FileExt;
 
+use crate::i18n::tr;
 use crate::options::Options;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,10 +46,10 @@ impl Stage {
     /// One line on what this stage is for, shown next to the progress row.
     pub fn purpose(self) -> &'static str {
         match self {
-            Stage::Csg => "Recorta los brushes entre sí y resuelve las texturas",
-            Stage::Bsp => "Construye el árbol BSP, fusiona y subdivide las caras",
-            Stage::Vis => "Calcula qué se ve desde dónde (el PVS). Define los FPS",
-            Stage::Rad => "Calcula la iluminación. Es ~95% del tiempo total",
+            Stage::Csg => tr("Recorta los brushes entre sí y resuelve las texturas"),
+            Stage::Bsp => tr("Construye el árbol BSP, fusiona y subdivide las caras"),
+            Stage::Vis => tr("Calcula qué se ve desde dónde (el PVS). Define los FPS"),
+            Stage::Rad => tr("Calcula la iluminación. Es ~95% del tiempo total"),
         }
     }
 }
@@ -208,15 +209,16 @@ fn exit_detail(code: Option<i32>) -> String {
     };
     let hex = code as u32;
     let hint = match hex {
-        0xC000_0005 => ": se cerró por un acceso inválido a memoria",
-        0xC000_00FD => ": se quedó sin pila",
-        0xC000_0409 => ": se cerró por un error interno",
+        0xC000_0005 => tr(": se cerró por un acceso inválido a memoria"),
+        0xC000_00FD => tr(": se quedó sin pila"),
+        0xC000_0409 => tr(": se cerró por un error interno"),
         _ => "",
     };
     if hex >= 0xC000_0000 {
-        format!(" (código 0x{hex:08X}{hint})")
+        let code = format!("0x{hex:08X}");
+        tf!(" (código {code}{hint})", code, hint)
     } else {
-        format!(" (código {code})")
+        tf!(" (código {code})", code)
     }
 }
 
@@ -284,38 +286,39 @@ fn commands_for(opts: &Options, map: &Path, mod_dir: Option<&Path>) -> Vec<Plann
 pub fn validation_errors(opts: &Options) -> Vec<String> {
     let mut errors = opts.extra_args_errors();
     if !STAGES.iter().any(|stage| stage_enabled(opts, *stage)) {
-        errors.push("Activa al menos una etapa (CSG, BSP, VIS o RAD).".to_string());
+        errors.push(tr("Activa al menos una etapa (CSG, BSP, VIS o RAD).").to_string());
     }
 
     let map = Path::new(opts.map_path.trim());
     if opts.map_path.trim().is_empty() || !map.is_file() {
-        errors.push("Selecciona un archivo .map válido.".to_string());
+        errors.push(tr("Selecciona un archivo .map válido.").to_string());
     } else if !map
         .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("map"))
         .unwrap_or(false)
     {
-        errors.push("El archivo fuente debe tener extensión .map.".to_string());
+        errors.push(tr("El archivo fuente debe tener extensión .map.").to_string());
     }
 
     for stage in STAGES.iter().copied().filter(|s| stage_enabled(opts, *s)) {
         if tool_path(&opts.tools_dir, stage.exe()).is_none() {
-            errors.push(format!(
-                "Falta {} en la carpeta de herramientas.",
-                stage.exe()
+            errors.push(tf!(
+                "Falta {exe} en la carpeta de herramientas.",
+                exe = stage.exe()
             ));
         }
     }
 
     if opts.run_csg && !opts.run_bsp && (opts.run_vis || opts.run_rad) {
         errors.push(
-            "CSG vuelve a generar el BSP base: activa BSP antes de ejecutar VIS o RAD.".to_string(),
+            tr("CSG vuelve a generar el BSP base: activa BSP antes de ejecutar VIS o RAD.")
+                .to_string(),
         );
     }
     if (opts.run_csg || opts.run_bsp) && !opts.run_vis && opts.run_rad {
         errors.push(
-            "CSG/BSP invalidan la visibilidad anterior: activa VIS antes de RAD.".to_string(),
+            tr("CSG/BSP invalidan la visibilidad anterior: activa VIS antes de RAD.").to_string(),
         );
     }
 
@@ -349,9 +352,9 @@ pub fn validation_errors(opts: &Options) -> Vec<String> {
             missing.push(".hsz".to_string());
         }
         if !missing.is_empty() {
-            errors.push(format!(
-                "Para saltar CSG y ejecutar BSP faltan estos intermedios: {}.",
-                missing.join(", ")
+            errors.push(tf!(
+                "Para saltar CSG y ejecutar BSP faltan estos intermedios: {files}.",
+                files = missing.join(", ")
             ));
         }
     }
@@ -364,14 +367,14 @@ pub fn validation_errors(opts: &Options) -> Vec<String> {
             missing.push(".prt");
         }
         if !missing.is_empty() {
-            errors.push(format!(
-                "Para saltar BSP y ejecutar VIS faltan: {}.",
-                missing.join(", ")
+            errors.push(tf!(
+                "Para saltar BSP y ejecutar VIS faltan: {files}.",
+                files = missing.join(", ")
             ));
         }
     }
     if opts.run_rad && !opts.run_bsp && !opts.run_vis && !bsp_available {
-        errors.push("Para ejecutar solo RAD falta el .bsp anterior.".to_string());
+        errors.push(tr("Para ejecutar solo RAD falta el .bsp anterior.").to_string());
     }
     errors
 }
@@ -404,7 +407,9 @@ impl CompilePlan {
         for command in commands {
             out.push_str(&command.display());
             if command.stage == Stage::Csg && normalized.will_resolve_wads() {
-                out.push_str("  # + -wadcfgfile resdhlt-wads.cfg si se resuelven WADs");
+                out.push_str(tr(
+                    "  # + -wadcfgfile resdhlt-wads.cfg si se resuelven WADs",
+                ));
             }
             out.push('\n');
         }
@@ -703,10 +708,10 @@ fn resolve_wads(opts: &Options, map: &Path, tx: &Sender<Msg>) -> Vec<PathBuf> {
     } else {
         let _ = tx.send(Msg::Line(
             LineKind::Warning,
-            format!(
-                "No encontré sdhlt.wad en {}. Sin él fallan las texturas de \
+            tf!(
+                "No encontré sdhlt.wad en {dir}. Sin él fallan las texturas de \
                  herramienta (NULL, HINT, SKIP).",
-                tools.display()
+                dir = tools.display()
             ),
         ));
     }
@@ -729,11 +734,11 @@ fn resolve_wads(opts: &Options, map: &Path, tx: &Sender<Msg>) -> Vec<PathBuf> {
     if !uncovered.is_empty() && !wanted.is_empty() {
         let _ = tx.send(Msg::Line(
             LineKind::Command,
-            format!(
-                "Faltan {} texturas. Reviso {} .wad de tus carpetas para ver cuáles las \
-                 tienen.",
-                uncovered.len(),
-                pool.len()
+            tf!(
+                "Faltan {missing} texturas. Reviso {wads} .wad de tus carpetas para ver \
+                 cuáles las tienen.",
+                missing = uncovered.len(),
+                wads = pool.len()
             ),
         ));
 
@@ -764,9 +769,10 @@ fn resolve_wads(opts: &Options, map: &Path, tx: &Sender<Msg>) -> Vec<PathBuf> {
             uncovered.retain(|t| !have.contains(t));
             let _ = tx.send(Msg::Line(
                 LineKind::Command,
-                format!(
-                    "  + {} ({hits} texturas)",
-                    path.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+                tf!(
+                    "  + {wad} ({hits} texturas)",
+                    wad = path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                    hits
                 ),
             ));
             push(&mut out, &mut seen, path);
@@ -781,20 +787,25 @@ fn resolve_wads(opts: &Options, map: &Path, tx: &Sender<Msg>) -> Vec<PathBuf> {
         out.truncate(MAX_WADS);
         let _ = tx.send(Msg::Line(
             LineKind::Warning,
-            format!(
-                "La lista pasaba el límite de {MAX_WADS} WADs de CSG: dejé fuera los \
+            tf!(
+                "La lista pasaba el límite de {max} WADs de CSG: dejé fuera los \
                  últimos {dropped}. Si falta alguna textura, apunta la carpeta de WADs a \
-                 algo más chico."
+                 algo más chico.",
+                max = MAX_WADS,
+                dropped
             ),
         ));
     }
 
     let _ = tx.send(Msg::Line(
         LineKind::Command,
-        format!(
+        tf!(
             "WADs: {kept} del mapa correctos, {fixed} reubicados, {extra} extra de las \
-             carpetas buscadas, {} sin encontrar",
-            missing.len()
+             carpetas buscadas, {missing} sin encontrar",
+            kept,
+            fixed,
+            extra,
+            missing = missing.len()
         ),
     ));
     // A listed WAD that is nowhere to be found is not a problem in itself: what
@@ -802,13 +813,17 @@ fn resolve_wads(opts: &Options, map: &Path, tx: &Sender<Msg>) -> Vec<PathBuf> {
     // comes below, once coverage is known, so these stay informational.
     for m in &missing {
         let note = if m.eq_ignore_ascii_case("zhlt.wad") || m.eq_ignore_ascii_case("sdhlt.wad") {
-            " (normal: sus texturas de herramienta están en sdhlt.wad)"
+            tr(" (normal: sus texturas de herramienta están en sdhlt.wad)")
         } else {
             ""
         };
         let _ = tx.send(Msg::Line(
             LineKind::Command,
-            format!("{m} no está en tus carpetas; busco sus texturas en otros .wad{note}"),
+            tf!(
+                "{m} no está en tus carpetas; busco sus texturas en otros .wad{note}",
+                m,
+                note
+            ),
         ));
     }
     if !missing.is_empty() {
@@ -818,14 +833,16 @@ fn resolve_wads(opts: &Options, map: &Path, tx: &Sender<Msg>) -> Vec<PathBuf> {
             .collect();
         let _ = tx.send(Msg::Line(
             LineKind::Command,
-            format!("Busqué .wad en: {}", dirs.join(" | ")),
+            tf!("Busqué .wad en: {dirs}", dirs = dirs.join(" | ")),
         ));
         if pool.is_empty() {
             let _ = tx.send(Msg::Line(
                 LineKind::Warning,
-                "No hay ningún .wad en esas carpetas. Indica la carpeta de WADs donde \
-                 tengas los del mapa."
-                    .to_string(),
+                tr(
+                    "No hay ningún .wad en esas carpetas. Indica la carpeta de WADs donde \
+                    tengas los del mapa.",
+                )
+                .to_string(),
             ));
         }
     }
@@ -835,17 +852,20 @@ fn resolve_wads(opts: &Options, map: &Path, tx: &Sender<Msg>) -> Vec<PathBuf> {
     if wanted.is_empty() {
         let _ = tx.send(Msg::Line(
             LineKind::Warning,
-            "No pude leer las texturas del .map, así que no puedo comprobar la lista de \
-             WADs por adelantado."
-                .to_string(),
+            tr(
+                "No pude leer las texturas del .map, así que no puedo comprobar la lista de \
+                WADs por adelantado.",
+            )
+            .to_string(),
         ));
     } else if uncovered.is_empty() {
         let _ = tx.send(Msg::Line(
             LineKind::Success,
-            format!(
-                "Las {} texturas del mapa están cubiertas por {} .wad. No falta ninguna.",
-                wanted.len(),
-                out.len()
+            tf!(
+                "Las {textures} texturas del mapa están cubiertas por {wads} .wad. No falta \
+                 ninguna.",
+                textures = wanted.len(),
+                wads = out.len()
             ),
         ));
     } else {
@@ -854,16 +874,19 @@ fn resolve_wads(opts: &Options, map: &Path, tx: &Sender<Msg>) -> Vec<PathBuf> {
         let shown: Vec<&str> = names.iter().take(6).map(|s| s.as_str()).collect();
         let _ = tx.send(Msg::Line(
             LineKind::Error,
-            format!(
-                "Faltan {} texturas y ningún .wad tuyo las tiene: {}{}. CSG va a fallar; \
-                 hace falta conseguir el .wad que las contenga.",
-                names.len(),
-                shown.join(", "),
-                if names.len() > shown.len() {
-                    ", ..."
-                } else {
-                    ""
-                }
+            tf!(
+                "Faltan {count} texturas y ningún .wad tuyo las tiene: {names}. CSG va a \
+                 fallar; hace falta conseguir el .wad que las contenga.",
+                count = names.len(),
+                names = format!(
+                    "{}{}",
+                    shown.join(", "),
+                    if names.len() > shown.len() {
+                        ", ..."
+                    } else {
+                        ""
+                    }
+                )
             ),
         ));
     }
@@ -902,11 +925,17 @@ fn acquire_workspace_lock(opts: &Options) -> Result<WorkspaceLock, String> {
     let source = PathBuf::from(opts.map_path.trim());
     let lock_path = if let Some(work_dir) = opts.work_dir() {
         std::fs::create_dir_all(&work_dir).map_err(|error| {
-            format!("no pude crear el workspace {}: {error}", work_dir.display())
+            tf!(
+                "no pude crear el workspace {dir}: {error}",
+                dir = work_dir.display(),
+                error
+            )
         })?;
         work_dir.join(".resdhlt.compile.lock")
     } else {
-        let parent = source.parent().ok_or("el mapa no tiene carpeta padre")?;
+        let parent = source
+            .parent()
+            .ok_or(tr("el mapa no tiene carpeta padre"))?;
         let stem = source
             .file_stem()
             .and_then(|value| value.to_str())
@@ -920,16 +949,28 @@ fn acquire_workspace_lock(opts: &Options) -> Result<WorkspaceLock, String> {
         .read(true)
         .write(true)
         .open(&lock_path)
-        .map_err(|error| format!("no pude abrir el lock {}: {error}", lock_path.display()))?;
+        .map_err(|error| {
+            tf!(
+                "no pude abrir el lock {path}: {error}",
+                path = lock_path.display(),
+                error
+            )
+        })?;
     file.try_lock_exclusive().map_err(|_| {
-        format!(
-            "ya hay otra compilación usando este workspace: {}",
-            lock_path.display()
+        tf!(
+            "ya hay otra compilación usando este workspace: {path}",
+            path = lock_path.display()
         )
     })?;
     file.set_len(0)
         .and_then(|_| writeln!(file, "pid={}", std::process::id()))
-        .map_err(|error| format!("no pude escribir el lock {}: {error}", lock_path.display()))?;
+        .map_err(|error| {
+            tf!(
+                "no pude escribir el lock {path}: {error}",
+                path = lock_path.display(),
+                error
+            )
+        })?;
     Ok(WorkspaceLock { file })
 }
 
@@ -944,7 +985,7 @@ fn prepare_workspace(opts: &Options, tx: &Sender<Msg>) -> Option<PathBuf> {
     if !src.is_file() {
         let _ = tx.send(Msg::Line(
             LineKind::Error,
-            format!("No encuentro el mapa: {}", src.display()),
+            tf!("No encuentro el mapa: {path}", path = src.display()),
         ));
         return None;
     }
@@ -960,7 +1001,7 @@ fn prepare_workspace(opts: &Options, tx: &Sender<Msg>) -> Option<PathBuf> {
     if let Err(e) = std::fs::create_dir_all(&out_dir) {
         let _ = tx.send(Msg::Line(
             LineKind::Error,
-            format!("No pude crear {}: {e}", out_dir.display()),
+            tf!("No pude crear {path}: {e}", path = out_dir.display(), e),
         ));
         return None;
     }
@@ -979,14 +1020,14 @@ fn prepare_workspace(opts: &Options, tx: &Sender<Msg>) -> Option<PathBuf> {
     if let Err(e) = std::fs::copy(&src, &dst) {
         let _ = tx.send(Msg::Line(
             LineKind::Error,
-            format!("No pude escribir {}: {e}", dst.display()),
+            tf!("No pude escribir {path}: {e}", path = dst.display(), e),
         ));
         return None;
     }
 
     let _ = tx.send(Msg::Line(
         LineKind::Command,
-        format!("Compilando en {}", out_dir.display()),
+        tf!("Compilando en {path}", path = out_dir.display()),
     ));
     Some(dst)
 }
@@ -1012,10 +1053,11 @@ fn seed_previous_bsp(opts: &Options, map: &Path) -> Result<(), String> {
     std::fs::copy(&source, &destination)
         .map(|_| ())
         .map_err(|error| {
-            format!(
-                "no pude preparar el BSP anterior {} en {}: {error}",
-                source.display(),
-                destination.display()
+            tf!(
+                "no pude preparar el BSP anterior {source} en {destination}: {error}",
+                source = source.display(),
+                destination = destination.display(),
+                error
             )
         })
 }
@@ -1071,7 +1113,8 @@ pub fn start(plan: CompilePlan) -> Job {
             if wads.is_empty() {
                 let _ = tx.send(Msg::Line(
                     LineKind::Warning,
-                    "No pude resolver ningún .wad; se usa la lista del mapa tal cual.".to_string(),
+                    tr("No pude resolver ningún .wad; se usa la lista del mapa tal cual.")
+                        .to_string(),
                 ));
             } else if let Some(dir) = &work_dir {
                 match write_wad_cfg(dir, &wads) {
@@ -1079,7 +1122,7 @@ pub fn start(plan: CompilePlan) -> Job {
                     Err(e) => {
                         let _ = tx.send(Msg::Line(
                             LineKind::Warning,
-                            format!("No pude escribir {WAD_CFG_NAME}: {e}"),
+                            tf!("No pude escribir {path}: {e}", path = WAD_CFG_NAME, e),
                         ));
                     }
                 }
@@ -1103,7 +1146,7 @@ pub fn start(plan: CompilePlan) -> Job {
             if cancel_thread.load(Ordering::SeqCst) {
                 let _ = tx.send(Msg::Line(
                     LineKind::Warning,
-                    "Cancelado por el usuario.".to_string(),
+                    tr("Cancelado por el usuario.").to_string(),
                 ));
                 all_ok = false;
                 cancelled = true;
@@ -1148,7 +1191,11 @@ pub fn start(plan: CompilePlan) -> Job {
                 Err(e) => {
                     let _ = tx.send(Msg::Line(
                         LineKind::Error,
-                        format!("No pude ejecutar {}: {e}", command.exe.display()),
+                        tf!(
+                            "No pude ejecutar {exe}: {e}",
+                            exe = command.exe.display(),
+                            e
+                        ),
                     ));
                     all_ok = false;
                     break;
@@ -1192,15 +1239,15 @@ pub fn start(plan: CompilePlan) -> Job {
                 if cancelled {
                     let _ = tx.send(Msg::Line(
                         LineKind::Warning,
-                        format!("{} cancelado por el usuario.", stage.name()),
+                        tf!("{stage} cancelado por el usuario.", stage = stage.name()),
                     ));
                 } else {
                     let _ = tx.send(Msg::Line(
                         LineKind::Error,
-                        format!(
-                            "{} terminó con error{}. Se detiene aquí.",
-                            stage.name(),
-                            exit_detail(status.and_then(|s| s.code()))
+                        tf!(
+                            "{stage} terminó con error{detail}. Se detiene aquí.",
+                            stage = stage.name(),
+                            detail = exit_detail(status.and_then(|s| s.code()))
                         ),
                     ));
                 }
@@ -1227,10 +1274,11 @@ pub fn start(plan: CompilePlan) -> Job {
                             Err(e) => {
                                 let _ = tx.send(Msg::Line(
                                     LineKind::Warning,
-                                    format!(
-                                        "No pude mover el .bsp a {}: {e}. Queda en {}.",
-                                        dest_dir.display(),
-                                        bsp.display()
+                                    tf!(
+                                        "No pude mover el .bsp a {dest}: {e}. Queda en {bsp}.",
+                                        dest = dest_dir.display(),
+                                        e,
+                                        bsp = bsp.display()
                                     ),
                                 ));
                             }
@@ -1243,12 +1291,16 @@ pub fn start(plan: CompilePlan) -> Job {
                 let size = std::fs::metadata(&bsp).map(|m| m.len()).unwrap_or(0);
                 let _ = tx.send(Msg::Line(
                     LineKind::Success,
-                    format!("Listo: {} ({:.1} MB)", bsp.display(), size as f64 / 1e6),
+                    tf!(
+                        "Listo: {bsp} ({size} MB)",
+                        bsp = bsp.display(),
+                        size = format!("{:.1}", size as f64 / 1e6)
+                    ),
                 ));
             } else {
                 let _ = tx.send(Msg::Line(
                     LineKind::Success,
-                    "Compilación terminada.".to_string(),
+                    tr("Compilación terminada.").to_string(),
                 ));
             }
         }

@@ -3,6 +3,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod analysis;
+#[macro_use]
+mod i18n;
 mod options;
 mod projects;
 mod runner;
@@ -19,6 +21,7 @@ use eframe::egui;
 use egui::{Align, Layout, RichText};
 use fs2::FileExt;
 
+use i18n::{n_, tr};
 use options::{always_rules, AoMode, Options, Preset, VisMatrix, VisQuality};
 use projects::{FileEntry, FileKind, Library, Project};
 use runner::{CompilePlan, Job, LineKind, Msg, RunOutcome, Stage, STAGES};
@@ -44,20 +47,20 @@ impl Tab {
     fn label(self) -> &'static str {
         TABS.iter()
             .find(|(t, _)| *t == self)
-            .map(|(_, l)| *l)
+            .map(|(_, l)| tr(l))
             .unwrap_or("")
     }
 }
 
 const TABS: [(Tab, &str); 8] = [
-    (Tab::Projects, "Proyectos"),
-    (Tab::Compile, "Compilar"),
+    (Tab::Projects, n_("Proyectos")),
+    (Tab::Compile, n_("Compilar")),
     (Tab::Csg, "CSG"),
     (Tab::Bsp, "BSP"),
     (Tab::Vis, "VIS"),
     (Tab::Rad, "RAD"),
-    (Tab::Analysis, "Análisis"),
-    (Tab::Advice, "Guía"),
+    (Tab::Analysis, n_("Análisis")),
+    (Tab::Advice, n_("Guía")),
 ];
 
 // ---------------------------------------------------------------- app
@@ -151,6 +154,9 @@ struct App {
 
 impl Default for App {
     fn default() -> Self {
+        // The system's language until the saved preference is read, so even
+        // an error loading it is shown in a language the user reads.
+        i18n::set("");
         let mut startup_errors = Vec::new();
         let mut opts = match load_profile() {
             Ok(Some(opts)) => opts,
@@ -178,6 +184,7 @@ impl Default for App {
                 Library::default()
             }
         };
+        i18n::set(&lib.lang);
         let active = lib.active.as_deref().and_then(|name| lib.index_of(name));
         if let Some(i) = active {
             opts = lib.projects[i].opts.clone();
@@ -189,8 +196,8 @@ impl Default for App {
         }
         let status = if startup_errors.is_empty() {
             match active {
-                Some(i) => format!("Proyecto '{}' cargado.", lib.projects[i].name),
-                None => String::from("Elige un .map y la carpeta de herramientas."),
+                Some(i) => tf!("Proyecto '{name}' cargado.", name = lib.projects[i].name),
+                None => tr("Elige un .map y la carpeta de herramientas.").to_string(),
             }
         } else {
             startup_errors.join(" | ")
@@ -273,10 +280,20 @@ fn migrate_legacy_state(name: &str, destination: &Path) -> Result<(), String> {
     if legacy == destination || !legacy.is_file() {
         return Ok(());
     }
-    let text = std::fs::read_to_string(&legacy)
-        .map_err(|error| format!("no pude migrar {}: {error}", legacy.display()))?;
-    projects::atomic_write(destination, &text)
-        .map_err(|error| format!("no pude migrar a {}: {error}", destination.display()))
+    let text = std::fs::read_to_string(&legacy).map_err(|error| {
+        tf!(
+            "no pude migrar {path}: {error}",
+            path = legacy.display(),
+            error
+        )
+    })?;
+    projects::atomic_write(destination, &text).map_err(|error| {
+        tf!(
+            "no pude migrar a {path}: {error}",
+            path = destination.display(),
+            error
+        )
+    })
 }
 
 fn profile_path() -> Option<PathBuf> {
@@ -284,7 +301,7 @@ fn profile_path() -> Option<PathBuf> {
 }
 
 fn load_profile() -> Result<Option<Options>, String> {
-    let path = profile_path().ok_or("no pude determinar dónde leer las preferencias")?;
+    let path = profile_path().ok_or(tr("no pude determinar dónde leer las preferencias"))?;
     migrate_legacy_state("resdhlt-gui.json", &path)?;
     match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str::<Options>(&text)
@@ -292,9 +309,19 @@ fn load_profile() -> Result<Option<Options>, String> {
                 opts.migrate_defaults();
                 Some(opts)
             })
-            .map_err(|error| format!("{} está corrupto: {error}", path.display())),
+            .map_err(|error| {
+                tf!(
+                    "{path} está corrupto: {error}",
+                    path = path.display(),
+                    error
+                )
+            }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("no pude leer {}: {error}", path.display())),
+        Err(error) => Err(tf!(
+            "no pude leer {path}: {error}",
+            path = path.display(),
+            error
+        )),
     }
 }
 
@@ -313,7 +340,7 @@ impl Drop for AppInstanceLock {
 }
 
 fn acquire_app_instance_lock(path: &Path) -> Result<AppInstanceLock, String> {
-    let parent = path.parent().ok_or("ruta de lock sin carpeta")?;
+    let parent = path.parent().ok_or(tr("ruta de lock sin carpeta"))?;
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let file = OpenOptions::new()
         .create(true)
@@ -321,22 +348,28 @@ fn acquire_app_instance_lock(path: &Path) -> Result<AppInstanceLock, String> {
         .read(true)
         .write(true)
         .open(path)
-        .map_err(|error| format!("no pude abrir {}: {error}", path.display()))?;
+        .map_err(|error| {
+            tf!(
+                "no pude abrir {path}: {error}",
+                path = path.display(),
+                error
+            )
+        })?;
     file.try_lock_exclusive().map_err(|_| {
-        "ReSDHLT ya está abierto. Usa la ventana existente para evitar perder proyectos."
+        tr("ReSDHLT ya está abierto. Usa la ventana existente para evitar perder proyectos.")
             .to_string()
     })?;
     Ok(AppInstanceLock { file })
 }
 
 fn load_library() -> Result<Library, String> {
-    let path = library_path().ok_or("no pude determinar dónde leer los proyectos")?;
+    let path = library_path().ok_or(tr("no pude determinar dónde leer los proyectos"))?;
     migrate_legacy_state("resdhlt-projects.json", &path)?;
     Library::load_checked(&path)
 }
 
 fn save_profile(opts: &Options) -> Result<(), String> {
-    let path = profile_path().ok_or("no pude determinar dónde guardar")?;
+    let path = profile_path().ok_or(tr("no pude determinar dónde guardar"))?;
     let text = serde_json::to_string_pretty(opts).map_err(|e| e.to_string())?;
     projects::atomic_write(&path, &text)
 }
@@ -406,9 +439,10 @@ fn copy_bundled_tools(from: &Path, to: &Path) -> Result<usize, String> {
             continue;
         }
         std::fs::copy(entry.path(), to.join(entry.file_name())).map_err(|e| {
-            format!(
-                "no pude copiar {}: {e}",
-                entry.file_name().to_string_lossy()
+            tf!(
+                "no pude copiar {file}: {e}",
+                file = entry.file_name().to_string_lossy(),
+                e
             )
         })?;
         copied += 1;
@@ -522,7 +556,7 @@ impl App {
                     Msg::StageStart(s) => {
                         self.running_stage = Some(s);
                         self.stage_since = Some(Instant::now());
-                        self.status = format!("{} en curso...", s.name());
+                        self.status = tf!("{stage} en curso...", stage = s.name());
                     }
                     Msg::StageDone(s, secs, ok) => {
                         self.done.insert(s.name(), StageState { secs, ok });
@@ -536,10 +570,10 @@ impl App {
                         self.stage_since = None;
                         self.run_since = None;
                         self.status = match outcome {
-                            RunOutcome::Succeeded => format!("Listo en {}", fmt_secs(total)),
-                            RunOutcome::Failed => "Terminó con errores".to_string(),
+                            RunOutcome::Succeeded => tf!("Listo en {time}", time = fmt_secs(total)),
+                            RunOutcome::Failed => tr("Terminó con errores").to_string(),
                             RunOutcome::Cancelled => {
-                                format!("Cancelado después de {}", fmt_secs(total))
+                                tf!("Cancelado después de {time}", time = fmt_secs(total))
                             }
                         };
                         finished = true;
@@ -576,35 +610,44 @@ impl App {
         let result = (|| -> Result<String, String> {
             let bsp = self
                 .compiled_bsp()
-                .ok_or("No hay un .bsp compilado que copiar.")?;
-            let maps = game.maps_dir().ok_or("Indica la carpeta del juego.")?;
+                .ok_or(tr("No hay un .bsp compilado que copiar."))?;
+            let maps = game.maps_dir().ok_or(tr("Indica la carpeta del juego."))?;
             if !maps.is_dir() {
-                return Err(format!("No existe {}.", maps.display()));
+                return Err(tf!("No existe {path}.", path = maps.display()));
             }
-            let file = bsp.file_name().ok_or("El .bsp no tiene nombre.")?;
+            let file = bsp.file_name().ok_or(tr("El .bsp no tiene nombre."))?;
             let dst = maps.join(file);
             std::fs::copy(&bsp, &dst).map_err(|e| {
-                format!(
-                    "No pude copiar a {}: {e}. Si el juego tiene ese mapa abierto, ciérralo.",
-                    dst.display()
+                tf!(
+                    "No pude copiar a {path}: {e}. Si el juego tiene ese mapa abierto, ciérralo.",
+                    path = dst.display(),
+                    e
                 )
             })?;
-            let mut done = format!("Copiado a {}", dst.display());
+            let mut done = tf!("Copiado a {path}", path = dst.display());
             if launch {
-                let exe = game.executable().ok_or(format!(
-                    "{done}, pero no encontré hl.exe ni cstrike.exe en {}.",
-                    game.dir.trim()
+                let exe = game.executable().ok_or(tf!(
+                    "{done}, pero no encontré hl.exe ni cstrike.exe en {path}.",
+                    done,
+                    path = game.dir.trim()
                 ))?;
                 let name = bsp
                     .file_stem()
                     .and_then(|s| s.to_str())
-                    .ok_or("El nombre del mapa no es texto válido.")?;
+                    .ok_or(tr("El nombre del mapa no es texto válido."))?;
                 std::process::Command::new(&exe)
                     .current_dir(game.dir.trim())
                     .args(game.launch_args(name))
                     .spawn()
-                    .map_err(|e| format!("{done}, pero no pude abrir {}: {e}", exe.display()))?;
-                done.push_str(" y juego abierto en el mapa");
+                    .map_err(|e| {
+                        tf!(
+                            "{done}, pero no pude abrir {path}: {e}",
+                            done,
+                            path = exe.display(),
+                            e
+                        )
+                    })?;
+                return Ok(tf!("{done} y juego abierto en el mapa.", done));
             }
             done.push('.');
             Ok(done)
@@ -625,50 +668,66 @@ impl App {
         let before = self.lib.game.clone();
         card(
             ui,
-            "Probar en el juego",
-            "qué hacer con el mapa cuando termina de compilar",
+            tr("Probar en el juego"),
+            tr("qué hacer con el mapa cuando termina de compilar"),
             |ui| {
                 row(
                     ui,
                     m,
-                    "Carpeta del juego",
-                    "La carpeta donde está hl.exe o cstrike.exe, por ejemplo la de \
+                    tr("Carpeta del juego"),
+                    tr(
+                        "La carpeta donde está hl.exe o cstrike.exe, por ejemplo la de \
                      Half-Life en Steam. El mapa se copia a la subcarpeta cstrike/maps de \
                      esa carpeta, y RAD lee de ahí los .mdl para las sombras de los \
                      modelos. Vale para todos los proyectos.",
+                    ),
                     None,
                     |ui| {
                         let ok = (!self.lib.game.dir.trim().is_empty())
                             .then(|| self.lib.game.maps_dir().is_some_and(|p| p.is_dir()));
-                        path_row(ui, m, &mut self.lib.game.dir, ok, "Buscar", pick_dir, true);
+                        path_row(
+                            ui,
+                            m,
+                            &mut self.lib.game.dir,
+                            ok,
+                            tr("Buscar"),
+                            pick_dir,
+                            true,
+                        );
                     },
                 );
                 toggle_row(
                     ui,
                     m,
-                    "Copiar el mapa al juego",
-                    "Cada vez que una compilación termina bien, copia el .bsp a la carpeta \
+                    tr("Copiar el mapa al juego"),
+                    tr(
+                        "Cada vez que una compilación termina bien, copia el .bsp a la carpeta \
                      maps del juego. Si el juego tiene ese mapa abierto, Windows no deja \
                      reemplazarlo: cambia de mapa o cierra el juego antes.",
+                    ),
                     None,
                     &mut self.lib.game.copy,
                 );
                 toggle_row(
                     ui,
                     m,
-                    "Abrir el juego al terminar",
-                    "Cada vez que una compilación termina bien, copia el .bsp y abre el juego \
+                    tr("Abrir el juego al terminar"),
+                    tr(
+                        "Cada vez que una compilación termina bien, copia el .bsp y abre el juego \
                      directamente en el mapa. No aplica cuando solo se buscan leaks.",
+                    ),
                     None,
                     &mut self.lib.game.launch,
                 );
                 row(
                     ui,
                     m,
-                    "Parámetros del juego",
-                    "Parámetros extra para abrir el juego, separados por espacios. La GUI ya \
+                    tr("Parámetros del juego"),
+                    tr(
+                        "Parámetros extra para abrir el juego, separados por espacios. La GUI ya \
                      agrega -game cstrike y +map con el nombre del mapa.",
-                    Some("opcional"),
+                    ),
+                    Some(tr("opcional")),
                     |ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.lib.game.args)
@@ -680,10 +739,12 @@ impl App {
                 toggle_row(
                     ui,
                     m,
-                    "Avisar al terminar",
-                    "Cuando una compilación termina y esta ventana no está al frente, su \
+                    tr("Avisar al terminar"),
+                    tr(
+                        "Cuando una compilación termina y esta ventana no está al frente, su \
                      botón en la barra de tareas parpadea.",
-                    Some("recomendado"),
+                    ),
+                    Some(tr("recomendado")),
                     &mut self.lib.game.notify,
                 );
 
@@ -695,16 +756,20 @@ impl App {
                     if ui
                         .add_enabled(
                             ready,
-                            egui::Button::new(RichText::new("Probar ahora").strong()),
+                            egui::Button::new(RichText::new(tr("Probar ahora")).strong()),
                         )
-                        .on_hover_text("Copia el último .bsp compilado y abre el juego en ese mapa")
+                        .on_hover_text(tr(
+                            "Copia el último .bsp compilado y abre el juego en ese mapa",
+                        ))
                         .clicked()
                     {
                         self.deliver_to_game(true);
                     }
                     if ui
-                        .add_enabled(ready, egui::Button::new("Solo copiar"))
-                        .on_hover_text("Copia el último .bsp compilado a la carpeta maps del juego")
+                        .add_enabled(ready, egui::Button::new(tr("Solo copiar")))
+                        .on_hover_text(tr(
+                            "Copia el último .bsp compilado a la carpeta maps del juego",
+                        ))
                         .clicked()
                     {
                         self.deliver_to_game(false);
@@ -753,13 +818,14 @@ impl App {
             return;
         }
         let Some(bsp) = self.analysis_target().filter(|p| p.is_file()) else {
-            self.analysis_status = "No hay .bsp para analizar: compila el mapa o elige uno.".into();
+            self.analysis_status =
+                tr("No hay .bsp para analizar: compila el mapa o elige uno.").into();
             return;
         };
         // The source map only helps if it is the one this .bsp came from.
         let map = PathBuf::from(self.opts.map_path.trim());
         let map = (map.file_stem() == bsp.file_stem() && map.is_file()).then_some(map);
-        self.analysis_status = format!("Analizando {}", bsp.display());
+        self.analysis_status = tf!("Analizando {path}", path = bsp.display());
         self.analysis_job = Some(analysis::start(bsp, map, self.lib.analysis.clone()));
     }
 
@@ -779,13 +845,13 @@ impl App {
                             matches!(s.level, analysis::Level::Warn | analysis::Level::Error)
                         })
                         .count();
-                    self.analysis_status = format!(
-                        "Análisis listo en {}: {}",
-                        fmt_secs(report.secs),
-                        if problems == 0 {
-                            "sin problemas".to_string()
+                    self.analysis_status = tf!(
+                        "Análisis listo en {time}: {result}",
+                        time = fmt_secs(report.secs),
+                        result = if problems == 0 {
+                            tr("sin problemas").to_string()
                         } else {
-                            format!("{problems} apartados para revisar")
+                            tf!("{problems} apartados para revisar", problems)
                         }
                     );
                     self.analysis_report = Some(report);
@@ -830,7 +896,7 @@ impl App {
         }
         self.lib.last_update_check = projects::now_secs();
         self.save_library();
-        self.update_status = "Buscando actualizaciones...".to_string();
+        self.update_status = tr("Buscando actualizaciones...").to_string();
         if manual {
             self.status = self.update_status.clone();
         }
@@ -847,19 +913,19 @@ impl App {
         self.update_check = None;
         match msg {
             update::Msg::Available(release) => {
-                self.update_status = format!("Hay una versión nueva: {}", release.tag);
+                self.update_status = tf!("Hay una versión nueva: {tag}", tag = release.tag);
                 self.status = self.update_status.clone();
                 self.update_window = true;
                 self.update_found = Some(release);
             }
             update::Msg::UpToDate => {
-                self.update_status = format!(
-                    "Estás en la última versión ({}).",
-                    update::Version::current()
+                self.update_status = tf!(
+                    "Estás en la última versión ({version}).",
+                    version = update::Version::current()
                 );
             }
             update::Msg::Failed(e) => {
-                self.update_status = format!("No pude comprobar actualizaciones: {e}");
+                self.update_status = tf!("No pude comprobar actualizaciones: {e}", e);
             }
         }
     }
@@ -876,7 +942,7 @@ impl App {
 
         let mut open = true;
         let mut install = false;
-        egui::Window::new("Actualización disponible")
+        egui::Window::new(tr("Actualización disponible"))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -920,11 +986,11 @@ impl App {
                 }
 
                 ui.label(
-                    RichText::new(
+                    RichText::new(tr(
                         "Se descarga el .zip de la release, se reemplazan el ejecutable y \
                          la carpeta tools, y la GUI se reinicia sola. Tus proyectos y \
                          preferencias no se tocan.",
-                    )
+                    ))
                     .color(MUTED)
                     .small(),
                 );
@@ -933,9 +999,9 @@ impl App {
                 ui.horizontal(|ui| {
                     let btn = egui::Button::new(
                         RichText::new(if self.installing {
-                            "Instalando..."
+                            tr("Instalando...")
                         } else {
-                            "Actualizar ahora"
+                            tr("Actualizar ahora")
                         })
                         .strong(),
                     )
@@ -945,20 +1011,20 @@ impl App {
                     if ui
                         .add_enabled(!self.installing && self.job.is_none(), btn)
                         .on_hover_text(if self.job.is_some() {
-                            "Cancela o espera la compilación antes de actualizar."
+                            tr("Cancela o espera la compilación antes de actualizar.")
                         } else {
-                            "Descargar e instalar esta versión."
+                            tr("Descargar e instalar esta versión.")
                         })
                         .clicked()
                     {
                         install = true;
                     }
-                    if ui.button("Ahora no").clicked() {
+                    if ui.button(tr("Ahora no")).clicked() {
                         self.update_window = false;
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.hyperlink_to(
-                            "Ver en GitHub",
+                            tr("Ver en GitHub"),
                             format!("https://github.com/{}/releases/latest", update::REPO),
                         );
                     });
@@ -982,11 +1048,12 @@ impl App {
     /// after the swap helper is ready.
     fn do_install(&mut self, release: &Release) {
         if self.job.is_some() || self.installing {
-            self.update_status = "Cancela o espera la compilación antes de actualizar.".to_string();
+            self.update_status =
+                tr("Cancela o espera la compilación antes de actualizar.").to_string();
             return;
         }
         self.installing = true;
-        self.update_status = "Descargando...".to_string();
+        self.update_status = tr("Descargando...").to_string();
         self.update_install = Some(update::install_async(release.clone()));
     }
 
@@ -1009,7 +1076,7 @@ impl App {
             }
             Err(e) => {
                 self.installing = false;
-                self.update_status = format!("Falló la actualización: {e}");
+                self.update_status = tf!("Falló la actualización: {e}", e);
                 self.status = self.update_status.clone();
                 // Leave the window up with the button in it rather than a dead
                 // status line, so a failed automatic update can be retried.
@@ -1024,7 +1091,7 @@ impl App {
         self.lib.active = self.active.map(|i| self.lib.projects[i].name.clone());
         if let Some(path) = library_path() {
             if let Err(e) = self.lib.save(&path) {
-                self.status = format!("No pude guardar los proyectos: {e}");
+                self.status = tf!("No pude guardar los proyectos: {e}", e);
                 return;
             }
         }
@@ -1070,7 +1137,10 @@ impl App {
         }
         self.active = Some(index);
         self.selected = Some(index);
-        self.status = format!("Proyecto '{}' cargado.", self.lib.projects[index].name);
+        self.status = tf!(
+            "Proyecto '{name}' cargado.",
+            name = self.lib.projects[index].name
+        );
         self.files_at = None; // force a folder rescan
         self.save_library();
         let _ = save_profile(&self.opts);
@@ -1086,7 +1156,7 @@ impl App {
         let index = self.lib.index_of(&name).unwrap_or(0);
         self.active = Some(index);
         self.selected = Some(index);
-        self.status = format!("Proyecto '{name}' creado.");
+        self.status = tf!("Proyecto '{name}' creado.", name);
         self.new_name.clear();
         self.files_at = None;
         self.save_library();
@@ -1103,7 +1173,10 @@ impl App {
         self.active = fix(self.active);
         self.selected = fix(self.selected);
         self.confirm_delete = None;
-        self.status = format!("Proyecto '{name}' borrado. Los archivos del mapa no se tocaron.");
+        self.status = tf!(
+            "Proyecto '{name}' borrado. Los archivos del mapa no se tocaron.",
+            name
+        );
         self.save_library();
     }
 
@@ -1247,7 +1320,7 @@ impl App {
                 self.status = errors
                     .first()
                     .cloned()
-                    .unwrap_or_else(|| "No se puede iniciar la compilación.".to_string());
+                    .unwrap_or_else(|| tr("No se puede iniciar la compilación.").to_string());
                 self.log
                     .extend(errors.into_iter().map(|error| (LineKind::Error, error)));
                 self.last_outcome = Some(RunOutcome::Failed);
@@ -1283,13 +1356,13 @@ impl App {
                 // dropped is taken as the output folder.
                 if has_tools(&p) {
                     self.opts.tools_dir = p.display().to_string();
-                    self.status = "Carpeta de herramientas actualizada.".into();
+                    self.status = tr("Carpeta de herramientas actualizada.").into();
                 } else if dir_has_wads(&p) {
                     self.opts.wad_dir = p.display().to_string();
-                    self.status = "Carpeta de WADs actualizada.".into();
+                    self.status = tr("Carpeta de WADs actualizada.").into();
                 } else {
                     self.opts.output_dir = p.display().to_string();
-                    self.status = "Carpeta de salida actualizada.".into();
+                    self.status = tr("Carpeta de salida actualizada.").into();
                 }
             } else if p
                 .extension()
@@ -1298,7 +1371,7 @@ impl App {
                 .unwrap_or(false)
             {
                 self.opts.map_path = p.display().to_string();
-                self.status = "Mapa cargado.".into();
+                self.status = tr("Mapa cargado.").into();
                 self.tab = Tab::Compile;
             }
         }
@@ -1309,8 +1382,8 @@ impl App {
     fn ui_projects(&mut self, ui: &mut egui::Ui, m: &Metrics) {
         card(
             ui,
-            "Proyectos",
-            "cada uno guarda su mapa, sus carpetas y todas las opciones",
+            tr("Proyectos"),
+            tr("cada uno guarda su mapa, sus carpetas y todas las opciones"),
             |ui| {
                 ui.horizontal(|ui| {
                     let btn_w = 200.0;
@@ -1318,18 +1391,19 @@ impl App {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.new_name)
                             .desired_width(field_w)
-                            .hint_text("nombre del proyecto (vacío = el del mapa)"),
+                            .hint_text(tr("nombre del proyecto (vacío = el del mapa)")),
                     );
-                    let btn = egui::Button::new(RichText::new("Guardar como proyecto").strong())
-                        .min_size(egui::vec2(btn_w, 26.0))
-                        .fill(ACCENT_DEEP)
-                        .stroke(egui::Stroke::new(1.0_f32, ACCENT));
+                    let btn =
+                        egui::Button::new(RichText::new(tr("Guardar como proyecto")).strong())
+                            .min_size(egui::vec2(btn_w, 26.0))
+                            .fill(ACCENT_DEEP)
+                            .stroke(egui::Stroke::new(1.0_f32, ACCENT));
                     if ui
                         .add(btn)
-                        .on_hover_text(
+                        .on_hover_text(tr(
                             "Crea un proyecto con lo que tienes cargado ahora: mapa, \
                              carpetas y todas las opciones de las demás pestañas.",
-                        )
+                        ))
                         .clicked()
                     {
                         let name = if self.new_name.trim().is_empty() {
@@ -1346,11 +1420,11 @@ impl App {
 
                 if self.lib.projects.is_empty() {
                     ui.label(
-                        RichText::new(
+                        RichText::new(tr(
                             "Todavía no hay ninguno. Carga un .map en la pestaña Compilar, \
                              ajusta lo que quieras y guárdalo aquí con un nombre: zm_hola, \
                              de_dust_beta3, lo que sea.",
-                        )
+                        ))
                         .color(MUTED)
                         .small(),
                     );
@@ -1364,9 +1438,9 @@ impl App {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.project_filter)
                                 .desired_width(ui.available_width() - 90.0)
-                                .hint_text("filtrar por nombre o mapa..."),
+                                .hint_text(tr("filtrar por nombre o mapa...")),
                         );
-                        if ui.button("Limpiar").clicked() {
+                        if ui.button(tr("Limpiar")).clicked() {
                             self.project_filter.clear();
                         }
                     });
@@ -1389,7 +1463,7 @@ impl App {
 
                 if shown.is_empty() {
                     ui.label(
-                        RichText::new("Ningún proyecto coincide con el filtro.")
+                        RichText::new(tr("Ningún proyecto coincide con el filtro."))
                             .color(MUTED)
                             .small(),
                     );
@@ -1470,9 +1544,9 @@ impl App {
                                             .add(
                                                 egui::Button::new(
                                                     RichText::new(if is_active {
-                                                        "abierto"
+                                                        tr("abierto")
                                                     } else {
-                                                        "Abrir"
+                                                        tr("Abrir")
                                                     })
                                                     .small(),
                                                 )
@@ -1541,10 +1615,11 @@ impl App {
                             }
                             let age = fmt_unix_age(*used);
                             let _ = resp.on_hover_text(if age.is_empty() {
-                                "Click para elegirlo · doble click para abrirlo".to_string()
+                                tr("Click para elegirlo · doble click para abrirlo").to_string()
                             } else {
-                                format!(
-                                    "Usado {age}. Click para elegirlo, doble click para abrirlo."
+                                tf!(
+                                    "Usado {age}. Click para elegirlo, doble click para abrirlo.",
+                                    age
                                 )
                             });
                         }
@@ -1559,7 +1634,7 @@ impl App {
 
                 let Some(sel) = self.selected else {
                     ui.label(
-                        RichText::new("Elige un proyecto de la lista.")
+                        RichText::new(tr("Elige un proyecto de la lista."))
                             .color(MUTED)
                             .small(),
                     );
@@ -1576,14 +1651,14 @@ impl App {
                             let r = ui.add(
                                 egui::TextEdit::singleline(buf)
                                     .desired_width(w)
-                                    .hint_text("nuevo nombre"),
+                                    .hint_text(tr("nuevo nombre")),
                             );
                             let entered =
                                 r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                            if entered || ui.button("Aceptar").clicked() {
+                            if entered || ui.button(tr("Aceptar")).clicked() {
                                 commit_rename = Some(buf.clone());
                             }
-                            if ui.button("Cancelar").clicked() {
+                            if ui.button(tr("Cancelar")).clicked() {
                                 cancel_rename = true;
                             }
                         });
@@ -1596,7 +1671,7 @@ impl App {
                 if let Some(wanted) = commit_rename {
                     let wanted = projects::sanitize_name(&wanted);
                     if self.lib.name_taken(&wanted, Some(sel)) {
-                        self.status = format!("Ya hay un proyecto llamado '{wanted}'.");
+                        self.status = tf!("Ya hay un proyecto llamado '{wanted}'.", wanted);
                     } else {
                         // Sorting invalidates every numeric index, not just the
                         // one being renamed. Preserve both identities by name
@@ -1619,44 +1694,46 @@ impl App {
                             .and_then(|name| self.lib.index_of(name));
                         self.selected = self.lib.index_of(&wanted);
                         self.rename_buf = None;
-                        self.status = format!("Renombrado a '{wanted}'.");
+                        self.status = tf!("Renombrado a '{wanted}'.", wanted);
                         self.save_library();
                     }
                 }
 
                 ui.horizontal_wrapped(|ui| {
                     if ui
-                        .button(RichText::new("Abrir").strong())
-                        .on_hover_text("Carga su mapa y todas sus opciones")
+                        .button(RichText::new(tr("Abrir")).strong())
+                        .on_hover_text(tr("Carga su mapa y todas sus opciones"))
                         .clicked()
                     {
                         self.load_project(sel);
                     }
-                    if ui.button("Renombrar").clicked() {
+                    if ui.button(tr("Renombrar")).clicked() {
                         self.rename_buf = Some((sel, self.lib.projects[sel].name.clone()));
                     }
-                    if ui.button("Duplicar").clicked() {
+                    if ui.button(tr("Duplicar")).clicked() {
                         let src = self.lib.projects[sel].clone();
                         self.create_project(&src.name, src.opts);
                     }
                     if ui
-                        .button("Actualizar con lo actual")
-                        .on_hover_text(
+                        .button(tr("Actualizar con lo actual"))
+                        .on_hover_text(tr(
                             "Pisa las opciones guardadas del proyecto con las que tienes \
                              en pantalla ahora.",
-                        )
+                        ))
                         .clicked()
                     {
                         self.lib.projects[sel].opts = self.opts.clone();
                         self.lib.projects[sel].last_used = projects::now_secs();
-                        self.status = format!("'{}' actualizado.", self.lib.projects[sel].name);
+                        self.status =
+                            tf!("'{name}' actualizado.", name = self.lib.projects[sel].name);
                         self.save_library();
                     }
 
                     if self.confirm_delete == Some(sel) {
-                        let del = egui::Button::new(RichText::new("Confirmar borrado").strong())
-                            .fill(ERR.linear_multiply(0.35))
-                            .stroke(egui::Stroke::new(1.0_f32, ERR));
+                        let del =
+                            egui::Button::new(RichText::new(tr("Confirmar borrado")).strong())
+                                .fill(ERR.linear_multiply(0.35))
+                                .stroke(egui::Stroke::new(1.0_f32, ERR));
                         if ui.add(del).clicked() {
                             self.delete_project(sel);
                         }
@@ -1664,10 +1741,10 @@ impl App {
                             self.confirm_delete = None;
                         }
                     } else if ui
-                        .button(RichText::new("Borrar").color(ERR))
-                        .on_hover_text(
+                        .button(RichText::new(tr("Borrar")).color(ERR))
+                        .on_hover_text(tr(
                             "Borra el proyecto de la lista. No toca ningún archivo del mapa.",
-                        )
+                        ))
                         .clicked()
                     {
                         self.confirm_delete = Some(sel);
@@ -1682,17 +1759,17 @@ impl App {
             (p.name.clone(), p.opts.clone())
         };
 
-        card(ui, &name, "lo que guarda este proyecto", |ui| {
+        card(ui, &name, tr("lo que guarda este proyecto"), |ui| {
             let rows = [
-                ("Mapa", opts.map_path.clone()),
-                ("Herramientas", opts.tools_dir.clone()),
-                ("Carpeta de salida", opts.output_dir.clone()),
-                ("Carpeta de WADs", opts.wad_dir.clone()),
+                (tr("Mapa"), opts.map_path.clone()),
+                (tr("Herramientas"), opts.tools_dir.clone()),
+                (tr("Carpeta de salida"), opts.output_dir.clone()),
+                (tr("Carpeta de WADs"), opts.wad_dir.clone()),
             ];
             for (label, value) in rows {
                 row(ui, m, label, "", None, |ui| {
                     let shown = if value.trim().is_empty() {
-                        RichText::new("(sin definir)").color(FAINT).small()
+                        RichText::new(tr("(sin definir)")).color(FAINT).small()
                     } else {
                         RichText::new(value.clone()).color(TEXT).small()
                     };
@@ -1706,15 +1783,19 @@ impl App {
                     "VIS {} · {} · bounce {} · skylevel {} · {}",
                     opts.vis_quality.label(),
                     if opts.rad_fast {
-                        "RAD rápido"
+                        tr("RAD rápido")
                     } else if opts.extra_sampling {
-                        "RAD con -extra"
+                        tr("RAD con -extra")
                     } else {
-                        "RAD sin -extra"
+                        tr("RAD sin -extra")
                     },
                     opts.bounce,
                     opts.skylevel,
-                    if opts.pre25 { "-pre25" } else { "sin -pre25" },
+                    if opts.pre25 {
+                        "-pre25"
+                    } else {
+                        tr("sin -pre25")
+                    },
                 ))
                 .color(MUTED)
                 .small(),
@@ -1728,9 +1809,9 @@ impl App {
         self.refresh_files(false);
 
         let Some(dir) = self.files_dir.clone() else {
-            card(ui, "Carpeta del proyecto", "", |ui| {
+            card(ui, tr("Carpeta del proyecto"), "", |ui| {
                 ui.label(
-                    RichText::new("Todavía no hay una carpeta válida que mirar.")
+                    RichText::new(tr("Todavía no hay una carpeta válida que mirar."))
                         .color(MUTED)
                         .small(),
                 );
@@ -1751,13 +1832,13 @@ impl App {
             .map(|f| f.size)
             .sum();
         let total: u64 = self.files.iter().map(|f| f.size).sum();
-        let subtitle = format!(
-            "{} archivos · {}",
-            self.files.len(),
-            projects::fmt_size(total)
+        let subtitle = tf!(
+            "{count} archivos · {size}",
+            count = self.files.len(),
+            size = projects::fmt_size(total)
         );
 
-        card(ui, "Carpeta del proyecto", &subtitle, |ui| {
+        card(ui, tr("Carpeta del proyecto"), &subtitle, |ui| {
             let path_text = dir.display().to_string();
             ui.add(egui::Label::new(RichText::new(&path_text).color(MUTED).small()).truncate())
                 .on_hover_text(&path_text);
@@ -1766,10 +1847,10 @@ impl App {
             let mut do_refresh = false;
             let mut do_clean = false;
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Abrir carpeta").clicked() {
+                if ui.button(tr("Abrir carpeta")).clicked() {
                     open_in_explorer(&dir);
                 }
-                if ui.button("Actualizar").clicked() {
+                if ui.button(tr("Actualizar")).clicked() {
                     do_refresh = true;
                 }
                 // In the same left-to-right flow as the other two: pinning this
@@ -1777,7 +1858,7 @@ impl App {
                 // soon as the panel was narrow.
                 if !junk.is_empty() {
                     if self.confirm_clean {
-                        let btn = egui::Button::new(RichText::new("Confirmar").strong())
+                        let btn = egui::Button::new(RichText::new(tr("Confirmar")).strong())
                             .fill(ERR.linear_multiply(0.35))
                             .stroke(egui::Stroke::new(1.0_f32, ERR));
                         if ui.add(btn).clicked() {
@@ -1787,15 +1868,15 @@ impl App {
                             self.confirm_clean = false;
                         }
                     } else if ui
-                        .button(format!(
-                            "Limpiar intermedios ({}, {})",
-                            junk.len(),
-                            projects::fmt_size(junk_bytes)
+                        .button(tf!(
+                            "Limpiar intermedios ({count}, {size})",
+                            count = junk.len(),
+                            size = projects::fmt_size(junk_bytes)
                         ))
-                        .on_hover_text(
+                        .on_hover_text(tr(
                             "Borra .p0 a .p3, .lin, .pts, .wa_, .ext y .max. El .map, \
                              el .bsp y los logs no se tocan.",
-                        )
+                        ))
                         .clicked()
                     {
                         self.confirm_clean = true;
@@ -1810,7 +1891,7 @@ impl App {
                         removed += 1;
                     }
                 }
-                self.status = format!("Borrados {removed} archivos intermedios.");
+                self.status = tf!("Borrados {removed} archivos intermedios.", removed);
                 self.confirm_clean = false;
                 do_refresh = true;
             }
@@ -1821,7 +1902,11 @@ impl App {
             ui.add_space(8.0);
 
             if self.files.is_empty() {
-                ui.label(RichText::new("La carpeta está vacía.").color(MUTED).small());
+                ui.label(
+                    RichText::new(tr("La carpeta está vacía."))
+                        .color(MUTED)
+                        .small(),
+                );
                 return;
             }
 
@@ -1836,7 +1921,7 @@ impl App {
                     .to_string();
                 ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new(format!("Renombrar {old_name}:"))
+                        RichText::new(tf!("Renombrar {old_name}:", old_name))
                             .color(TEXT)
                             .small(),
                     );
@@ -1844,13 +1929,13 @@ impl App {
                     let r = ui.add(
                         egui::TextEdit::singleline(buf)
                             .desired_width(w)
-                            .hint_text("nuevo nombre con extensión"),
+                            .hint_text(tr("nuevo nombre con extensión")),
                     );
                     let entered = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if entered || ui.button("Aceptar").clicked() {
+                    if entered || ui.button(tr("Aceptar")).clicked() {
                         commit_rename = Some((path.clone(), buf.clone()));
                     }
-                    if ui.button("Cancelar").clicked() {
+                    if ui.button(tr("Cancelar")).clicked() {
                         cancel_rename = true;
                     }
                 });
@@ -1888,22 +1973,22 @@ impl App {
                         ui.set_width(ui.available_width());
                         ui.label(
                             RichText::new(if is_source {
-                                format!("¿Borrar {name}? ES EL .MAP FUENTE DE ESTE PROYECTO.")
+                                tf!("¿Borrar {name}? ES EL .MAP FUENTE DE ESTE PROYECTO.", name)
                             } else {
-                                format!("¿Borrar {name}? No va a la papelera.")
+                                tf!("¿Borrar {name}? No va a la papelera.", name)
                             })
                             .color(if is_source { ERR } else { TEXT })
                             .strong(),
                         );
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
-                            let btn = egui::Button::new(RichText::new("Sí, borrar").strong())
+                            let btn = egui::Button::new(RichText::new(tr("Sí, borrar")).strong())
                                 .fill(ERR.linear_multiply(0.35))
                                 .stroke(egui::Stroke::new(1.0_f32, ERR));
                             if ui.add(btn).clicked() {
                                 confirmed_delete = Some(path.clone());
                             }
-                            if ui.button("Cancelar").clicked() {
+                            if ui.button(tr("Cancelar")).clicked() {
                                 self.file_delete = None;
                             }
                         });
@@ -1917,8 +2002,8 @@ impl App {
                     .unwrap_or("?")
                     .to_string();
                 self.status = match std::fs::remove_file(&path) {
-                    Ok(()) => format!("{name} borrado."),
-                    Err(e) => format!("No pude borrar {name}: {e}"),
+                    Ok(()) => tf!("{name} borrado.", name),
+                    Err(e) => tf!("No pude borrar {name}: {e}", name, e),
                 };
                 if self.file_sel.as_deref() == Some(path.as_path()) {
                     self.file_sel = None;
@@ -1974,29 +2059,29 @@ impl App {
                             ui.add_space(6.0);
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
-                                if ui.small_button("Abrir").clicked() {
+                                if ui.small_button(tr("Abrir")).clicked() {
                                     open_file = Some(sel.clone());
                                 }
                                 if ui
-                                    .small_button("Mostrar")
-                                    .on_hover_text("Abrir la carpeta con el archivo marcado")
+                                    .small_button(tr("Mostrar"))
+                                    .on_hover_text(tr("Abrir la carpeta con el archivo marcado"))
                                     .clicked()
                                 {
                                     reveal_file = Some(sel.clone());
                                 }
                                 if ui
-                                    .small_button("Ruta")
-                                    .on_hover_text("Copiar la ruta completa")
+                                    .small_button(tr("Ruta"))
+                                    .on_hover_text(tr("Copiar la ruta completa"))
                                     .clicked()
                                 {
                                     copy_path = Some(sel.display().to_string());
                                 }
-                                if ui.small_button("Renombrar").clicked() {
+                                if ui.small_button(tr("Renombrar")).clicked() {
                                     rename_file = Some(sel.clone());
                                 }
                                 if ui
                                     .add(
-                                        egui::Button::new(RichText::new("Borrar").color(ERR))
+                                        egui::Button::new(RichText::new(tr("Borrar")).color(ERR))
                                             .small(),
                                     )
                                     .clicked()
@@ -2117,13 +2202,14 @@ impl App {
                     // thing lives in the tooltip.
                     let kind = f.kind.label();
                     let hover = resp.on_hover_text(format!(
-                        "{}{}\nClick marca · doble click abre · click derecho para más",
+                        "{}{}\n{}",
                         f.name,
                         if kind.is_empty() {
                             String::new()
                         } else {
                             format!("  ({kind})")
-                        }
+                        },
+                        tr("Click marca · doble click abre · click derecho para más")
                     ));
 
                     hover.context_menu(|ui| {
@@ -2131,26 +2217,26 @@ impl App {
                         // selected before.
                         select_file = Some(f.path.clone());
                         ui.set_min_width(190.0);
-                        if ui.button("Abrir").clicked() {
+                        if ui.button(tr("Abrir")).clicked() {
                             open_file = Some(f.path.clone());
                             ui.close_menu();
                         }
-                        if ui.button("Mostrar en la carpeta").clicked() {
+                        if ui.button(tr("Mostrar en la carpeta")).clicked() {
                             reveal_file = Some(f.path.clone());
                             ui.close_menu();
                         }
-                        if ui.button("Copiar ruta").clicked() {
+                        if ui.button(tr("Copiar ruta")).clicked() {
                             copy_path = Some(f.path.display().to_string());
                             ui.close_menu();
                         }
                         ui.separator();
-                        if ui.button("Renombrar").clicked() {
+                        if ui.button(tr("Renombrar")).clicked() {
                             rename_file = Some(f.path.clone());
                             ui.close_menu();
                         }
                         if ui
-                            .button(RichText::new("Borrar").color(ERR))
-                            .on_hover_text("Pide confirmación antes de borrar")
+                            .button(RichText::new(tr("Borrar")).color(ERR))
+                            .on_hover_text(tr("Pide confirmación antes de borrar"))
                             .clicked()
                         {
                             delete_file = Some(f.path.clone());
@@ -2171,7 +2257,7 @@ impl App {
             }
             if let Some(text) = copy_path {
                 ui.output_mut(|o| o.copied_text = text);
-                self.status = "Ruta copiada.".to_string();
+                self.status = tr("Ruta copiada.").to_string();
             }
             if let Some(p) = rename_file {
                 let current = p
@@ -2199,15 +2285,15 @@ impl App {
     fn rename_file(&mut self, from: &Path, wanted: &str) {
         let wanted = wanted.trim();
         if wanted.is_empty() {
-            self.status = "El nombre no puede quedar vacío.".to_string();
+            self.status = tr("El nombre no puede quedar vacío.").to_string();
             return;
         }
         if wanted.contains(['/', '\\', ':']) {
-            self.status = "Solo el nombre, sin carpetas.".to_string();
+            self.status = tr("Solo el nombre, sin carpetas.").to_string();
             return;
         }
         let Some(dir) = from.parent() else {
-            self.status = "No pude determinar la carpeta.".to_string();
+            self.status = tr("No pude determinar la carpeta.").to_string();
             return;
         };
         let to = dir.join(wanted);
@@ -2216,7 +2302,7 @@ impl App {
             return;
         }
         if to.exists() {
-            self.status = format!("Ya existe {wanted} en esa carpeta.");
+            self.status = tf!("Ya existe {wanted} en esa carpeta.", wanted);
             return;
         }
         let selected_source = self.selected.filter(|index| {
@@ -2237,27 +2323,30 @@ impl App {
                     self.dirty_since = Some(Instant::now());
                     self.checks.checked_at = None;
                 }
-                self.status = format!(
-                    "{} renombrado a {wanted}.",
-                    from.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+                self.status = tf!(
+                    "{old} renombrado a {wanted}.",
+                    old = from.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                    wanted
                 );
                 self.file_sel = Some(to);
                 self.file_rename = None;
             }
-            Err(e) => self.status = format!("No pude renombrar: {e}"),
+            Err(e) => self.status = tf!("No pude renombrar: {e}", e),
         }
     }
 
     fn ui_compile(&mut self, ui: &mut egui::Ui, m: &Metrics) {
-        card(ui, "Archivos", "qué compilar y con qué", |ui| {
+        card(ui, tr("Archivos"), tr("qué compilar y con qué"), |ui| {
             row(
                 ui,
                 m,
-                "Mapa (.map)",
-                "El archivo fuente que exporta tu editor (J.A.C.K., Hammer). También \
+                tr("Mapa (.map)"),
+                tr(
+                    "El archivo fuente que exporta tu editor (J.A.C.K., Hammer). También \
                  puedes arrastrarlo sobre la ventana.\n\n\
                  Los .bsp, .prt y logs se generan al lado de este archivo, salvo que \
                  definas una carpeta de salida.",
+                ),
                 None,
                 |ui| {
                     let ok = self.checks.map_ok;
@@ -2266,8 +2355,8 @@ impl App {
                         m,
                         &mut self.opts.map_path,
                         Some(ok),
-                        "Buscar",
-                        || pick_file("Mapa", "map"),
+                        tr("Buscar"),
+                        || pick_file(tr("Mapa"), "map"),
                         false,
                     );
                 },
@@ -2276,13 +2365,15 @@ impl App {
             row(
                 ui,
                 m,
-                "Herramientas",
-                "La carpeta con sdHLCSG, sdHLBSP, sdHLVIS y sdHLRAD. Si compilaste \
+                tr("Herramientas"),
+                tr(
+                    "La carpeta con sdHLCSG, sdHLBSP, sdHLVIS y sdHLRAD. Si compilaste \
                  este repo, es la carpeta 'tools'. La GUI la busca sola al arrancar.\n\n\
                  OJO: si la apuntas a la carpeta de otro programa (JACK, Hammer, una \
                  instalación vieja), actualizar la app NO actualiza esos binarios. La app \
                  solo reemplaza el 'tools' que tiene al lado. Si eso pasa te avisamos aquí \
                  abajo.",
+                ),
                 None,
                 |ui| {
                     let ok = self.checks.tools_ok;
@@ -2291,7 +2382,7 @@ impl App {
                         m,
                         &mut self.opts.tools_dir,
                         Some(ok),
-                        "Buscar",
+                        tr("Buscar"),
                         pick_dir,
                         false,
                     );
@@ -2302,27 +2393,29 @@ impl App {
                 hint(
                     ui,
                     m,
-                    "Estas herramientas son más viejas que las que trae esta versión de la \
+                    tr(
+                        "Estas herramientas son más viejas que las que trae esta versión de la \
                      app. Actualizar la app no toca una carpeta que apunta a otro lado, así \
                      que compilarías con los binarios viejos y sin las opciones nuevas",
+                    ),
                     WARN,
                 );
                 ui.horizontal(|ui| {
                     ui.add_space(m.label_w + 10.0);
-                    if ui.button("Usar las que trae la app").clicked() {
+                    if ui.button(tr("Usar las que trae la app")).clicked() {
                         self.opts.tools_dir = bundled.display().to_string();
-                        self.status = "Ahora se usan las herramientas de la app".to_string();
+                        self.status = tr("Ahora se usan las herramientas de la app").to_string();
                     }
-                    if ui.button("Copiar las nuevas ahí").clicked() {
+                    if ui.button(tr("Copiar las nuevas ahí")).clicked() {
                         let to = PathBuf::from(self.opts.tools_dir.trim());
                         self.status = match copy_bundled_tools(&bundled, &to) {
                             Ok(n) => {
                                 // Force the check to run again against the files
                                 // that are now there.
                                 self.checks.tools_key.clear();
-                                format!("{n} archivos copiados a {}", to.display())
+                                tf!("{n} archivos copiados a {path}", n, path = to.display())
                             }
-                            Err(e) => format!("No pude copiar: {e}"),
+                            Err(e) => tf!("No pude copiar: {e}", e),
                         };
                     }
                 });
@@ -2332,14 +2425,16 @@ impl App {
             row(
                 ui,
                 m,
-                "Carpeta de salida",
-                "Dónde queda el .bsp. Si la dejas vacía, el .bsp se genera junto al .map \
+                tr("Carpeta de salida"),
+                tr(
+                    "Dónde queda el .bsp. Si la dejas vacía, el .bsp se genera junto al .map \
                  (y si 'Carpeta por proyecto' está activada, la basura del compilado va a \
                  una subcarpeta 'intermedios' ahí mismo).\n\n\
                  Si la indicas, se copia el .map ahí y se compila esa copia: el .bsp, el \
                  .prt, los logs y los intermedios (.p0 a .p3) quedan todos en esa carpeta \
                  y tu carpeta de trabajo no se ensucia. El .map original nunca se toca.",
-                Some("recomendado"),
+                ),
+                Some(tr("recomendado")),
                 |ui| {
                     let ok = (!self.opts.output_dir.trim().is_empty())
                         .then(|| Path::new(self.opts.output_dir.trim()).is_dir());
@@ -2348,7 +2443,7 @@ impl App {
                         m,
                         &mut self.opts.output_dir,
                         ok,
-                        "Buscar",
+                        tr("Buscar"),
                         pick_dir,
                         true,
                     );
@@ -2358,37 +2453,47 @@ impl App {
             row(
                 ui,
                 m,
-                "Carpeta de WADs",
-                "Dónde tienes tus .wad. Sirve para dos cosas:\n\n\
+                tr("Carpeta de WADs"),
+                tr("Dónde tienes tus .wad. Sirve para dos cosas:\n\n\
                  1) Se le pasa a RAD como -waddir para que encuentre las texturas al \
                  calcular la luz.\n\
                  2) Si activas la opción de abajo, la lista de WADs del mapa se reescribe \
-                 para apuntar a esta carpeta.",
+                 para apuntar a esta carpeta."),
                 None,
                 |ui| {
                     let ok = (!self.opts.wad_dir.trim().is_empty())
                         .then(|| Path::new(self.opts.wad_dir.trim()).is_dir());
-                    path_row(ui, m, &mut self.opts.wad_dir, ok, "Buscar", pick_dir, true);
+                    path_row(
+                        ui,
+                        m,
+                        &mut self.opts.wad_dir,
+                        ok,
+                        tr("Buscar"),
+                        pick_dir,
+                        true,
+                    );
                 },
             );
 
             toggle_row(
                 ui,
                 m,
-                "Carpeta por proyecto",
-                "Con esto activado, la carpeta de salida no se llena de archivos sueltos: \
+                tr("Carpeta por proyecto"),
+                tr(
+                    "Con esto activado, la carpeta de salida no se llena de archivos sueltos: \
                  se crea dentro una carpeta con el nombre del proyecto (o el del mapa si no \
                  hay proyecto), y dentro de esa, una subcarpeta 'intermedios'.\n\n\
                  El compilado corre en 'intermedios', así que TODO lo que ensucian las \
                  herramientas queda ahí: la copia del .map, los logs, el .prt, los .p0 a \
                  .p3, el .lin y el .pts. Al terminar bien, el .bsp se mueve solo un nivel \
                  arriba.\n\n\
-                 Resultado: en la carpeta del proyecto ves el .bsp y nada más. Podés \
+                 Resultado: en la carpeta del proyecto ves el .bsp y nada más. Puedes \
                  apuntar diez mapas a la misma carpeta de salida sin que se mezclen.\n\n\
                  Sin carpeta de salida también sirve: no se crea carpeta de proyecto (el \
-                 .bsp sigue quedando junto al .map, donde lo esperás), pero sí la \
+                 .bsp sigue quedando junto al .map, donde lo esperas), pero sí la \
                  subcarpeta 'intermedios' al lado, así tu carpeta de fuentes no se ensucia.",
-                Some("recomendado"),
+                ),
+                Some(tr("recomendado")),
                 &mut self.opts.organize_output,
             );
 
@@ -2402,19 +2507,20 @@ impl App {
                         .and_then(|n| n.to_str())
                         .unwrap_or("")
                         .to_string();
-                    format!(
-                        "{folder}\\ para el .bsp, {folder}\\{}\\ para logs e intermedios",
-                        options::WORK_SUBDIR
+                    tf!(
+                        "{folder}\\ para el .bsp, {folder}\\{work}\\ para logs e intermedios",
+                        folder,
+                        work = options::WORK_SUBDIR
                     )
                 }),
-                (true, false) => Some("Todo suelto en la carpeta de salida".to_string()),
-                (false, true) => Some(format!(
-                    "Sin carpeta de salida: el .bsp junto al .map, {}\\ al lado para logs e \
+                (true, false) => Some(tr("Todo suelto en la carpeta de salida").to_string()),
+                (false, true) => Some(tf!(
+                    "Sin carpeta de salida: el .bsp junto al .map, {work}\\ al lado para logs e \
                      intermedios",
-                    options::WORK_SUBDIR
+                    work = options::WORK_SUBDIR
                 )),
                 (false, false) => {
-                    Some("Todo suelto junto al .map, mezclado con tus fuentes".to_string())
+                    Some(tr("Todo suelto junto al .map, mezclado con tus fuentes").to_string())
                 }
             };
             if let Some(text) = text {
@@ -2429,8 +2535,9 @@ impl App {
             toggle_row(
                 ui,
                 m,
-                "WADs automáticos",
-                "Un .map guarda las rutas absolutas de los WADs de la máquina donde se \
+                tr("WADs automáticos"),
+                tr(
+                    "Un .map guarda las rutas absolutas de los WADs de la máquina donde se \
                  hizo: 'C:/Users/Otro/...', o peor, rutas sin letra de unidad como \
                  '/Users/Admin/...', que Windows resuelve contra la unidad actual. Si el \
                  mapa vino de otra PC, de otro disco, o simplemente moviste tus WADs, CSG \
@@ -2441,28 +2548,29 @@ impl App {
                  herramientas. Siempre se agrega sdhlt.wad.\n\n\
                  Si aun así faltan texturas, se leen las que el mapa usa de verdad y se abre \
                  el índice de cada .wad de tus carpetas para ver cuál las tiene: se cargan \
-                 sólo los que aportan algo. Podés tener mil WADs en la carpeta; entran los \
+                 sólo los que aportan algo. Puedes tener mil WADs en la carpeta; entran los \
                  que hacen falta y nada más. Tope de 500, dejando margen bajo el límite \
                  de 512 de este fork.\n\n\
                  La lista resultante se le pasa a CSG como -wadcfgfile, que hace que ignore \
                  la clave del mapa. Tu .map no se modifica y no hace falta carpeta de \
                  salida. Lo que no aparezca se avisa en el log en vez de matar el compilado.",
-                Some("recomendado"),
+                ),
+                Some(tr("recomendado")),
                 &mut self.opts.auto_wads,
             );
 
             if self.opts.will_resolve_wads() {
                 let msg = if self.opts.wad_dir.trim().is_empty() {
-                    "Indica una carpeta de WADs para poder reubicar los que falten"
+                    tr("Indica una carpeta de WADs para poder reubicar los que falten")
                 } else {
-                    "Las rutas rotas se buscan por nombre en esa carpeta"
+                    tr("Las rutas rotas se buscan por nombre en esa carpeta")
                 };
                 hint(ui, m, msg, OK);
             } else {
                 hint(
                     ui,
                     m,
-                    "CSG usará las rutas del .map tal cual: riesgo de 'Could not open wad file'",
+                    tr("CSG usará las rutas del .map tal cual: riesgo de 'Could not open wad file'"),
                     WARN,
                 );
             }
@@ -2470,8 +2578,8 @@ impl App {
 
         card(
             ui,
-            "Preset",
-            "un punto de partida; después ajusta lo que quieras",
+            tr("Preset"),
+            tr("un punto de partida; después ajusta lo que quieras"),
             |ui| {
                 ui.horizontal(|ui| {
                     let n = 3.0;
@@ -2492,7 +2600,7 @@ impl App {
                         ));
                         if ui.add(btn).on_hover_text(p.summary()).clicked() {
                             p.apply(&mut self.opts);
-                            self.status = format!("Preset '{}' aplicado.", p.label());
+                            self.status = tf!("Preset '{name}' aplicado.", name = p.label());
                         }
                     }
                 });
@@ -2501,85 +2609,98 @@ impl App {
                     .into_iter()
                     .find(|preset| preset.is_active(&self.opts))
                     .map(Preset::summary)
-                    .unwrap_or(
+                    .unwrap_or(tr(
                         "Configuración personalizada: no coincide exactamente con ningún preset.",
-                    );
+                    ));
                 ui.label(RichText::new(active_summary).color(MUTED).small());
             },
         );
 
-        card(ui, "Etapas", "puedes saltar las que ya ejecutaste", |ui| {
-            ui.horizontal(|ui| {
-                let n = 4.0;
-                let w = ((ui.available_width() - ui.spacing().item_spacing.x * (n - 1.0)) / n)
-                    .max(70.0);
-                let stages = [
-                    (Stage::Csg, &mut self.opts.run_csg),
-                    (Stage::Bsp, &mut self.opts.run_bsp),
-                    (Stage::Vis, &mut self.opts.run_vis),
-                    (Stage::Rad, &mut self.opts.run_rad),
-                ];
-                for (stage, flag) in stages {
-                    let on = *flag;
-                    let btn = egui::Button::new(
-                        RichText::new(stage.name())
-                            .color(if on { TEXT } else { FAINT })
-                            .strong(),
-                    )
-                    .min_size(egui::vec2(w, 30.0))
-                    .fill(if on { ACCENT_DEEP } else { CARD_HI })
-                    .stroke(egui::Stroke::new(1.0_f32, if on { ACCENT } else { LINE }));
-                    if ui.add(btn).on_hover_text(stage.purpose()).clicked() {
-                        *flag = !on;
+        card(
+            ui,
+            tr("Etapas"),
+            tr("puedes saltar las que ya ejecutaste"),
+            |ui| {
+                ui.horizontal(|ui| {
+                    let n = 4.0;
+                    let w = ((ui.available_width() - ui.spacing().item_spacing.x * (n - 1.0)) / n)
+                        .max(70.0);
+                    let stages = [
+                        (Stage::Csg, &mut self.opts.run_csg),
+                        (Stage::Bsp, &mut self.opts.run_bsp),
+                        (Stage::Vis, &mut self.opts.run_vis),
+                        (Stage::Rad, &mut self.opts.run_rad),
+                    ];
+                    for (stage, flag) in stages {
+                        let on = *flag;
+                        let btn = egui::Button::new(
+                            RichText::new(stage.name())
+                                .color(if on { TEXT } else { FAINT })
+                                .strong(),
+                        )
+                        .min_size(egui::vec2(w, 30.0))
+                        .fill(if on { ACCENT_DEEP } else { CARD_HI })
+                        .stroke(egui::Stroke::new(1.0_f32, if on { ACCENT } else { LINE }));
+                        if ui.add(btn).on_hover_text(stage.purpose()).clicked() {
+                            *flag = !on;
+                        }
                     }
+                });
+                if self.enabled_stages() == 0 {
+                    hint(
+                        ui,
+                        m,
+                        tr("Activa al menos una etapa. Una ejecución vacía no produce nada."),
+                        ERR,
+                    );
                 }
-            });
-            if self.enabled_stages() == 0 {
-                hint(
-                    ui,
-                    m,
-                    "Activa al menos una etapa. Una ejecución vacía no produce nada.",
-                    ERR,
-                );
-            }
-        });
+            },
+        );
 
-        card(ui, "Rendimiento y salida", "", |ui| {
+        card(ui, tr("Rendimiento y salida"), "", |ui| {
             row(
                 ui,
                 m,
-                "Hilos",
-                "0 = usar todos los núcleos, que es lo que quieres. Este fork arregló \
+                tr("Hilos"),
+                tr(
+                    "0 = usar todos los núcleos, que es lo que quieres. Este fork arregló \
                  dos bugs por los que las tools corrían en un solo hilo. Pon un número \
                  solo si quieres dejar CPU libre para otra cosa.",
-                Some("0 = automático"),
+                ),
+                Some(tr("0 = automático")),
                 |ui| slider_u32(ui, m, &mut self.opts.threads, 0..=64, 0.0),
             );
             toggle_row(
                 ui,
                 m,
-                "Prioridad baja",
-                "Corre las herramientas con prioridad baja para que la PC siga usable \
+                tr("Prioridad baja"),
+                tr(
+                    "Corre las herramientas con prioridad baja para que la PC siga usable \
                  mientras compila. Alarga un poco la compilación.",
+                ),
                 None,
                 &mut self.opts.low_priority,
             );
             toggle_row(
                 ui,
                 m,
-                "Chart de límites",
-                "Al final, cada herramienta imprime cuánto de cada límite del motor \
+                tr("Chart de límites"),
+                tr(
+                    "Al final, cada herramienta imprime cuánto de cada límite del motor \
                  estás usando. Es como te enteras de que vas camino a un límite antes \
                  de chocarlo. Déjalo activado.",
-                Some("recomendado"),
+                ),
+                Some(tr("recomendado")),
                 &mut self.opts.chart,
             );
             toggle_row(
                 ui,
                 m,
-                "Salida detallada",
-                "Las herramientas imprimen mucho más sobre lo que hacen. Útil cuando \
+                tr("Salida detallada"),
+                tr(
+                    "Las herramientas imprimen mucho más sobre lo que hacen. Útil cuando \
                  algo falla y no sabes por qué; para uso normal solo ensucia el log.",
+                ),
                 None,
                 &mut self.opts.verbose,
             );
@@ -2589,45 +2710,57 @@ impl App {
 
         let warnings = self.opts.warnings();
         if !warnings.is_empty() {
-            card(ui, "Avisos", "cosas que probablemente no quieras", |ui| {
-                for w in &warnings {
-                    ui.horizontal_top(|ui| {
-                        ui.label(RichText::new("•").color(WARN));
-                        ui.label(RichText::new(w).color(WARN).small());
-                    });
-                }
-            });
+            card(
+                ui,
+                tr("Avisos"),
+                tr("cosas que probablemente no quieras"),
+                |ui| {
+                    for w in &warnings {
+                        ui.horizontal_top(|ui| {
+                            ui.label(RichText::new("•").color(WARN));
+                            ui.label(RichText::new(w).color(WARN).small());
+                        });
+                    }
+                },
+            );
         }
 
         // The exact command lines. Useful for scripting a compile, and for
         // understanding what a preset actually changed.
-        card(ui, "Línea de comandos", "lo que se va a ejecutar", |ui| {
-            ui.checkbox(&mut self.show_command, "Mostrar");
-            if self.show_command {
-                ui.add_space(4.0);
-                let mut text = CompilePlan::preview(&self.opts, self.lib.game.mod_dir().as_deref());
-                if text.is_empty() {
-                    text = "(ninguna etapa seleccionada)".to_string();
+        card(
+            ui,
+            tr("Línea de comandos"),
+            tr("lo que se va a ejecutar"),
+            |ui| {
+                ui.checkbox(&mut self.show_command, tr("Mostrar"));
+                if self.show_command {
+                    ui.add_space(4.0);
+                    let mut text =
+                        CompilePlan::preview(&self.opts, self.lib.game.mod_dir().as_deref());
+                    if text.is_empty() {
+                        text = tr("(ninguna etapa seleccionada)").to_string();
+                    }
+                    ui.label(RichText::new(text.trim_end()).monospace().color(MUTED));
+                    if ui.button(tr("Copiar")).clicked() {
+                        ui.output_mut(|o| o.copied_text = text);
+                    }
                 }
-                ui.label(RichText::new(text.trim_end()).monospace().color(MUTED));
-                if ui.button("Copiar").clicked() {
-                    ui.output_mut(|o| o.copied_text = text);
-                }
-            }
-        });
+            },
+        );
     }
 
     fn ui_csg(&mut self, ui: &mut egui::Ui, m: &Metrics) {
         card(
             ui,
             "CSG",
-            "recorta brushes y resuelve texturas; centésimas de segundo",
+            tr("recorta brushes y resuelve texturas; centésimas de segundo"),
             |ui| {
                 toggle_row(
                     ui,
                     m,
-                    "Embeder texturas",
-                    "Copia dentro del .bsp las texturas que el mapa usa realmente (no el WAD \
+                    tr("Embeder texturas"),
+                    tr(
+                        "Copia dentro del .bsp las texturas que el mapa usa realmente (no el WAD \
                      entero, solo las que aparecen).\n\n\
                      QUÉ CAMBIA: el jugador ya no necesita tener el WAD. Se acabó el 'missing \
                      texture' al entrar al servidor y no hay que distribuir archivos aparte. \
@@ -2636,14 +2769,16 @@ impl App {
                      Activado por defecto porque es lo que evita problemas a los jugadores. \
                      Desactívalo solo si distribuyes el WAD por tu cuenta y te importa el \
                      tamaño del .bsp.",
-                    Some("recomendado"),
+                    ),
+                    Some(tr("recomendado")),
                     &mut self.opts.nowadtextures,
                 );
                 toggle_row(
                     ui,
                     m,
-                    "Sin determinismo",
-                    "Por defecto este fork compila de forma reproducible: el mismo .map da \
+                    tr("Sin determinismo"),
+                    tr(
+                        "Por defecto este fork compila de forma reproducible: el mismo .map da \
                      siempre el mismo .bsp, byte por byte.\n\n\
                      QUÉ CAMBIA: activarlo devuelve el comportamiento original, donde dos \
                      compilaciones del mismo mapa pueden diferir en unos pocos clipnodes y \
@@ -2652,14 +2787,16 @@ impl App {
                      El determinismo importa cuando persigues un bug: si el mapa sale con una \
                      grieta rara, conviene que vuelva a salir igual en la siguiente \
                      compilación en vez de desaparecer sola.",
-                    Some("déjalo apagado"),
+                    ),
+                    Some(tr("déjalo apagado")),
                     &mut self.opts.nodeterministic,
                 );
                 toggle_row(
                     ui,
                     m,
-                    "Fusionar entidades estáticas",
-                    "Junta en una sola entidad las entidades brush que son intercambiables \
+                    tr("Fusionar entidades estáticas"),
+                    tr(
+                        "Junta en una sola entidad las entidades brush que son intercambiables \
                      entre sí. Los brushes no se tocan: misma geometría, mismas texturas, \
                      misma iluminación, mismas colisiones. Lo único que cambia es de qué \
                      entidad cuelgan.\n\n\
@@ -2687,22 +2824,26 @@ impl App {
                      CUÁNDO NO USARLO: si tu mapa tiene pocas entidades brush no ganas nada. \
                      Esto es para mapas con mucha decoración repetida.\n\n\
                      Ver docs/MERGE_DE_ENTIDADES.md.",
-                    Some("si usas mucha decoración"),
+                    ),
+                    Some(tr("si usas mucha decoración")),
                     &mut self.opts.mergeentities,
                 );
                 if self.opts.mergeentities {
                     hint(
                         ui,
                         m,
-                        "En el editor: func_illusionary + textura '{' + rendermode Solid + \
+                        tr(
+                            "En el editor: func_illusionary + textura '{' + rendermode Solid + \
                          renderamt 255, sin targetname. Se agrupan solos, no los juntes a mano",
+                        ),
                         OK,
                     );
                     row(
                         ui,
                         m,
-                        "Tamaño de grupo",
-                        "Hasta cuántas unidades puede medir, en cualquier eje, la caja de un \
+                        tr("Tamaño de grupo"),
+                        tr(
+                            "Hasta cuántas unidades puede medir, en cualquier eje, la caja de un \
                          grupo fusionado. Es el único valor que quizá quieras tocar, y solo \
                          si sabes cómo es tu mapa.\n\n\
                          QUÉ CAMBIA: una entidad brush se descarta con el bounding box de su \
@@ -2720,6 +2861,7 @@ impl App {
                          modelos y no te importe el rendimiento\n\n\
                          Si tras subirlo ves en r_speeds decoración dibujándose desde lejos, \
                          bájalo.",
+                        ),
                         Some("1024"),
                         |ui| slider_u32(ui, m, &mut self.opts.mergesize, 0..=8192, 256.0),
                     );
@@ -2727,24 +2869,29 @@ impl App {
                         hint(
                             ui,
                             m,
-                            "Sin límite: la caja de un grupo puede abarcar el mapa entero y \
+                            tr(
+                                "Sin límite: la caja de un grupo puede abarcar el mapa entero y \
                              quedar siempre en el PVS. Ahorras modelos y pierdes culling",
+                            ),
                             WARN,
                         );
                     } else if self.opts.mergesize >= 2048 {
                         hint(
                             ui,
                             m,
-                            "Grupos grandes: solo para mapas abiertos. Mira r_speeds antes de \
+                            tr(
+                                "Grupos grandes: solo para mapas abiertos. Mira r_speeds antes de \
                              dejarlo así",
+                            ),
                             WARN,
                         );
                     }
                     toggle_row(
                         ui,
                         m,
-                        "Fusionar también los modos mezclados",
-                        "Déjalo apagado salvo que sepas exactamente por qué lo enciendes.\n\n\
+                        tr("Fusionar también los modos mezclados"),
+                        tr(
+                            "Déjalo apagado salvo que sepas exactamente por qué lo enciendes.\n\n\
                          Por defecto solo se fusionan los render modes que el motor NO ordena \
                          por profundidad: Normal y Solid. Solid es el alpha test de las \
                          texturas '{' — el de la vegetación — y recorta el píxel en vez de \
@@ -2758,15 +2905,18 @@ impl App {
                          Solo tiene sentido si tienes muchas entidades mezcladas juntas en \
                          una zona donde no se superponen visualmente entre sí. Y hay que \
                          verlo en el juego, porque el compilador no puede avisarte de esto.",
-                        Some("déjalo apagado"),
+                        ),
+                        Some(tr("déjalo apagado")),
                         &mut self.opts.mergeblend,
                     );
                     if self.opts.mergeblend {
                         hint(
                             ui,
                             m,
-                            "Los cristales y efectos aditivos fusionados pueden dibujarse en \
+                            tr(
+                                "Los cristales y efectos aditivos fusionados pueden dibujarse en \
                              el orden equivocado entre sí. Compruébalo en el juego",
+                            ),
                             WARN,
                         );
                     }
@@ -2774,8 +2924,9 @@ impl App {
                 toggle_row(
                     ui,
                     m,
-                    "Informe de coste de texturas",
-                    "No cambia el .bsp. Solo añade un informe al final de CSG diciendo qué \
+                    tr("Informe de coste de texturas"),
+                    tr(
+                        "No cambia el .bsp. Solo añade un informe al final de CSG diciendo qué \
                      texturas lo están engordando.\n\n\
                      PARA QUÉ: si compilas con 'Meter las texturas en el BSP', el lump de \
                      texturas suele ser la mayor parte del archivo. Medido en mapas reales: \
@@ -2798,23 +2949,27 @@ impl App {
                      pagado dos veces.\n\n\
                      CUÁNDO USARLO: cuando el .bsp pese más de lo que te gustaría. No hace \
                      falta dejarlo puesto en cada compilación.",
-                    Some("cuando quieras adelgazar el mapa"),
+                    ),
+                    Some(tr("cuando quieras adelgazar el mapa")),
                     &mut self.opts.texchart,
                 );
                 if self.opts.texchart {
                     hint(
                         ui,
                         m,
-                        "Mira la columna 'oversampled': 4x o más significa que puedes bajar \
+                        tr(
+                            "Mira la columna 'oversampled': 4x o más significa que puedes bajar \
                          esa textura a la mitad sin que se note. Cerca de 1x, déjala",
+                        ),
                         OK,
                     );
                 }
                 toggle_row(
                     ui,
                     m,
-                    "Poner NULL en caras tapadas",
-                    "Quita las caras del mundo que un func_wall tapa por completo: el motor \
+                    tr("Poner NULL en caras tapadas"),
+                    tr(
+                        "Quita las caras del mundo que un func_wall tapa por completo: el motor \
                      las dibuja y RAD las ilumina aunque nadie pueda verlas. Es lo que harías \
                      a mano con la textura NULL, sin tocar el editor.\n\n\
                      SOLO CUENTAN los func_wall que nunca cambian: sin targetname, con \
@@ -2830,30 +2985,34 @@ impl App {
                      quedan.\n\n\
                      CUÁNDO NO USARLO: si un plugin del servidor mueve, oculta o borra \
                      func_walls sin nombre, el hueco quedaría a la vista.",
+                    ),
                     Some("-autonull"),
                     &mut self.opts.autonull,
                 );
                 row(
                     ui,
                     m,
-                    "Extender el mundo",
-                    "Sube el límite de geometría más allá de +/-32768 unidades. Solo si tu \
+                    tr("Extender el mundo"),
+                    tr(
+                        "Sube el límite de geometría más allá de +/-32768 unidades. Solo si tu \
                      mapa realmente excede el tamaño estándar; 0 deja el valor por defecto.",
-                    Some("0 = normal"),
+                    ),
+                    Some(tr("0 = normal")),
                     |ui| slider_u32(ui, m, &mut self.opts.worldextent, 0..=65536, 1024.0),
                 );
             },
         );
         card(
             ui,
-            "Brushes deformados",
-            "vertex manipulation de J.A.C.K. y Hammer",
+            tr("Brushes deformados"),
+            tr("vertex manipulation de J.A.C.K. y Hammer"),
             |ui| {
                 toggle_row(
                     ui,
                     m,
-                    "Reconstruir brushes no planos",
-                    "Cuando mueves vértices en el editor, una cara puede dejar de ser plana: \
+                    tr("Reconstruir brushes no planos"),
+                    tr(
+                        "Cuando mueves vértices en el editor, una cara puede dejar de ser plana: \
                      el editor la dibuja con sus vértices, pero el compilador solo guarda 3 \
                      puntos por cara y arma el plano con ellos. El sólido que compila no es \
                      el que ves, y en el juego aparecen caras invisibles, rendijas o caras \
@@ -2864,15 +3023,17 @@ impl App {
                      originales, así que no suben los clipnodes.\n\n\
                      Déjalo activado. Apagarlo solo sirve para comparar con el \
                      comportamiento de antes.",
-                    Some("recomendado"),
+                    ),
+                    Some(tr("recomendado")),
                     &mut self.opts.convexfix,
                 );
                 if self.opts.convexfix {
                     row(
                         ui,
                         m,
-                        "Diferencia mínima",
-                        "Cuántas unidades tiene que separarse el sólido del editor del sólido \
+                        tr("Diferencia mínima"),
+                        tr(
+                            "Cuántas unidades tiene que separarse el sólido del editor del sólido \
                          de los planos para que el brush se reconstruya.\n\n\
                          QUÉ CAMBIA: la mayoría de los brushes deformados difieren en unas \
                          centésimas, lo que no abre ninguna rendija visible. Reconstruirlos \
@@ -2880,6 +3041,7 @@ impl App {
                          un 17% las caras que ve cada hoja; con 0.2 se rehacen 48, cuesta un \
                          2% y las rendijas de zpa_house siguen cerradas.\n\n\
                          Bájalo solo si todavía ves una rendija fina en el juego.",
+                        ),
                         Some("0.2"),
                         |ui| {
                             ui.spacing_mut().slider_width = (m.ctrl_w - 78.0).max(90.0);
@@ -2893,8 +3055,8 @@ impl App {
                     hint(
                         ui,
                         m,
-                        "Los sólidos deformados pueden dejar caras invisibles o rendijas en el \
-                         juego",
+                        tr("Los sólidos deformados pueden dejar caras invisibles o rendijas en el \
+                         juego"),
                         WARN,
                     );
                 }
@@ -2907,49 +3069,54 @@ impl App {
         card(
             ui,
             "BSP",
-            "construye el árbol, fusiona coplanares y subdivide caras",
+            tr("construye el árbol, fusiona coplanares y subdivide caras"),
             |ui| {
                 row(
                     ui,
                     m,
                     "Subdivide",
-                    "Tamaño máximo de una cara antes de partirla. 240 NO es un número \
+                    tr(
+                        "Tamaño máximo de una cara antes de partirla. 240 NO es un número \
                      conservador: es el techo que impone MAX_SURFACE_EXTENT. Si lo subes, el \
                      mapa deja de cargar en el software renderer y en el HLDS. Bajarlo genera \
                      más caras y baja los FPS. Déjalo en 240.",
-                    Some("240, no tocar"),
+                    ),
+                    Some(tr("240, no tocar")),
                     |ui| slider_u32(ui, m, &mut self.opts.subdivide, 64..=512, 0.0),
                 );
                 row(
                     ui,
                     m,
                     "Max node size",
-                    "Tamaño máximo, en unidades, de un nodo del árbol BSP antes de partirlo.\n\n\
+                    tr("Tamaño máximo, en unidades, de un nodo del árbol BSP antes de partirlo.\n\n\
                      QUÉ CAMBIA: más chico produce más nodos y hojas, lo que da un PVS más \
                      fino (VIS puede descartar mejor) pero también más caras, un BSP más \
                      grande y VIS más lento. Más grande hace lo contrario: compila antes y el \
                      PVS queda más grueso.\n\n\
                      1024 es el equilibrio probado. Bajarlo a 512 a veces ayuda en mapas muy \
                      abiertos, pero mídelo con r_speeds antes de darlo por bueno: es igual de \
-                     fácil empeorar los FPS.",
+                     fácil empeorar los FPS."),
                     Some("1024"),
                     |ui| slider_u32(ui, m, &mut self.opts.maxnodesize, 64..=4096, 0.0),
                 );
                 toggle_row(
                     ui,
                     m,
-                    "Optimizar atlas de luz",
-                    "Activa -lmoptimize. Reordena las caras para desperdiciar menos espacio \
+                    tr("Optimizar atlas de luz"),
+                    tr(
+                        "Activa -lmoptimize. Reordena las caras para desperdiciar menos espacio \
                      en las páginas de lightmap. Puede reducir páginas ocupadas sin cambiar \
                      la geometría ni la calidad de iluminación.",
+                    ),
                     Some("-lmoptimize"),
                     &mut self.opts.lmoptimize,
                 );
                 toggle_row(
                     ui,
                     m,
-                    "Subdividir por celdas de luz",
-                    "Activa -gridsubdivide. El motor acepta una cara mientras toque 16 celdas \
+                    tr("Subdividir por celdas de luz"),
+                    tr(
+                        "Activa -gridsubdivide. El motor acepta una cara mientras toque 16 celdas \
                      de lightmap o menos. La regla clásica no cuenta celdas: corta cada 224 \
                      unidades y deja pasar hasta 240, así que una pared de 256 alineada a la \
                      grilla sale partida en 224 + 32.\n\n\
@@ -2961,7 +3128,8 @@ impl App {
                      si una cara no cabe, la compilación se detiene con un error en vez de \
                      dejar un mapa que no carga. Ignora el valor de Subdivide. Prueba el mapa \
                      en el juego antes de publicarlo.",
-                    Some("-gridsubdivide, menos caras"),
+                    ),
+                    Some(tr("-gridsubdivide, menos caras")),
                     &mut self.opts.gridsubdivide,
                 );
             },
@@ -2969,43 +3137,47 @@ impl App {
 
         card(
             ui,
-            "Atajos de prueba",
-            "no los uses para un compilado final",
+            tr("Atajos de prueba"),
+            tr("no los uses para un compilado final"),
             |ui| {
                 toggle_row(
                     ui,
                     m,
-                    "Solo buscar leaks",
-                    "Corta BSP en cuanto termina de buscar leaks. Sirve para saber en segundos \
-                 si el mapa está sellado, pero no produce un mapa jugable.",
+                    tr("Solo buscar leaks"),
+                    tr("Corta BSP en cuanto termina de buscar leaks. Sirve para saber en segundos \
+                 si el mapa está sellado, pero no produce un mapa jugable."),
                     None,
                     &mut self.opts.leakonly,
                 );
                 toggle_row(
                     ui,
                     m,
-                    "Encontrar todos los leaks",
-                    "Activa -allleaks. Si el mapa está abierto, BSP continúa el relevamiento y \
+                    tr("Encontrar todos los leaks"),
+                    tr("Activa -allleaks. Si el mapa está abierto, BSP continúa el relevamiento y \
                  marca todos los agujeros que encuentre en vez de detenerse en el primero. \
-                 Útil para corregir varias fugas en una sola pasada.",
+                 Útil para corregir varias fugas en una sola pasada."),
                     None,
                     &mut self.opts.allleaks,
                 );
                 toggle_row(
                     ui,
                     m,
-                    "Sin t-junctions",
-                    "Saltea el arreglo de t-junctions. Más rápido, pero vas a ver grietas de \
+                    tr("Sin t-junctions"),
+                    tr(
+                        "Saltea el arreglo de t-junctions. Más rápido, pero vas a ver grietas de \
                  luz entre caras. Solo para pruebas.",
+                    ),
                     None,
                     &mut self.opts.notjunc,
                 );
                 toggle_row(
                     ui,
                     m,
-                    "Sin clipping hull",
-                    "No genera la geometría de colisión. El mapa carga pero el jugador \
+                    tr("Sin clipping hull"),
+                    tr(
+                        "No genera la geometría de colisión. El mapa carga pero el jugador \
                  atraviesa las paredes. Solo para mirar geometría.",
+                    ),
                     None,
                     &mut self.opts.noclip,
                 );
@@ -3019,15 +3191,17 @@ impl App {
         card(
             ui,
             "VIS",
-            "calcula qué se ve desde dónde: define los FPS del mapa",
+            tr("calcula qué se ve desde dónde: define los FPS del mapa"),
             |ui| {
                 row(
                     ui,
                     m,
-                    "Calidad",
-                    "El PVS que calcula VIS decide cuánto le pide el mapa al motor en cada \
+                    tr("Calidad"),
+                    tr(
+                        "El PVS que calcula VIS decide cuánto le pide el mapa al motor en cada \
                      frame. Cuanto más ajustado, menos wpoly y más FPS.",
-                    Some("full para publicar"),
+                    ),
+                    Some(tr("full para publicar")),
                     |ui| {
                         egui::ComboBox::from_id_source("vis_q")
                             .width(m.ctrl_w)
@@ -3050,11 +3224,13 @@ impl App {
                 row(
                     ui,
                     m,
-                    "Distancia máxima",
-                    "Recorta la visibilidad más allá de N unidades. Puede ayudar en mapas \
+                    tr("Distancia máxima"),
+                    tr(
+                        "Recorta la visibilidad más allá de N unidades. Puede ayudar en mapas \
                      enormes y abiertos, pero mal usado produce geometría que aparece de \
                      golpe. 0 lo desactiva.",
-                    Some("0 = sin límite"),
+                    ),
+                    Some(tr("0 = sin límite")),
                     |ui| slider_u32(ui, m, &mut self.opts.maxdistance, 0..=8192, 64.0),
                 );
             },
@@ -3066,13 +3242,13 @@ impl App {
         card(
             ui,
             "RAD",
-            "la iluminación: ~95% del tiempo de compilación",
+            tr("la iluminación: ~95% del tiempo de compilación"),
             |ui| {
                 ui.label(
-                    RichText::new(
+                    RichText::new(tr(
                         "RAD no cambia la geometría que dibuja el motor: subir la calidad \
                          de luz cuesta tiempo de compilación, no FPS en juego.",
-                    )
+                    ))
                     .color(OK)
                     .small(),
                 );
@@ -3081,20 +3257,23 @@ impl App {
                 row(
                     ui,
                     m,
-                    "Nivel de cielo",
-                    "Cuántos rayos lanza cada muestra hacia el cielo: nivel 4 = 258 rayos, \
+                    tr("Nivel de cielo"),
+                    tr(
+                        "Cuántos rayos lanza cada muestra hacia el cielo: nivel 4 = 258 rayos, \
                      5 = 1026, 6 = 4098, 7 = 16386. Medido, este loop es el 96% de todos los \
                      rayos de RAD. El nivel 6 usa 4x menos rayos que el 7 con una diferencia \
                      máxima de 1/255 por luxel, o sea invisible. Por eso el default de este \
                      fork es 6 y no 7.",
+                    ),
                     Some("6"),
                     |ui| slider_u32(ui, m, &mut self.opts.skylevel, 4..=8, 0.0),
                 );
                 toggle_row(
                     ui,
                     m,
-                    "Cielo suave",
-                    "Ilumina cada punto con todo el domo del cielo en lugar de una sola \
+                    tr("Cielo suave"),
+                    tr(
+                        "Ilumina cada punto con todo el domo del cielo en lugar de una sola \
                      dirección.\n\n\
                      QUÉ CAMBIA: con esto los bordes de sombra en exteriores son graduales, \
                      como en la realidad, y las zonas en sombra reciben algo de luz azulada \
@@ -3102,60 +3281,64 @@ impl App {
                      duras y de borde nítido, con aspecto de mapa antiguo.\n\n\
                      Apagarlo fuerza el nivel de cielo a 4 (258 rayos) y acelera bastante, \
                      pero la diferencia visual en exteriores es evidente.",
-                    Some("recomendado"),
+                    ),
+                    Some(tr("recomendado")),
                     &mut self.opts.softsky,
                 );
                 toggle_row(
                     ui,
                     m,
                     "Oversampling (-extra)",
-                    "Toma 9 muestras de luz por cada luxel en vez de 1, y promedia.\n\n\
+                    tr(
+                        "Toma 9 muestras de luz por cada luxel en vez de 1, y promedia.\n\n\
                      QUÉ CAMBIA: es la mejora de calidad más visible de RAD. Sin esto los \
                      bordes de sombra salen escalonados, con el típico dentado de lightmap de \
                      16 unidades; con esto quedan suaves. También desaparecen los puntos de \
                      luz mal calculados en esquinas y superficies inclinadas.\n\n\
                      Cuesta tiempo de compilación y CERO FPS en juego: el lightmap resultante \
                      tiene exactamente el mismo tamaño.",
-                    Some("recomendado"),
+                    ),
+                    Some(tr("recomendado")),
                     &mut self.opts.extra_sampling,
                 );
                 row(
                     ui,
                     m,
                     "Bounces",
-                    "Cuántas veces se le permite rebotar a la luz antes de darla por agotada.\n\n\
+                    tr("Cuántas veces se le permite rebotar a la luz antes de darla por agotada.\n\n\
                      QUÉ CAMBIA: con 0 solo hay luz directa, así que todo lo que no ve una \
                      lámpara queda negro. Cada rebote reparte luz desde las superficies \
                      iluminadas hacia las que no lo están, y además les tiñe el color: un piso \
                      rojo iluminado va a teñir de rojo la pared de al lado. Los primeros \
                      rebotes cambian mucho; a partir de ~12 el aporte es tan pequeño que \
                      prácticamente no se distingue.\n\n\
-                     Cuesta tiempo, no FPS. 12 es lo que aplica -extra en este fork.",
+                     Cuesta tiempo, no FPS. 12 es lo que aplica -extra en este fork."),
                     Some("12"),
                     |ui| slider_u32(ui, m, &mut self.opts.bounce, 0..=32, 0.0),
                 );
                 toggle_row(
                     ui,
                     m,
-                    "RAD rápido",
-                    "Modo borrador de la iluminación.\n\n\
+                    tr("RAD rápido"),
+                    tr("Modo borrador de la iluminación.\n\n\
                      QUÉ CAMBIA: baja la calidad del muestreo y simplifica el cálculo de \
                      rebotes. El resultado sirve para ver que las luces están donde \
                      corresponde y que no quedó nada a oscuras, pero los degradados salen \
                      sucios y las sombras imprecisas.\n\n\
-                     Útil mientras construyes; nunca para la versión que publicas.",
+                     Útil mientras construyes; nunca para la versión que publicas."),
                     None,
                     &mut self.opts.rad_fast,
                 );
             },
         );
 
-        card(ui, "Detalle y suavizado", "", |ui| {
+        card(ui, tr("Detalle y suavizado"), "", |ui| {
             row(
                 ui,
                 m,
                 "Chop",
-                "Tamaño, en unidades, de los parches en que RAD divide las superficies \
+                tr(
+                    "Tamaño, en unidades, de los parches en que RAD divide las superficies \
                  para repartir la luz rebotada.\n\n\
                  QUÉ CAMBIA: cada parche emite y recibe luz como una unidad. Más chico da \
                  luz indirecta con más detalle (los degradados en paredes grandes dejan de \
@@ -3164,6 +3347,7 @@ impl App {
                  cuadruplicar el tiempo y la RAM.\n\n\
                  64 es el default. Si un muro grande se ve 'por manchones', prueba 48 o 32 \
                  antes de tocar nada más.",
+                ),
                 Some("64"),
                 |ui| slider_f32(ui, m, &mut self.opts.chop, 16.0..=128.0),
             );
@@ -3171,7 +3355,8 @@ impl App {
                 ui,
                 m,
                 "Texchop",
-                "Lo mismo que chop, pero para las superficies que EMITEN luz: las \
+                tr(
+                    "Lo mismo que chop, pero para las superficies que EMITEN luz: las \
                  texlights definidas en lights.rad.\n\n\
                  QUÉ CAMBIA: controla con cuánto detalle se reparte la luz que sale de un \
                  cartel luminoso o un tubo fluorescente. Más chico hace que la forma de la \
@@ -3179,6 +3364,7 @@ impl App {
                  mancha difusa.\n\n\
                  Es más bajo que chop (32 contra 64) porque las texlights suelen ser \
                  pequeñas y su forma sí importa.",
+                ),
                 Some("32"),
                 |ui| slider_f32(ui, m, &mut self.opts.texchop, 8.0..=128.0),
             );
@@ -3186,7 +3372,8 @@ impl App {
                 ui,
                 m,
                 "Smooth",
-                "Ángulo máximo, en grados, para que dos caras vecinas se iluminen como si \
+                tr(
+                    "Ángulo máximo, en grados, para que dos caras vecinas se iluminen como si \
                  fueran una superficie curva continua.\n\n\
                  QUÉ CAMBIA: si el ángulo entre dos caras es menor que este valor, RAD \
                  mezcla sus normales y la luz cruza de una a otra sin corte. Por encima, \
@@ -3195,6 +3382,7 @@ impl App {
                  esquinas que deberían tener una arista clara se vean redondeadas y \
                  blandas. 50 grados funciona para casi todo; 70 para terreno muy \
                  facetado.",
+                ),
                 Some("50"),
                 |ui| slider_f32(ui, m, &mut self.opts.smooth, 0.0..=180.0),
             );
@@ -3202,12 +3390,13 @@ impl App {
 
         self.ui_rad_shading(ui, m);
 
-        card(ui, "Avanzado", "", |ui| {
+        card(ui, tr("Avanzado"), "", |ui| {
             toggle_row(
                 ui,
                 m,
-                "Aceleración GPU",
-                "Activa el backend Vulkan de RAD para el gather directo y las transferencias \
+                tr("Aceleración GPU"),
+                tr(
+                    "Activa el backend Vulkan de RAD para el gather directo y las transferencias \
                  compatibles. Si una fase o entidad no está soportada, o no hay driver \
                  Vulkan, RAD informa el motivo y vuelve a CPU.\n\n\
                  CUÁNTO GANA: depende de cuántas luces tiene el mapa. En ze_elysium, con \
@@ -3216,45 +3405,50 @@ impl App {
                  QUÉ CAMBIA: la GPU calcula en float; frente a la CPU cambia menos del 1% \
                  de los luxels, en 3/255 como mucho. Apágala si necesitas el .bsp idéntico \
                  al de la CPU.",
-                Some("recomendado"),
+                ),
+                Some(tr("recomendado")),
                 &mut self.opts.gpu,
             );
             if self.opts.gpu {
                 toggle_row(
                     ui,
                     m,
-                    "Selección automática",
-                    "RAD mide cada fase antes de abrir Vulkan. Usa CPU en trabajos pequeños, \
+                    tr("Selección automática"),
+                    tr(
+                        "RAD mide cada fase antes de abrir Vulkan. Usa CPU en trabajos pequeños, \
                      donde copiar datos cuesta más que calcularlos, y GPU al superar el umbral.",
-                    Some("recomendado"),
+                    ),
+                    Some(tr("recomendado")),
                     &mut self.opts.gpu_auto,
                 );
                 toggle_row(
                     ui,
                     m,
-                    "Gather directo",
-                    "Permite que Vulkan calcule las luces directas compatibles. Entidades o \
+                    tr("Gather directo"),
+                    tr(
+                        "Permite que Vulkan calcule las luces directas compatibles. Entidades o \
                      modelos no soportados vuelven a CPU sin cambiar el resultado.",
+                    ),
                     Some("-gpu-gather"),
                     &mut self.opts.gpu_gather,
                 );
                 toggle_row(
                     ui,
                     m,
-                    "Transferencias Sparse",
-                    "Permite que Vulkan calcule los factores entre parches de la matriz Sparse. \
-                     Los rebotes consumen luego esos mismos factores con la ruta de referencia.",
+                    tr("Transferencias Sparse"),
+                    tr("Permite que Vulkan calcule los factores entre parches de la matriz Sparse. \
+                     Los rebotes consumen luego esos mismos factores con la ruta de referencia."),
                     Some("-gpu-transfers"),
                     &mut self.opts.gpu_transfers,
                 );
                 row(
                     ui,
                     m,
-                    "Adaptador GPU",
-                    "Índice del dispositivo Vulkan que RAD debe usar. -1 elige \
+                    tr("Adaptador GPU"),
+                    tr("Índice del dispositivo Vulkan que RAD debe usar. -1 elige \
                      automáticamente; usa un número solo si tienes varias GPU y sabes el \
-                     índice que imprime RAD.",
-                    Some("-1 = automático"),
+                     índice que imprime RAD."),
+                    Some(tr("-1 = automático")),
                     |ui| {
                         ui.spacing_mut().slider_width = (m.ctrl_w - 78.0).max(90.0);
                         ui.add(egui::Slider::new(&mut self.opts.gpu_adapter, -1..=15));
@@ -3265,9 +3459,11 @@ impl App {
                 ui,
                 m,
                 "Vismatrix",
-                "Cómo guarda RAD la visibilidad entre parches. Es una decisión de \
+                tr(
+                    "Cómo guarda RAD la visibilidad entre parches. Es una decisión de \
                  memoria y velocidad, no de calidad: las cuatro dan la misma luz.",
-                Some("automático"),
+                ),
+                Some(tr("automático")),
                 |ui| {
                     egui::ComboBox::from_id_source("vismat")
                         .width(m.ctrl_w)
@@ -3288,22 +3484,23 @@ impl App {
             toggle_row(
                 ui,
                 m,
-                "Motor pre-25 aniv.",
-                "Baja el umbral de recorte de luz de 255 a 188.\n\n\
+                tr("Motor pre-25 aniv."),
+                tr("Baja el umbral de recorte de luz de 255 a 188.\n\n\
                  QUÉ CAMBIA: limita antes las zonas muy brillantes para conservar el \
                  comportamiento esperado por motores anteriores al aniversario 25. Viene \
                  activado para mantener el default histórico de ReSDHLT.\n\n\
                  No todos los clientes y forks renderizan el límite igual. Antes de \
                  publicar, compara una zona brillante con el cliente y servidor reales de \
-                 tu comunidad; desactívalo si tu objetivo confirmado es el motor nuevo.",
-                Some("compatibilidad"),
+                 tu comunidad; desactívalo si tu objetivo confirmado es el motor nuevo."),
+                Some(tr("compatibilidad")),
                 &mut self.opts.pre25,
             );
             toggle_row(
                 ui,
                 m,
-                "Ignorar sombras de modelos",
-                "Hace que RAD ignore la clave zhlt_studioshadow de las entidades.\n\n\
+                tr("Ignorar sombras de modelos"),
+                tr(
+                    "Hace que RAD ignore la clave zhlt_studioshadow de las entidades.\n\n\
                  QUÉ CAMBIA: esa clave permite que un modelo (un árbol, una reja, una \
                  estatua) proyecte sombra real sobre el mapa, trazando su malla \
                  triángulo a triángulo. Con esta opción los modelos dejan de proyectar \
@@ -3311,43 +3508,48 @@ impl App {
                  Solo importa si tu mapa usa esa clave. Cuando la usa, trazar la malla es \
                  caro, así que activarlo acelera bastante los compilados de prueba. Para \
                  la versión final déjalo apagado.",
+                ),
                 None,
                 &mut self.opts.nostudioshadow,
             );
             toggle_row(
                 ui,
                 m,
-                "Sombras de todos los modelos",
-                "Hace que todo modelo .mdl puesto como entidad (cycler_sprite y \
+                tr("Sombras de todos los modelos"),
+                tr(
+                    "Hace que todo modelo .mdl puesto como entidad (cycler_sprite y \
                  similares) proyecte sombra, sin poner zhlt_studioshadow en cada uno.\n\n\
                  QUÉ CAMBIA: árboles, cajas y estatuas oscurecen el piso y las paredes \
                  como un sólido. Quedan afuera los modelos transparentes o aditivos \
                  (rendermode), y uno puntual se excluye con zhlt_studioshadow 0.\n\n\
                  Los .mdl se buscan en la carpeta del juego, un nivel arriba de maps\\. \
                  Trazar las mallas es caro: con muchos modelos, el compilado tarda más.",
+                ),
                 None,
                 &mut self.opts.studioshadowall,
             );
             toggle_row(
                 ui,
                 m,
-                "Dejar que el modelo tape su luz",
-                "Desactiva la protección del texel con el que el juego ilumina cada modelo.\n\n\
+                tr("Dejar que el modelo tape su luz"),
+                tr("Desactiva la protección del texel con el que el juego ilumina cada modelo.\n\n\
                  QUÉ CAMBIA: el juego ilumina un modelo entero con un solo texel del \
                  lightmap, el que tiene debajo. Si el modelo da sombra sobre ese texel, \
                  se ve negro. Por defecto RAD deja ese texel sin la sombra del propio \
                  modelo: el modelo recibe la luz del lugar y queda una mancha algo más \
                  clara justo debajo (unos 5x5 texels, 3x3 con -extra).\n\n\
-                 Actívalo solo si esa mancha se nota más que el modelo oscuro.",
+                 Actívalo solo si esa mancha se nota más que el modelo oscuro."),
                 None,
                 &mut self.opts.nostudiolightspot,
             );
             toggle_row(
                 ui,
                 m,
-                "Perfilar RAD",
-                "Imprime al final en qué gasta RAD el tiempo, con conteos de llamadas. \
+                tr("Perfilar RAD"),
+                tr(
+                    "Imprime al final en qué gasta RAD el tiempo, con conteos de llamadas. \
                  Sirve para entender un compilado lento, no para uso normal.",
+                ),
                 None,
                 &mut self.opts.profile,
             );
@@ -3359,14 +3561,15 @@ impl App {
     fn ui_rad_shading(&mut self, ui: &mut egui::Ui, m: &Metrics) {
         card(
             ui,
-            "Sombras y oclusión",
-            "todo apagado por defecto; sin tocarlo el mapa sale igual",
+            tr("Sombras y oclusión"),
+            tr("todo apagado por defecto; sin tocarlo el mapa sale igual"),
             |ui| {
                 row(
                     ui,
                     m,
-                    "Oclusión ambiental",
-                    "Oscurece la luz en rincones, bajo repisas y junto a objetos, donde en la \
+                    tr("Oclusión ambiental"),
+                    tr(
+                        "Oscurece la luz en rincones, bajo repisas y junto a objetos, donde en la \
                      realidad llega menos luz de alrededor. Cada muestra de luz lanza rayos \
                      en media esfera y se oscurece según cuántos chocan con geometría cerca.\n\n\
                      QUÉ MODO USAR: si tu mapa se ilumina con light, light_spot y \
@@ -3374,7 +3577,8 @@ impl App {
                      'toda la luz': el otro modo no toca la luz de las texlights y casi no se \
                      notaría.\n\n\
                      Cuesta tiempo de compilación y cero FPS.",
-                    Some("apagada"),
+                    ),
+                    Some(tr("apagada")),
                     |ui| {
                         egui::ComboBox::from_id_source("ao_mode")
                             .width(m.ctrl_w)
@@ -3392,46 +3596,56 @@ impl App {
                     row(
                         ui,
                         m,
-                        "Alcance",
-                        "Hasta cuántas unidades busca geometría cada rayo. Más alcance \
+                        tr("Alcance"),
+                        tr(
+                            "Hasta cuántas unidades busca geometría cada rayo. Más alcance \
                          oscurece zonas más amplias alrededor de cada objeto; poco alcance \
                          marca solo las esquinas.",
+                        ),
                         Some("32"),
                         |ui| slider_f32(ui, m, &mut self.opts.ao_scale, 1.0..=1024.0),
                     );
                     row(
                         ui,
                         m,
-                        "Intensidad",
-                        "Cuánto oscurece la oclusión: 1 es el efecto completo, 0 no hace \
+                        tr("Intensidad"),
+                        tr(
+                            "Cuánto oscurece la oclusión: 1 es el efecto completo, 0 no hace \
                          nada. Bájalo si los rincones quedan demasiado negros.",
+                        ),
                         Some("1"),
                         |ui| slider_f32(ui, m, &mut self.opts.ao_opacity, 0.0..=1.0),
                     );
                     row(
                         ui,
                         m,
-                        "Caída",
-                        "Cómo pesa la distancia del choque. 1 es lineal. Más alto deja \
+                        tr("Caída"),
+                        tr(
+                            "Cómo pesa la distancia del choque. 1 es lineal. Más alto deja \
                          solo el oscurecido pegado a la geometría; más bajo lo extiende.",
+                        ),
                         Some("1"),
                         |ui| slider_f32(ui, m, &mut self.opts.ao_gain, 0.125..=8.0),
                     );
                     row(
                         ui,
                         m,
-                        "Rayos por muestra",
-                        "1 = 6 rayos, 2 = 18, 3 = 66, 4 = 258. Más rayos dan una oclusión \
+                        tr("Rayos por muestra"),
+                        tr(
+                            "1 = 6 rayos, 2 = 18, 3 = 66, 4 = 258. Más rayos dan una oclusión \
                          más suave y cuestan más tiempo. 3 alcanza para casi todo.",
+                        ),
                         Some("3"),
                         |ui| slider_u32(ui, m, &mut self.opts.ao_level, 1..=6, 0.0),
                     );
                     row(
                         ui,
                         m,
-                        "Descartar rayos débiles",
-                        "Salta los rayos que casi no aportan (los muy rasantes). Ahorra \
+                        tr("Descartar rayos débiles"),
+                        tr(
+                            "Salta los rayos que casi no aportan (los muy rasantes). Ahorra \
                          tiempo sin cambio visible. 0 los traza todos.",
+                        ),
                         Some("0.045"),
                         |ui| {
                             ui.spacing_mut().slider_width = (m.ctrl_w - 78.0).max(90.0);
@@ -3444,10 +3658,12 @@ impl App {
                     row(
                         ui,
                         m,
-                        "Color",
-                        "Hacia qué color tiñe la oclusión. Negro es lo normal; un tono \
+                        tr("Color"),
+                        tr(
+                            "Hacia qué color tiñe la oclusión. Negro es lo normal; un tono \
                          oscuro frío o cálido puede darle carácter a un mapa.",
-                        Some("negro"),
+                        ),
+                        Some(tr("negro")),
                         |ui| {
                             egui::color_picker::color_edit_button_srgb(ui, &mut self.opts.ao_color);
                             let [r, g, b] = self.opts.ao_color;
@@ -3459,8 +3675,9 @@ impl App {
                 row(
                     ui,
                     m,
-                    "Sombras suaves",
-                    "Cuántos rayos de sombra por eje traza cada muestra hacia cada luz: 1 es \
+                    tr("Sombras suaves"),
+                    tr(
+                        "Cuántos rayos de sombra por eje traza cada muestra hacia cada luz: 1 es \
                      un rayo (sombra dura, lo de siempre), 3 son 9 rayos repartidos en el \
                      tamaño de un texel de lightmap.\n\n\
                      QUÉ CAMBIA: el borde de las sombras pasa de una escalera de texels a un \
@@ -3468,17 +3685,18 @@ impl App {
                      texlights ya dan sombras blandas.\n\n\
                      COSTE: en zm_eichen_v2, 3 llevó RAD de 2.5 a 3.6 s. Calcula la luz \
                      directa en la CPU aunque uses la GPU.",
-                    Some("1 = apagado"),
+                    ),
+                    Some(tr("1 = apagado")),
                     |ui| slider_u32(ui, m, &mut self.opts.pcf, 1..=8, 0.0),
                 );
                 if self.opts.pcf > 1 {
                     hint(
                         ui,
                         m,
-                        &format!(
-                            "{} rayos de sombra por muestra y luz. 3 es el valor útil; más \
+                        &tf!(
+                            "{rays} rayos de sombra por muestra y luz. 3 es el valor útil; más \
                              casi no se distingue y cuesta más",
-                            self.opts.pcf * self.opts.pcf
+                            rays = self.opts.pcf * self.opts.pcf
                         ),
                         OK,
                     );
@@ -3486,8 +3704,9 @@ impl App {
                 row(
                     ui,
                     m,
-                    "Frenar la luz que se filtra",
-                    "RAD suaviza cada luxel promediándolo con sus vecinos. En el borde de \
+                    tr("Frenar la luz que se filtra"),
+                    tr(
+                        "RAD suaviza cada luxel promediándolo con sus vecinos. En el borde de \
                      una sombra fina o al pie de una pared, esos vecinos iluminados meten luz \
                      donde no debería haber.\n\n\
                      QUÉ CAMBIA: un vecino más brillante que el luxel pesa menos en el \
@@ -3495,7 +3714,8 @@ impl App {
                      partida, 1 no deja entrar a ningún vecino más brillante.\n\n\
                      Actúa sobre la luz directa de light, light_spot y light_environment. \
                      Un mapa iluminado casi solo con texlights no cambia.",
-                    Some("0 = apagado"),
+                    ),
+                    Some(tr("0 = apagado")),
                     |ui| slider_f32(ui, m, &mut self.opts.blurclamp, 0.0..=1.0),
                 );
             },
@@ -3507,16 +3727,18 @@ impl App {
         let prefs_before = self.lib.analysis.clone();
         card(
             ui,
-            "Analizar el mapa compilado",
-            "busca agujeros, zonas caras en FPS y caras que se dibujan de más",
+            tr("Analizar el mapa compilado"),
+            tr("busca agujeros, zonas caras en FPS y caras que se dibujan de más"),
             |ui| {
                 let target = self.analysis_target();
                 row(
                     ui,
                     m,
-                    "Archivo .bsp",
-                    "Vacío analiza el .bsp que dejó la última compilación de este proyecto. \
+                    tr("Archivo .bsp"),
+                    tr(
+                        "Vacío analiza el .bsp que dejó la última compilación de este proyecto. \
                      Elige otro para revisar cualquier mapa, aunque no lo hayas compilado tú.",
+                    ),
                     None,
                     |ui| {
                         let state = target.as_ref().map(|p| p.is_file());
@@ -3525,16 +3747,18 @@ impl App {
                             m,
                             &mut self.analysis_bsp,
                             state,
-                            "Buscar",
-                            || pick_file("Mapa compilado", "bsp"),
+                            tr("Buscar"),
+                            || pick_file(tr("Mapa compilado"), "bsp"),
                             true,
                         );
                     },
                 );
                 if self.analysis_bsp.trim().is_empty() {
                     let text = match &target {
-                        Some(p) => format!("Último compilado: {}", p.display()),
-                        None => "Todavía no hay un .bsp compilado para este proyecto".to_string(),
+                        Some(p) => tf!("Último compilado: {path}", path = p.display()),
+                        None => {
+                            tr("Todavía no hay un .bsp compilado para este proyecto").to_string()
+                        }
                     };
                     hint(ui, m, &text, MUTED);
                 }
@@ -3543,22 +3767,24 @@ impl App {
                 toggle_row(
                     ui,
                     m,
-                    "Agujeros",
-                    "Lanza rayos por el mapa compilado. Donde uno entra en una pared y ninguna \
+                    tr("Agujeros"),
+                    tr("Lanza rayos por el mapa compilado. Donde uno entra en una pared y ninguna \
                      cara dibujada lo tapa, el jugador vería a través: es el problema de las \
                      caras invisibles de los brushes deformados.\n\n\
                      Si el .map del proyecto es el de este .bsp, los rayos apuntan a cada cara \
-                     visible del .map, así que no se escapa ninguna.",
-                    Some("recomendado"),
+                     visible del .map, así que no se escapa ninguna."),
+                    Some(tr("recomendado")),
                     &mut prefs.holes,
                 );
                 if prefs.holes {
                     row(
                         ui,
                         m,
-                        "Rayos",
-                        "Más rayos revisan más superficie y tardan más. 20000 alcanza para \
+                        tr("Rayos"),
+                        tr(
+                            "Más rayos revisan más superficie y tardan más. 20000 alcanza para \
                          un mapa normal; súbelo en mapas enormes.",
+                        ),
                         Some("20000"),
                         |ui| slider_u32(ui, m, &mut prefs.rays, 1000..=200000, 1000.0),
                     );
@@ -3566,10 +3792,12 @@ impl App {
                 toggle_row(
                     ui,
                     m,
-                    "wpoly por zona",
-                    "Cuenta, para cada hoja del mapa, cuántas caras del mundo le manda el PVS \
+                    tr("wpoly por zona"),
+                    tr(
+                        "Cuenta, para cada hoja del mapa, cuántas caras del mundo le manda el PVS \
                      al motor. Eso es lo que sigue el wpoly y lo que baja los FPS. Lista las \
                      zonas peores para que sepas dónde poner HINT o cortar una visual.",
+                    ),
                     Some("FPS"),
                     &mut prefs.wpoly,
                 );
@@ -3577,8 +3805,8 @@ impl App {
                     row(
                         ui,
                         m,
-                        "Radio de zona",
-                        "Hojas más cerca que esto se juntan en una sola zona de la lista.",
+                        tr("Radio de zona"),
+                        tr("Hojas más cerca que esto se juntan en una sola zona de la lista."),
                         Some("256"),
                         |ui| slider_f32(ui, m, &mut prefs.radius, 64.0..=2048.0),
                     );
@@ -3586,32 +3814,38 @@ impl App {
                 toggle_row(
                     ui,
                     m,
-                    "Caras ocultas",
-                    "Caras que se dibujan y se iluminan sin que nadie pueda verlas: paredes \
+                    tr("Caras ocultas"),
+                    tr(
+                        "Caras que se dibujan y se iluminan sin que nadie pueda verlas: paredes \
                      del mundo tapadas del todo por un func_wall fijo, y caras de entidades \
                      metidas dentro de paredes. Con NULL o func_detail se van.\n\n\
                      Un func_illusionary no cuenta: no es sólido, y un jugador puede meterse \
                      en un arbusto y ver el piso de abajo.",
+                    ),
                     Some("FPS"),
                     &mut prefs.hidden,
                 );
                 toggle_row(
                     ui,
                     m,
-                    "Geometría",
-                    "Revisa que cada cara sea plana, convexa y sin vértices repetidos, y \
-                     cuenta los pares de caras que todavía se podrían fusionar. Un error acá \
+                    tr("Geometría"),
+                    tr(
+                        "Revisa que cada cara sea plana, convexa y sin vértices repetidos, y \
+                     cuenta los pares de caras que todavía se podrían fusionar. Un error aquí \
                      es del compilador, no tuyo.",
+                    ),
                     None,
                     &mut prefs.geometry,
                 );
                 toggle_row(
                     ui,
                     m,
-                    "Analizar al compilar",
-                    "Corre el análisis solo cada vez que una compilación termina bien. Tarda \
+                    tr("Analizar al compilar"),
+                    tr(
+                        "Corre el análisis solo cada vez que una compilación termina bien. Tarda \
                      unos segundos y avisa en esta pestaña.",
-                    Some("recomendado"),
+                    ),
+                    Some(tr("recomendado")),
                     &mut prefs.after_compile,
                 );
 
@@ -3619,7 +3853,7 @@ impl App {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if running {
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button(tr("Cancelar")).clicked() {
                             if let Some(job) = &self.analysis_job {
                                 job.cancel();
                             }
@@ -3628,7 +3862,7 @@ impl App {
                     } else if ui
                         .add_enabled(
                             any && target.as_ref().is_some_and(|p| p.is_file()),
-                            egui::Button::new(RichText::new("Analizar").strong()),
+                            egui::Button::new(RichText::new(tr("Analizar")).strong()),
                         )
                         .clicked()
                     {
@@ -3646,7 +3880,7 @@ impl App {
         let Some(report) = self.analysis_report.clone() else {
             return;
         };
-        card(ui, "Resultado", "", |ui| {
+        card(ui, tr("Resultado"), "", |ui| {
             ui.label(RichText::new(report.bsp.display().to_string()).color(TEXT));
             ui.label(RichText::new(&report.stats).color(MUTED).small());
         });
@@ -3662,19 +3896,21 @@ impl App {
         section: &analysis::Section,
     ) {
         let (tag, color) = match section.level {
-            analysis::Level::Ok => ("bien", OK),
+            analysis::Level::Ok => (tr("bien"), OK),
             analysis::Level::Info => ("info", ACCENT),
-            analysis::Level::Warn => ("revisar", WARN),
-            analysis::Level::Error => ("problema", ERR),
+            analysis::Level::Warn => (tr("revisar"), WARN),
+            analysis::Level::Error => (tr("problema"), ERR),
         };
-        card(ui, section.title, "", |ui| {
+        card(ui, tr(section.title), "", |ui| {
             ui.horizontal(|ui| {
                 chip(ui, tag, color);
                 ui.add(egui::Label::new(RichText::new(&section.summary).color(TEXT)).wrap());
             });
             if !section.advice.is_empty() && section.level != analysis::Level::Ok {
                 ui.add_space(4.0);
-                ui.add(egui::Label::new(RichText::new(section.advice).color(MUTED).small()).wrap());
+                ui.add(
+                    egui::Label::new(RichText::new(tr(section.advice)).color(MUTED).small()).wrap(),
+                );
             }
             if section.findings.is_empty() {
                 return;
@@ -3686,14 +3922,15 @@ impl App {
                     .bsp
                     .file_stem()
                     .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "mapa".into());
+                    .unwrap_or_else(|| tr("mapa").into());
                 if ui
-                    .button("Guardar pointfile")
-                    .on_hover_text(format!(
-                        "Escribe {stem}_{}.pts junto al .bsp. En J.A.C.K. o Hammer: Map > \
+                    .button(tr("Guardar pointfile"))
+                    .on_hover_text(tf!(
+                        "Escribe {stem}_{key}.pts junto al .bsp. En J.A.C.K. o Hammer: Map > \
                          Load Pointfile y elige ese archivo. Cada estrella marca un punto de \
                          la lista.",
-                        section.key
+                        stem,
+                        key = section.key
                     ))
                     .clicked()
                 {
@@ -3703,9 +3940,11 @@ impl App {
                             match analysis::write_pointfile(&path, &section.findings) {
                                 Ok(()) => {
                                     reveal_in_explorer(&path);
-                                    format!("Pointfile guardado: {}", path.display())
+                                    tf!("Pointfile guardado: {path}", path = path.display())
                                 }
-                                Err(e) => format!("No pude escribir {}: {e}", path.display()),
+                                Err(e) => {
+                                    tf!("No pude escribir {path}: {e}", path = path.display(), e)
+                                }
                             };
                     }
                 }
@@ -3714,24 +3953,26 @@ impl App {
                 if map.file_stem() == report.bsp.file_stem()
                     && map.parent().is_some_and(|p| p.is_dir())
                     && ui
-                        .button(format!(
-                            "Como {}",
-                            map_pts.file_name().unwrap_or_default().to_string_lossy()
+                        .button(tf!(
+                            "Como {file}",
+                            file = map_pts.file_name().unwrap_or_default().to_string_lossy()
                         ))
-                        .on_hover_text(
+                        .on_hover_text(tr(
                             "Lo guarda con el nombre que el editor abre directo con Load \
                              Pointfile, junto al .map. Reemplaza el rastro del último leak.",
-                        )
+                        ))
                         .clicked()
                 {
                     self.analysis_status =
                         match analysis::write_pointfile(&map_pts, &section.findings) {
-                            Ok(()) => format!("Pointfile guardado: {}", map_pts.display()),
-                            Err(e) => format!("No pude escribir {}: {e}", map_pts.display()),
+                            Ok(()) => tf!("Pointfile guardado: {path}", path = map_pts.display()),
+                            Err(e) => {
+                                tf!("No pude escribir {path}: {e}", path = map_pts.display(), e)
+                            }
                         };
                 }
                 ui.label(
-                    RichText::new(format!("{} puntos", section.findings.len()))
+                    RichText::new(tf!("{count} puntos", count = section.findings.len()))
                         .color(MUTED)
                         .small(),
                 );
@@ -3754,24 +3995,24 @@ impl App {
                                     format!("{:.0} {:.0} {:.0}", f.pos[0], f.pos[1], f.pos[2]);
                                 ui.label(RichText::new(&coords).color(MUTED).small().monospace());
                                 if ui
-                                    .small_button("Copiar")
-                                    .on_hover_text(
+                                    .small_button(tr("Copiar"))
+                                    .on_hover_text(tr(
                                         "Copia la coordenada. En el juego, con sv_cheats 1: \
                                          setpos seguido de la coordenada.",
-                                    )
+                                    ))
                                     .clicked()
                                 {
                                     ui.output_mut(|o| o.copied_text = coords.clone());
-                                    self.analysis_status = format!("Copiado: {coords}");
+                                    self.analysis_status = tf!("Copiado: {coords}", coords);
                                 }
                                 ui.end_row();
                             }
                         });
                     if section.findings.len() > SHOWN {
                         ui.label(
-                            RichText::new(format!(
-                                "y {} más; el pointfile los incluye todos",
-                                section.findings.len() - SHOWN
+                            RichText::new(tf!(
+                                "y {count} más; el pointfile los incluye todos",
+                                count = section.findings.len() - SHOWN
                             ))
                             .color(MUTED)
                             .small(),
@@ -3788,17 +4029,17 @@ impl App {
             "VIS" => &mut self.opts.vis_extra,
             _ => &mut self.opts.rad_extra,
         };
-        card(ui, &format!("Parámetros extra para {which}"), "", |ui| {
+        card(ui, &tf!("Parámetros extra para {which}", which), "", |ui| {
             ui.add(
                 egui::TextEdit::singleline(field)
-                    .hint_text("admite comillas: -lights \"C:\\Mis mapas\\x.rad\"")
+                    .hint_text(tr("admite comillas: -lights \"C:\\Mis mapas\\x.rad\""))
                     .desired_width(f32::INFINITY),
             )
-            .on_hover_text(
+            .on_hover_text(tr(
                 "Para flags que no están en la interfaz. Se agregan al final de la línea \
                  de comandos. Las comillas agrupan rutas con espacios; una comilla sin \
                  cerrar bloquea la compilación y muestra el error.",
-            );
+            ));
             if let Some(error) = options::parse_extra_args(field).err() {
                 ui.label(RichText::new(error).color(ERR).small());
             }
@@ -3808,8 +4049,8 @@ impl App {
     fn ui_advice(&mut self, ui: &mut egui::Ui) {
         card(
             ui,
-            "Lo que deberías hacer siempre",
-            "medido sobre mapas reales; números en docs/BENCHMARKS.md",
+            tr("Lo que deberías hacer siempre"),
+            tr("medido sobre mapas reales; números en docs/BENCHMARKS.md"),
             |ui| {
                 for rule in always_rules() {
                     egui::Frame::none()
@@ -3844,18 +4085,18 @@ impl App {
             .count();
 
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Salida").color(TEXT).strong().size(14.5));
+            ui.label(RichText::new(tr("Salida")).color(TEXT).strong().size(14.5));
             if errors > 0 {
-                chip(ui, &format!("{errors} errores"), ERR);
+                chip(ui, &tf!("{errors} errores", errors), ERR);
             }
             if warns > 0 {
-                chip(ui, &format!("{warns} avisos"), WARN);
+                chip(ui, &tf!("{warns} avisos", warns), WARN);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.small_button("Limpiar").clicked() {
+                if ui.small_button(tr("Limpiar")).clicked() {
                     self.log.clear();
                 }
-                if ui.small_button("Copiar").clicked() {
+                if ui.small_button(tr("Copiar")).clicked() {
                     let all: String = self
                         .log
                         .iter()
@@ -3864,7 +4105,7 @@ impl App {
                         .join("\n");
                     ui.output_mut(|o| o.copied_text = all);
                 }
-                if ui.small_button("Guardar").clicked() {
+                if ui.small_button(tr("Guardar")).clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .set_file_name("compile.log")
                         .save_file()
@@ -3876,8 +4117,8 @@ impl App {
                             .collect::<Vec<_>>()
                             .join("\n");
                         self.status = match std::fs::write(&path, all) {
-                            Ok(()) => format!("Log guardado en {}", path.display()),
-                            Err(e) => format!("No pude guardar el log: {e}"),
+                            Ok(()) => tf!("Log guardado en {path}", path = path.display()),
+                            Err(e) => tf!("No pude guardar el log: {e}", e),
                         };
                     }
                 }
@@ -3890,10 +4131,10 @@ impl App {
             ui.add(
                 egui::TextEdit::singleline(&mut self.log_filter)
                     .desired_width(w)
-                    .hint_text("filtrar..."),
+                    .hint_text(tr("filtrar...")),
             );
-            ui.checkbox(&mut self.only_problems, "Solo problemas")
-                .on_hover_text("Muestra únicamente errores y avisos.");
+            ui.checkbox(&mut self.only_problems, tr("Solo problemas"))
+                .on_hover_text(tr("Muestra únicamente errores y avisos."));
         });
         ui.add_space(6.0);
 
@@ -3924,10 +4165,12 @@ impl App {
                     ui.add_space(6.0);
                     ui.label(
                         RichText::new(if self.log.is_empty() {
-                            "La salida de las herramientas aparece aquí.\n\nArrastra un .map \
-                             sobre la ventana y pulsa Compilar (F5)."
+                            tr(
+                                "La salida de las herramientas aparece aquí.\n\nArrastra un .map \
+                             sobre la ventana y pulsa Compilar (F5).",
+                            )
                         } else {
-                            "Ninguna línea coincide con el filtro."
+                            tr("Ninguna línea coincide con el filtro.")
                         })
                         .color(MUTED)
                         .small(),
@@ -3966,7 +4209,7 @@ impl App {
                 } else if enabled {
                     (name.to_string(), MUTED)
                 } else {
-                    (format!("{name} (saltado)"), FAINT)
+                    (tf!("{name} (saltado)", name), FAINT)
                 };
                 chip(ui, &txt, color).on_hover_text(stage.purpose());
             }
@@ -3974,14 +4217,17 @@ impl App {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if let Some(total) = self.total_secs {
                     ui.label(
-                        RichText::new(format!("total {}", fmt_secs(total)))
+                        RichText::new(tf!("total {time}", time = fmt_secs(total)))
                             .color(TEXT)
                             .strong(),
                     );
                 } else if let Some(t) = self.run_since {
                     ui.label(
-                        RichText::new(format!("total {}", fmt_secs(t.elapsed().as_secs_f64())))
-                            .color(MUTED),
+                        RichText::new(tf!(
+                            "total {time}",
+                            time = fmt_secs(t.elapsed().as_secs_f64())
+                        ))
+                        .color(MUTED),
                     );
                 }
             });
@@ -4007,21 +4253,28 @@ impl App {
                 let saving = self.dirty_since.is_some();
                 if chip(ui, &name, ACCENT)
                     .interact(egui::Sense::click())
-                    .on_hover_text("Proyecto abierto. Click para ir a Proyectos.")
+                    .on_hover_text(tr("Proyecto abierto. Click para ir a Proyectos."))
                     .clicked()
                 {
                     self.tab = Tab::Projects;
                 }
                 ui.label(
-                    RichText::new(if saving { "guardando..." } else { "guardado" })
-                        .color(if saving { MUTED } else { OK })
-                        .small(),
+                    RichText::new(if saving {
+                        tr("guardando...")
+                    } else {
+                        tr("guardado")
+                    })
+                    .color(if saving { MUTED } else { OK })
+                    .small(),
                 );
             } else if ui
-                .add(egui::Button::new(RichText::new("sin proyecto").color(MUTED).small()).small())
-                .on_hover_text(
-                    "Guarda lo que tienes cargado como proyecto para volver a él después.",
+                .add(
+                    egui::Button::new(RichText::new(tr("sin proyecto")).color(MUTED).small())
+                        .small(),
                 )
+                .on_hover_text(tr(
+                    "Guarda lo que tienes cargado como proyecto para volver a él después.",
+                ))
                 .clicked()
             {
                 self.tab = Tab::Projects;
@@ -4029,7 +4282,7 @@ impl App {
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if self.job.is_some() {
-                    let btn = egui::Button::new(RichText::new("Cancelar").strong())
+                    let btn = egui::Button::new(RichText::new(tr("Cancelar")).strong())
                         .min_size(egui::vec2(140.0, 32.0))
                         .fill(ERR.linear_multiply(0.35))
                         .stroke(egui::Stroke::new(1.0_f32, ERR));
@@ -4037,14 +4290,14 @@ impl App {
                         if let Some(j) = &self.job {
                             j.cancel();
                         }
-                        self.status = "Cancelando...".to_string();
+                        self.status = tr("Cancelando...").to_string();
                     }
                     ui.spinner();
                 } else {
                     let enabled = self.can_run();
                     let btn = ui.add_enabled(
                         enabled,
-                        egui::Button::new(RichText::new("Compilar").strong().size(14.5))
+                        egui::Button::new(RichText::new(tr("Compilar")).strong().size(14.5))
                             .min_size(egui::vec2(140.0, 32.0))
                             .fill(if enabled { ACCENT_DEEP } else { CARD })
                             .stroke(egui::Stroke::new(
@@ -4056,19 +4309,19 @@ impl App {
                         self.start();
                     }
                     let _ = btn.on_hover_text(if enabled {
-                        "Compilar ahora (F5)"
+                        tr("Compilar ahora (F5)")
                     } else if self.enabled_stages() == 0 {
-                        "Activa al menos una etapa."
+                        tr("Activa al menos una etapa.")
                     } else if !self.checks.map_ok {
-                        "Falta un .map válido."
+                        tr("Falta un .map válido.")
                     } else if !self.opts.extra_args_errors().is_empty() {
-                        "Corrige las comillas de los parámetros extra."
+                        tr("Corrige las comillas de los parámetros extra.")
                     } else {
                         self.checks
                             .plan_errors
                             .first()
                             .map(String::as_str)
-                            .unwrap_or("Revisa la configuración de la compilación.")
+                            .unwrap_or(tr("Revisa la configuración de la compilación."))
                     });
                 }
 
@@ -4078,9 +4331,9 @@ impl App {
                         .as_ref()
                         .map(|r| r.tag.clone())
                         .unwrap_or_default();
-                    if chip(ui, &format!("actualizar a {tag}"), OK)
+                    if chip(ui, &tf!("actualizar a {tag}", tag), OK)
                         .interact(egui::Sense::click())
-                        .on_hover_text("Hay una release nueva. Click para verla.")
+                        .on_hover_text(tr("Hay una release nueva. Click para verla."))
                         .clicked()
                     {
                         self.update_window = true;
@@ -4092,33 +4345,77 @@ impl App {
                 ui.add_space(4.0);
                 if ui
                     .small_button("A+")
-                    .on_hover_text("Agrandar la interfaz")
+                    .on_hover_text(tr("Agrandar la interfaz"))
                     .clicked()
                 {
                     self.opts.ui_scale = (self.opts.ui_scale + 0.1).min(2.0);
                 }
                 if ui
                     .small_button("A-")
-                    .on_hover_text("Achicar la interfaz")
+                    .on_hover_text(tr("Achicar la interfaz"))
                     .clicked()
                 {
                     self.opts.ui_scale = (self.opts.ui_scale - 0.1).max(0.7);
                 }
+                self.ui_language(ui);
             });
         });
     }
 
+    /// Language picker. The button shows the code rather than a word, so it
+    /// is found by someone who does not read the language in use.
+    fn ui_language(&mut self, ui: &mut egui::Ui) {
+        let label = format!("🌐 {}", i18n::current().code.to_ascii_uppercase());
+        let mut pick = None;
+        ui.menu_button(RichText::new(label).small(), |ui| {
+            let system = i18n::system();
+            let system_name = i18n::LANGS
+                .iter()
+                .find(|l| l.code == system)
+                .map_or("", |l| l.name);
+            let auto = tf!("Automático ({name})", name = system_name);
+            if ui
+                .selectable_label(self.lib.lang.is_empty(), auto)
+                .on_hover_text(tr("Usa el idioma del sistema."))
+                .clicked()
+            {
+                pick = Some(String::new());
+            }
+            ui.separator();
+            for lang in i18n::LANGS {
+                if ui
+                    .selectable_label(self.lib.lang == lang.code, lang.name)
+                    .clicked()
+                {
+                    pick = Some(lang.code.to_string());
+                }
+            }
+        })
+        .response
+        .on_hover_text(tr("Idioma de la interfaz"));
+        if let Some(code) = pick {
+            ui.close_menu();
+            i18n::set(&code);
+            self.lib.lang = code;
+            self.save_library();
+        }
+    }
+
     fn ui_footer(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let lower = self.status.to_ascii_lowercase();
-            let color = if lower.starts_with("listo") || lower.contains("guardad") {
+            // The status is free text, so its color comes from its words, in
+            // whichever language it was written.
+            let lower = self.status.to_lowercase();
+            let starts = |key: &str| lower.starts_with(&tr(key).to_lowercase());
+            let has = |key: &str| lower.contains(&tr(key).to_lowercase());
+            let color = if starts(n_("listo")) || has(n_("guardad")) {
                 OK
-            } else if lower.contains("cancel") {
+            } else if has(n_("cancel")) {
                 WARN
-            } else if lower.contains("error")
-                || lower.contains("falló")
-                || lower.contains("no pude")
-                || lower.starts_with("falta")
+            } else if has(n_("error"))
+                || has(n_("falló"))
+                || has(n_("no pude"))
+                || starts(n_("falta"))
             {
                 ERR
             } else {
@@ -4126,25 +4423,30 @@ impl App {
             };
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let mut check_now = false;
-                ui.menu_button("Actualizaciones", |ui| {
+                ui.menu_button(tr("Actualizaciones"), |ui| {
                     ui.set_min_width(230.0);
                     ui.label(
-                        RichText::new(format!("Versión {}", update::Version::current()))
-                            .color(TEXT)
-                            .strong(),
+                        RichText::new(tf!(
+                            "Versión {version}",
+                            version = update::Version::current()
+                        ))
+                        .color(TEXT)
+                        .strong(),
                     );
                     if !self.update_status.is_empty() {
                         ui.label(RichText::new(&self.update_status).color(MUTED).small());
                     }
                     ui.separator();
-                    if self.update_found.is_some() && ui.button("Ver la actualización").clicked() {
+                    if self.update_found.is_some()
+                        && ui.button(tr("Ver la actualización")).clicked()
+                    {
                         self.update_window = true;
                         ui.close_menu();
                     }
                     if ui
                         .add_enabled(
                             self.update_check.is_none(),
-                            egui::Button::new("Buscar ahora"),
+                            egui::Button::new(tr("Buscar ahora")),
                         )
                         .clicked()
                     {
@@ -4153,12 +4455,12 @@ impl App {
                     }
                     let mut auto = self.lib.check_updates;
                     if ui
-                        .checkbox(&mut auto, "Buscar actualizaciones al abrir")
-                        .on_hover_text(
+                        .checkbox(&mut auto, tr("Buscar actualizaciones al abrir"))
+                        .on_hover_text(tr(
                             "Al abrir la app se busca una versión nueva. Si existe, se \
                              muestra la release y tú decides si instalarla. Nunca se \
                              actualiza durante un compilado ni sin confirmación.",
-                        )
+                        ))
                         .changed()
                     {
                         self.lib.check_updates = auto;
@@ -4166,7 +4468,7 @@ impl App {
                     }
                     ui.separator();
                     ui.hyperlink_to(
-                        "Releases en GitHub",
+                        tr("Releases en GitHub"),
                         format!("https://github.com/{}/releases", update::REPO),
                     );
                 });
@@ -4174,22 +4476,25 @@ impl App {
                     self.start_update_check(true);
                 }
 
-                let btn = ui.small_button("Guardar ajustes");
+                let btn = ui.small_button(tr("Guardar ajustes"));
                 if btn.clicked() {
                     self.status = match save_profile(&self.opts) {
-                        Ok(()) => "Preferencias guardadas.".to_string(),
-                        Err(e) => format!("No pude guardar: {e}"),
+                        Ok(()) => tr("Preferencias guardadas.").to_string(),
+                        Err(e) => tf!("No pude guardar: {e}", e),
                     };
                 }
-                let _ = btn.on_hover_text(
+                let _ = btn.on_hover_text(tr(
                     "Las preferencias se guardan solas al cerrar la ventana y al \
                      empezar una compilación. Este botón solo fuerza el guardado ahora.",
-                );
+                ));
 
                 let dir = self.result_dir();
                 if ui
-                    .add_enabled(dir.is_some(), egui::Button::new("Abrir carpeta").small())
-                    .on_hover_text("Abre dónde queda el .bsp")
+                    .add_enabled(
+                        dir.is_some(),
+                        egui::Button::new(tr("Abrir carpeta")).small(),
+                    )
+                    .on_hover_text(tr("Abre dónde queda el .bsp"))
                     .clicked()
                 {
                     if let Some(d) = dir {
@@ -4265,7 +4570,7 @@ impl eframe::App for App {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if let Some(j) = &self.job {
                 j.cancel();
-                self.status = "Cancelando...".to_string();
+                self.status = tr("Cancelando...").to_string();
             }
         }
 
@@ -4398,13 +4703,21 @@ fn window_icon() -> egui::IconData {
 }
 
 fn main() -> eframe::Result<()> {
+    // The saved language, so the window title and the already-open dialog
+    // come out in it too, not just what App draws.
+    // Read only: migrating the file waits for the instance lock.
+    let lang = library_path()
+        .and_then(|path| Library::load_checked(&path).ok())
+        .map(|lib| lib.lang)
+        .unwrap_or_default();
+    i18n::set(&lang);
     let instance_path = state_path("resdhlt-gui.lock")
         .unwrap_or_else(|| std::env::temp_dir().join("resdhlt-gui.lock"));
     let _instance_lock = match acquire_app_instance_lock(&instance_path) {
         Ok(lock) => lock,
         Err(error) => {
             rfd::MessageDialog::new()
-                .set_title("ReSDHLT ya está abierto")
+                .set_title(tr("ReSDHLT ya está abierto"))
                 .set_description(&error)
                 .set_level(rfd::MessageLevel::Warning)
                 .show();
@@ -4416,7 +4729,7 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([760.0, 560.0])
-            .with_title("ReSDHLT - compilador de mapas")
+            .with_title(tr("ReSDHLT - compilador de mapas"))
             .with_icon(window_icon())
             .with_drag_and_drop(true),
         ..Default::default()

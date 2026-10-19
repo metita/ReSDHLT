@@ -21,6 +21,8 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use crate::i18n::tr;
+
 /// Where releases are published. Anything downloaded is checked against this
 /// host, so a redirect cannot point the updater somewhere else.
 pub const REPO: &str = "metita/ReSDHLT";
@@ -141,11 +143,11 @@ fn curl(args: &[&str]) -> Result<Vec<u8>, String> {
 
     let out = cmd
         .output()
-        .map_err(|e| format!("no pude ejecutar curl: {e}"))?;
+        .map_err(|e| tf!("no pude ejecutar curl: {e}", e))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         return Err(if err.is_empty() {
-            format!("curl terminó con {}", out.status)
+            tf!("curl terminó con {status}", status = out.status)
         } else {
             err
         });
@@ -186,13 +188,13 @@ fn latest_release(repo: &str) -> Result<Option<Release>, String> {
 
 fn parse_release(body: &[u8]) -> Result<Option<Release>, String> {
     let value: serde_json::Value =
-        serde_json::from_slice(body).map_err(|e| format!("respuesta ilegible: {e}"))?;
+        serde_json::from_slice(body).map_err(|e| tf!("respuesta ilegible: {e}", e))?;
 
     if value.get("tag_name").is_none() {
         let message = value
             .get("message")
             .and_then(|m| m.as_str())
-            .unwrap_or("respuesta inesperada de GitHub");
+            .unwrap_or(tr("respuesta inesperada de GitHub"));
         return if message.eq_ignore_ascii_case("Not Found") {
             Ok(None) // no releases published yet
         } else {
@@ -201,13 +203,13 @@ fn parse_release(body: &[u8]) -> Result<Option<Release>, String> {
     }
 
     let api: ApiRelease =
-        serde_json::from_value(value).map_err(|e| format!("respuesta ilegible: {e}"))?;
+        serde_json::from_value(value).map_err(|e| tf!("respuesta ilegible: {e}", e))?;
 
     if api.draft || api.prerelease {
         return Ok(None);
     }
     let version =
-        Version::parse(&api.tag_name).ok_or_else(|| format!("tag raro: {}", api.tag_name))?;
+        Version::parse(&api.tag_name).ok_or_else(|| tf!("tag raro: {tag}", tag = api.tag_name))?;
 
     // Never let GitHub's asset order choose an ISA-specific package. The GUI
     // updates to the portable build for this exact OS/architecture; AVX2 is an
@@ -219,7 +221,12 @@ fn parse_release(body: &[u8]) -> Result<Option<Release>, String> {
         .assets
         .iter()
         .find(|asset| asset.name.eq_ignore_ascii_case(expected_name))
-        .ok_or_else(|| format!("la release no trae el paquete portable {expected_name}"))?;
+        .ok_or_else(|| {
+            tf!(
+                "la release no trae el paquete portable {expected_name}",
+                expected_name
+            )
+        })?;
 
     let checksum_name = format!("{expected_name}.sha256");
     let checksum_asset = api
@@ -232,8 +239,9 @@ fn parse_release(body: &[u8]) -> Result<Option<Release>, String> {
         .iter()
         .find(|candidate| candidate.name.eq_ignore_ascii_case(&signature_name));
     let Some(signature_asset) = signature_asset else {
-        return Err(format!(
-            "la release no trae la firma Ed25519 {signature_name}"
+        return Err(tf!(
+            "la release no trae la firma Ed25519 {signature_name}",
+            signature_name
         ));
     };
 
@@ -241,9 +249,9 @@ fn parse_release(body: &[u8]) -> Result<Option<Release>, String> {
         .iter()
         .any(|h| asset.browser_download_url.starts_with(h))
     {
-        return Err(format!(
-            "la descarga no apunta a GitHub: {}",
-            asset.browser_download_url
+        return Err(tf!(
+            "la descarga no apunta a GitHub: {url}",
+            url = asset.browser_download_url
         ));
     }
     if let Some(checksum) = checksum_asset {
@@ -251,9 +259,9 @@ fn parse_release(body: &[u8]) -> Result<Option<Release>, String> {
             .iter()
             .any(|host| checksum.browser_download_url.starts_with(host))
         {
-            return Err(format!(
-                "el checksum no apunta a GitHub: {}",
-                checksum.browser_download_url
+            return Err(tf!(
+                "el checksum no apunta a GitHub: {url}",
+                url = checksum.browser_download_url
             ));
         }
     }
@@ -261,9 +269,9 @@ fn parse_release(body: &[u8]) -> Result<Option<Release>, String> {
         .iter()
         .any(|host| signature_asset.browser_download_url.starts_with(host))
     {
-        return Err(format!(
-            "la firma no apunta a GitHub: {}",
-            signature_asset.browser_download_url
+        return Err(tf!(
+            "la firma no apunta a GitHub: {url}",
+            url = signature_asset.browser_download_url
         ));
     }
 
@@ -280,7 +288,7 @@ fn parse_release(body: &[u8]) -> Result<Option<Release>, String> {
 }
 
 fn parse_sha256_manifest(text: &[u8], asset_name: &str) -> Result<String, String> {
-    let text = std::str::from_utf8(text).map_err(|_| "checksum ilegible".to_string())?;
+    let text = std::str::from_utf8(text).map_err(|_| tr("checksum ilegible").to_string())?;
     let mut matching = None;
     for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
         let mut fields = line.split_whitespace();
@@ -290,13 +298,13 @@ fn parse_sha256_manifest(text: &[u8], asset_name: &str) -> Result<String, String
             continue;
         }
         if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err("checksum SHA-256 inválido".to_string());
+            return Err(tr("checksum SHA-256 inválido").to_string());
         }
         if matching.replace(hash.to_ascii_lowercase()).is_some() {
-            return Err("el manifest repite el checksum del paquete".to_string());
+            return Err(tr("el manifest repite el checksum del paquete").to_string());
         }
     }
-    matching.ok_or_else(|| format!("el manifest no contiene {asset_name}"))
+    matching.ok_or_else(|| tf!("el manifest no contiene {asset_name}", asset_name))
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -321,28 +329,28 @@ fn verify_signature_with_key(
     let signature_bytes = STANDARD
         .decode(
             std::str::from_utf8(encoded_signature)
-                .map_err(|_| "firma ilegible".to_string())?
+                .map_err(|_| tr("firma ilegible").to_string())?
                 .trim(),
         )
-        .map_err(|_| "firma Ed25519 no es base64 válido".to_string())?;
+        .map_err(|_| tr("firma Ed25519 no es base64 válido").to_string())?;
     let signature_bytes: [u8; 64] = signature_bytes
         .try_into()
-        .map_err(|_| "la firma Ed25519 no tiene 64 bytes".to_string())?;
+        .map_err(|_| tr("la firma Ed25519 no tiene 64 bytes").to_string())?;
     let signature = Signature::from_bytes(&signature_bytes);
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     key.verify(&bytes, &signature)
-        .map_err(|_| "la firma Ed25519 del paquete no coincide".to_string())
+        .map_err(|_| tr("la firma Ed25519 del paquete no coincide").to_string())
 }
 
 fn verify_release_signature(path: &Path, encoded_signature: &[u8]) -> Result<(), String> {
     let key_bytes = STANDARD
         .decode(RELEASE_PUBLIC_KEY_B64)
-        .map_err(|_| "clave pública Ed25519 inválida".to_string())?;
+        .map_err(|_| tr("clave pública Ed25519 inválida").to_string())?;
     let key_bytes: [u8; 32] = key_bytes
         .try_into()
-        .map_err(|_| "la clave pública Ed25519 no tiene 32 bytes".to_string())?;
+        .map_err(|_| tr("la clave pública Ed25519 no tiene 32 bytes").to_string())?;
     let key = VerifyingKey::from_bytes(&key_bytes)
-        .map_err(|_| "clave pública Ed25519 inválida".to_string())?;
+        .map_err(|_| tr("clave pública Ed25519 inválida").to_string())?;
     verify_signature_with_key(path, encoded_signature, &key)
 }
 
@@ -374,7 +382,7 @@ pub fn install(release: &Release) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let install_dir = exe
         .parent()
-        .ok_or("no pude determinar la carpeta de instalación")?
+        .ok_or(tr("no pude determinar la carpeta de instalación"))?
         .to_path_buf();
 
     let work = std::env::temp_dir().join(format!("resdhlt-update-{}", std::process::id()));
@@ -382,9 +390,10 @@ pub fn install(release: &Release) -> Result<(), String> {
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
 
     let checksum_url = release.checksum_url.as_deref().ok_or_else(|| {
-        format!(
-            "la release {} no publica {}.sha256; actualización rechazada",
-            release.tag, release.asset_name
+        tf!(
+            "la release {tag} no publica {asset}.sha256; actualización rechazada",
+            tag = release.tag,
+            asset = release.asset_name
         )
     })?;
     let checksum_body = curl(&["--fail", checksum_url])?;
@@ -400,25 +409,29 @@ pub fn install(release: &Release) -> Result<(), String> {
 
     let downloaded = std::fs::metadata(&zip).map(|m| m.len()).unwrap_or(0);
     if downloaded == 0 {
-        return Err("la descarga quedó vacía".to_string());
+        return Err(tr("la descarga quedó vacía").to_string());
     }
     if release.asset_size > 0 && downloaded != release.asset_size {
-        return Err(format!(
-            "la descarga no coincide con la release: {downloaded} bytes contra {}",
-            release.asset_size
+        return Err(tf!(
+            "la descarga no coincide con la release: {downloaded} bytes contra {expected}",
+            downloaded,
+            expected = release.asset_size
         ));
     }
     let actual_sha256 = sha256_file(&zip)?;
     if actual_sha256 != expected_sha256 {
-        return Err(format!(
-            "SHA-256 incorrecto para {}: esperado {}, recibido {}",
-            release.asset_name, expected_sha256, actual_sha256
+        return Err(tf!(
+            "SHA-256 incorrecto para {asset}: esperado {expected}, recibido {actual}",
+            asset = release.asset_name,
+            expected = expected_sha256,
+            actual = actual_sha256
         ));
     }
     let signature_url = release.signature_url.as_deref().ok_or_else(|| {
-        format!(
-            "la release {} no publica {}.sig; actualización rechazada",
-            release.tag, release.asset_name
+        tf!(
+            "la release {tag} no publica {asset}.sig; actualización rechazada",
+            tag = release.tag,
+            asset = release.asset_name
         )
     })?;
     let signature_body = curl(&["--fail", signature_url])?;
@@ -437,7 +450,10 @@ pub fn install(release: &Release) -> Result<(), String> {
         "tools/sdhlt.wad",
     ] {
         if !unpacked.join(required).is_file() {
-            return Err(format!("el paquete está incompleto: falta {required}"));
+            return Err(tf!(
+                "el paquete está incompleto: falta {required}",
+                required
+            ));
         }
     }
 
@@ -471,9 +487,9 @@ fn unzip(zip: &Path, dest: &Path) -> Result<(), String> {
     hide_console(&mut cmd);
     let out = cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
-        return Err(format!(
-            "no pude descomprimir: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+        return Err(tf!(
+            "no pude descomprimir: {e}",
+            e = String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
     Ok(())
@@ -497,7 +513,7 @@ fn unzip(zip: &Path, dest: &Path) -> Result<(), String> {
         .output()
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
-        return Err("no pude descomprimir".to_string());
+        return Err(tr("no pude descomprimir").to_string());
     }
     Ok(())
 }
@@ -516,7 +532,7 @@ try {{
     Wait-Process -Id {pid} -Timeout 60 -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 400
     if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{
-        throw 'la GUI no terminó dentro de 60 segundos'
+        throw '{timeout}'
     }}
 
     New-Item -ItemType Directory -Path $backup -Force | Out-Null
@@ -531,7 +547,7 @@ try {{
     }}
     Start-Process -FilePath '{exe}'
 }} catch {{
-    Write-Output "FALLO: $_"
+    Write-Output ('{failed}: ' + $_)
     foreach ($target in $installed) {{
         if (Test-Path -LiteralPath $target) {{
             Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
@@ -542,7 +558,7 @@ try {{
             Move-Item -LiteralPath $_.FullName -Destination '{dest}' -Force
         }}
     }}
-    Write-Output 'ROLLBACK: instalación anterior restaurada'
+    Write-Output 'ROLLBACK: {rollback}'
 }} finally {{
     Stop-Transcript | Out-Null
 }}
@@ -553,6 +569,9 @@ try {{
         dest = ps_literal(dest),
         exe = ps_literal(exe),
         work = ps_literal(work),
+        timeout = tr("la GUI no terminó dentro de 60 segundos").replace('\'', "''"),
+        failed = tr("FALLO").replace('\'', "''"),
+        rollback = tr("instalación anterior restaurada").replace('\'', "''"),
     );
     std::fs::write(&script, body).map_err(|e| e.to_string())?;
 
@@ -572,7 +591,7 @@ try {{
 
 #[cfg(not(windows))]
 fn spawn_swapper(_src: &Path, _dest: &Path, _exe: &Path, _work: &Path) -> Result<(), String> {
-    Err("el actualizador automático todavía no está disponible en esta plataforma".to_string())
+    Err(tr("el actualizador automático todavía no está disponible en esta plataforma").to_string())
 }
 
 #[cfg(test)]

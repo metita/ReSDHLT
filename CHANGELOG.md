@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- GUI: English interface. The GUI opens in the system language (Spanish on a
+  Spanish Windows, English on anything else) and the 🌐 button in the top bar
+  pins either one; the choice is saved with the projects. Spanish stays the
+  source language: each text is the key into `gui/lang/<code>.json`, and
+  `cargo test`, now part of CI, fails when a text has no translation, a
+  translation has no text, or their placeholders differ. A new language is one
+  JSON file and one line in `gui/src/i18n.rs`.
+
 ## [0.21.0] - 2026-10-09
 
 ### Changed

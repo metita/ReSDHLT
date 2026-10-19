@@ -22,6 +22,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
+use crate::i18n::tr;
+use crate::tf;
+
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------- settings
@@ -129,36 +132,37 @@ fn run(
     cancel: &AtomicBool,
 ) -> Result<Report, String> {
     let started = Instant::now();
-    let _ = tx.send(Msg::Progress("Leyendo el .bsp".to_string()));
+    let _ = tx.send(Msg::Progress(tr("Leyendo el .bsp").to_string()));
     let bsp = Bsp::load(path)?;
     let world = bsp
         .models
         .first()
-        .ok_or("el .bsp no tiene modelo del mundo")?;
-    let stats = format!(
-        "{} caras del mundo, {} hojas, {} entidades brush",
-        world.numfaces,
-        world.visleafs,
-        bsp.models.len().saturating_sub(1)
+        .ok_or(tr("el .bsp no tiene modelo del mundo"))?;
+    let stats = tf!(
+        "{faces} caras del mundo, {leaves} hojas, {entities} entidades brush",
+        faces = world.numfaces,
+        leaves = world.visleafs,
+        entities = bsp.models.len().saturating_sub(1)
     );
 
     let mut sections = Vec::new();
     let stopped = || cancel.load(Ordering::SeqCst);
     if prefs.geometry && !stopped() {
-        let _ = tx.send(Msg::Progress("Revisando la geometría".to_string()));
+        let _ = tx.send(Msg::Progress(tr("Revisando la geometría").to_string()));
         sections.push(geometry(&bsp));
     }
     if prefs.holes && !stopped() {
-        let _ = tx.send(Msg::Progress(format!(
-            "Buscando agujeros con {} rayos",
-            prefs.rays
+        let _ = tx.send(Msg::Progress(tf!(
+            "Buscando agujeros con {rays} rayos",
+            rays = prefs.rays
         )));
         let targets = match map {
             Some(m) if m.is_file() => match map_world_faces(m) {
                 Ok(t) => Some(t),
                 Err(e) => {
-                    let _ = tx.send(Msg::Progress(format!(
-                        "No pude leer el .map ({e}); los rayos salen al azar"
+                    let _ = tx.send(Msg::Progress(tf!(
+                        "No pude leer el .map ({e}); los rayos salen al azar",
+                        e
                     )));
                     None
                 }
@@ -168,15 +172,15 @@ fn run(
         sections.push(holes(&bsp, targets.as_deref(), prefs.rays, cancel));
     }
     if prefs.wpoly && !stopped() {
-        let _ = tx.send(Msg::Progress("Contando wpoly por hoja".to_string()));
+        let _ = tx.send(Msg::Progress(tr("Contando wpoly por hoja").to_string()));
         sections.push(wpoly(&bsp, prefs.radius as f64));
     }
     if prefs.hidden && !stopped() {
-        let _ = tx.send(Msg::Progress("Buscando caras ocultas".to_string()));
+        let _ = tx.send(Msg::Progress(tr("Buscando caras ocultas").to_string()));
         sections.extend(hidden(&bsp));
     }
     if stopped() {
-        return Err("Análisis cancelado.".to_string());
+        return Err(tr("Análisis cancelado.").to_string());
     }
     Ok(Report {
         bsp: path.to_path_buf(),
@@ -411,16 +415,17 @@ impl Reader<'_> {
 
 impl Bsp {
     fn load(path: &Path) -> Result<Self, String> {
-        let data =
-            std::fs::read(path).map_err(|e| format!("no pude leer {}: {e}", path.display()))?;
+        let data = std::fs::read(path)
+            .map_err(|e| tf!("no pude leer {path}: {e}", path = path.display(), e))?;
         if data.len() < 4 + 15 * 8 {
-            return Err("el archivo es demasiado corto para ser un .bsp".to_string());
+            return Err(tr("el archivo es demasiado corto para ser un .bsp").to_string());
         }
         let r = Reader { data: &data };
         let version = r.i32(0);
         if version != 30 {
-            return Err(format!(
-                "versión de BSP {version}, se esperaba 30 (GoldSrc)"
+            return Err(tf!(
+                "versión de BSP {version}, se esperaba 30 (GoldSrc)",
+                version
             ));
         }
         let mut lumps = [(0usize, 0usize); 15];
@@ -428,7 +433,7 @@ impl Bsp {
             let off = r.i32(4 + 8 * i);
             let size = r.i32(8 + 8 * i);
             if off < 0 || size < 0 || off as usize + size as usize > data.len() {
-                return Err(format!("el lump {i} sale del archivo: el .bsp está dañado"));
+                return Err(tf!("el lump {i} sale del archivo: el .bsp está dañado", i));
             }
             *lump = (off as usize, size as usize);
         }
@@ -626,7 +631,7 @@ fn geometry(bsp: &Bsp) -> Section {
     let mut problem = |kind: &'static str, fi: usize, pos: V3, findings: &mut Vec<Finding>| {
         *counts.entry(kind).or_default() += 1;
         findings.push(Finding {
-            text: format!("cara {fi}: {kind}"),
+            text: tf!("cara {fi}: {kind}", fi, kind),
             pos,
             weight: 0.5,
         });
@@ -634,34 +639,34 @@ fn geometry(bsp: &Bsp) -> Section {
 
     for fi in 0..bsp.faces.len() {
         let Some(pts) = bsp.face_points(fi) else {
-            problem("índices fuera de rango", fi, [0.0; 3], &mut findings);
+            problem(tr("índices fuera de rango"), fi, [0.0; 3], &mut findings);
             polys.push(None);
             continue;
         };
         if pts.len() < 3 {
-            problem("menos de 3 vértices", fi, centroid(&pts), &mut findings);
+            problem(tr("menos de 3 vértices"), fi, centroid(&pts), &mut findings);
             polys.push(None);
             continue;
         }
         let c = centroid(&pts);
         if pts.len() > MAXEDGES {
-            problem("demasiados vértices", fi, c, &mut findings);
+            problem(tr("demasiados vértices"), fi, c, &mut findings);
         }
         if bsp.faces[fi].texinfo >= bsp.texinfo.len() {
-            problem("texinfo inválido", fi, c, &mut findings);
+            problem(tr("texinfo inválido"), fi, c, &mut findings);
         }
         let pl = &bsp.planes[bsp.faces[fi].plane];
         if pts
             .iter()
             .any(|p| (dot(*p, pl.n) - pl.d).abs() > PLANE_EPSILON)
         {
-            problem("no es plana", fi, c, &mut findings);
+            problem(tr("no es plana"), fi, c, &mut findings);
         }
         if pts.iter().any(|p| p.iter().any(|v| v.abs() > COORD_LIMIT)) {
-            problem("fuera de los límites del motor", fi, c, &mut findings);
+            problem(tr("fuera de los límites del motor"), fi, c, &mut findings);
         }
         if (0..pts.len()).any(|i| len(sub(pts[i], pts[(i + 1) % pts.len()])) < ON_EPSILON) {
-            problem("vértices duplicados", fi, c, &mut findings);
+            problem(tr("vértices duplicados"), fi, c, &mut findings);
         }
         let normal = bsp.face_normal(fi);
         let mut sign = 0;
@@ -680,12 +685,12 @@ fn geometry(bsp: &Bsp) -> Section {
             if sign == 0 {
                 sign = s;
             } else if s != sign {
-                problem("no es convexa", fi, c, &mut findings);
+                problem(tr("no es convexa"), fi, c, &mut findings);
                 break;
             }
         }
         if area(&pts) < 1e-4 {
-            problem("área cero", fi, c, &mut findings);
+            problem(tr("área cero"), fi, c, &mut findings);
         }
         polys.push(Some(pts));
     }
@@ -721,26 +726,31 @@ fn geometry(bsp: &Bsp) -> Section {
     let mut parts: Vec<String> = counts.iter().map(|(k, v)| format!("{v} {k}")).collect();
     parts.sort();
     let summary = if total == 0 {
-        format!(
-            "{} caras, todas planas, convexas y sin degenerar. Pares que todavía se podrían \
-             fusionar: {residual}.",
-            bsp.faces.len()
+        tf!(
+            "{faces} caras, todas planas, convexas y sin degenerar. Pares que todavía se \
+             podrían fusionar: {residual}.",
+            faces = bsp.faces.len(),
+            residual
         )
     } else {
-        format!(
-            "{total} problemas en {} caras: {}. Pares que todavía se podrían fusionar: \
-             {residual}.",
-            bsp.faces.len(),
-            parts.join(", ")
+        tf!(
+            "{total} problemas en {faces} caras: {kinds}. Pares que todavía se podrían \
+             fusionar: {residual}.",
+            total,
+            faces = bsp.faces.len(),
+            kinds = parts.join(", "),
+            residual
         )
     };
     Section {
-        title: "Geometría",
+        title: tr("Geometría"),
         key: "geometria",
         level: if total > 0 { Level::Error } else { Level::Ok },
         summary,
-        advice: "Una cara no plana, no convexa o degenerada es un error del compilador, no \
-                 del mapa: guarda el .map y el .bsp y repórtalo.",
+        advice: tr(
+            "Una cara no plana, no convexa o degenerada es un error del compilador, \
+                    no del mapa: guarda el .map y el .bsp y repórtalo.",
+        ),
         findings,
     }
 }
@@ -983,21 +993,33 @@ fn holes(bsp: &Bsp, targets: Option<&[(Vec<V3>, V3)]>, rays: u32, cancel: &Atomi
         .iter()
         .map(|(back, p)| Finding {
             text: if *back {
-                "cara al revés: se ve la parte de atrás".to_string()
+                tr("cara al revés: se ve la parte de atrás").to_string()
             } else {
-                "agujero: se ve a través de la pared".to_string()
+                tr("agujero: se ve a través de la pared").to_string()
             },
             pos: *p,
             weight: if *back { 0.3 } else { 1.0 },
         })
         .collect();
-    let mode = if targets.is_some() {
-        "apuntando a las caras visibles del .map"
+    let summary = if targets.is_some() {
+        tf!(
+            "{hits} rayos apuntando a las caras visibles del .map: {holes} agujeros, \
+             {backfaces} caras al revés.",
+            hits,
+            holes,
+            backfaces
+        )
     } else {
-        "desde puntos al azar (sin .map, las texturas de herramienta pueden salir como agujeros)"
+        tf!(
+            "{hits} rayos desde puntos al azar (sin .map, las texturas de herramienta pueden \
+             salir como agujeros): {holes} agujeros, {backfaces} caras al revés.",
+            hits,
+            holes,
+            backfaces
+        )
     };
     Section {
-        title: "Agujeros",
+        title: tr("Agujeros"),
         key: "agujeros",
         level: if holes > 0 {
             Level::Error
@@ -1006,10 +1028,12 @@ fn holes(bsp: &Bsp, targets: Option<&[(Vec<V3>, V3)]>, rays: u32, cancel: &Atomi
         } else {
             Level::Ok
         },
-        summary: format!("{hits} rayos {mode}: {holes} agujeros, {backfaces} caras al revés."),
-        advice: "Un agujero es un lugar donde el jugador ve a través de una pared que en el \
-                 editor está cerrada. Suele venir de vértices fuera de la grilla: acércate a \
-                 la coordenada en el editor y revisa ese brush.",
+        summary,
+        advice: tr(
+            "Un agujero es un lugar donde el jugador ve a través de una pared que en \
+                    el editor está cerrada. Suele venir de vértices fuera de la grilla: \
+                    acércate a la coordenada en el editor y revisa ese brush.",
+        ),
         findings,
     }
 }
@@ -1219,10 +1243,10 @@ fn wpoly(bsp: &Bsp, radius: f64) -> Section {
 
     if rows.is_empty() {
         return Section {
-            title: "wpoly por zona",
+            title: tr("wpoly por zona"),
             key: "wpoly",
             level: Level::Warn,
-            summary: "El mundo no tiene hojas vacías.".to_string(),
+            summary: tr("El mundo no tiene hojas vacías.").to_string(),
             advice: "",
             findings: Vec::new(),
         };
@@ -1245,28 +1269,34 @@ fn wpoly(bsp: &Bsp, radius: f64) -> Section {
         }
     }
     let novis = if bsp.vis.is_empty() {
-        " El mapa no tiene VIS: cada hoja ve todo."
+        tr(" El mapa no tiene VIS: cada hoja ve todo.")
     } else {
         ""
     };
     Section {
-        title: "wpoly por zona",
+        title: tr("wpoly por zona"),
         key: "wpoly",
         level: Level::Info,
-        summary: format!(
-            "Caras del mundo que manda el PVS por hoja: media {mean:.0}, mediana {}, p95 {}, \
-             máximo {worst}.{novis}",
-            pick(0.5),
-            pick(0.95)
+        summary: tf!(
+            "Caras del mundo que manda el PVS por hoja: media {mean}, mediana {median}, p95 \
+             {p95}, máximo {worst}.{novis}",
+            mean = format!("{mean:.0}"),
+            median = pick(0.5),
+            p95 = pick(0.95),
+            worst,
+            novis
         ),
-        advice: "Son cotas superiores: el motor además descarta lo que queda fuera de la \
-                 pantalla o de espaldas, así que en juego ves más o menos la mitad. Las zonas \
-                 de la lista son las que más cuestan: HINT en los pasos estrechos, paredes o \
-                 esquinas que corten las visuales largas y NULL en lo que nadie ve.",
+        advice: tr(
+            "Son cotas superiores: el motor además descarta lo que queda fuera de la \
+                    pantalla o de espaldas, así que en juego ves más o menos la mitad. Las \
+                    zonas de la lista son las que más cuestan: HINT en los pasos estrechos, \
+                    paredes o esquinas que corten las visuales largas y NULL en lo que nadie \
+                    ve.",
+        ),
         findings: hot
             .iter()
             .map(|(count, center, n)| Finding {
-                text: format!("{count} caras en el PVS (hoja {n})"),
+                text: tf!("{count} caras en el PVS (hoja {n})", count, n),
                 pos: *center,
                 weight: *count as f64 / worst.max(1) as f64,
             })
@@ -1535,7 +1565,7 @@ fn hidden(bsp: &Bsp) -> Vec<Section> {
     let make = |title: &'static str,
                 key: &'static str,
                 rows: Vec<(f64, usize, V3, String)>,
-                what: &str,
+                describe: fn(usize, String) -> String,
                 advice: &'static str,
                 level: Level| {
         // An empty f64 sum is -0.0, which prints as "-0".
@@ -1547,19 +1577,26 @@ fn hidden(bsp: &Bsp) -> Vec<Section> {
             title,
             key,
             level: if rows.is_empty() { Level::Ok } else { level },
-            summary: format!(
-                "{} caras, {:.0} unidades cuadradas {what}.",
-                rows.len(),
-                total
-            ),
+            summary: describe(rows.len(), format!("{total:.0}")),
             advice,
             findings: rows
                 .iter()
                 .map(|(a, fi, c, class)| Finding {
                     text: if class.is_empty() {
-                        format!("cara {fi}, {} ({a:.0} u²)", bsp.texname(*fi))
+                        tf!(
+                            "cara {fi}, {texture} ({area} u²)",
+                            fi,
+                            texture = bsp.texname(*fi),
+                            area = format!("{a:.0}")
+                        )
                     } else {
-                        format!("cara {fi}, {} ({a:.0} u²), {class}", bsp.texname(*fi))
+                        tf!(
+                            "cara {fi}, {texture} ({area} u²), {class}",
+                            fi,
+                            texture = bsp.texname(*fi),
+                            area = format!("{a:.0}"),
+                            class
+                        )
                     },
                     pos: *c,
                     weight: a / biggest,
@@ -1569,31 +1606,57 @@ fn hidden(bsp: &Bsp) -> Vec<Section> {
     };
     vec![
         make(
-            "Caras tapadas por entidades",
+            tr("Caras tapadas por entidades"),
             "tapadas",
             covered,
-            "de mundo que un func_wall fijo tapa del todo",
-            "El motor las dibuja y RAD las ilumina aunque nadie pueda verlas. Activa 'Poner \
-             NULL en caras tapadas' en la pestaña CSG y el compilador las quita solo; o \
-             ponles NULL a mano, o convierte la entidad en func_detail.",
+            |faces, area| {
+                tf!(
+                    "{faces} caras, {area} unidades cuadradas de mundo que un func_wall fijo \
+                     tapa del todo.",
+                    faces,
+                    area
+                )
+            },
+            tr(
+                "El motor las dibuja y RAD las ilumina aunque nadie pueda verlas. Activa \
+                'Poner NULL en caras tapadas' en la pestaña CSG y el compilador las quita \
+                solo; o ponles NULL a mano, o convierte la entidad en func_detail.",
+            ),
             Level::Warn,
         ),
         make(
-            "Caras enterradas",
+            tr("Caras enterradas"),
             "enterradas",
             buried,
-            "de entidades metidas dentro de paredes del mundo",
-            "Esas caras de la entidad quedan dentro de un brush del mundo: se dibujan y no se \
-             ven. Ponles NULL.",
+            |faces, area| {
+                tf!(
+                    "{faces} caras, {area} unidades cuadradas de entidades metidas dentro de \
+                     paredes del mundo.",
+                    faces,
+                    area
+                )
+            },
+            tr(
+                "Esas caras de la entidad quedan dentro de un brush del mundo: se dibujan y \
+                no se ven. Ponles NULL.",
+            ),
             Level::Warn,
         ),
         make(
-            "Caras que ninguna hoja dibuja",
+            tr("Caras que ninguna hoja dibuja"),
             "nunca",
             never,
-            "que el motor ya no dibuja",
-            "No cuestan FPS, solo espacio de lightmap. Si son muchas, revisa si falta NULL \
-             en caras que quedaron fuera del mapa.",
+            |faces, area| {
+                tf!(
+                    "{faces} caras, {area} unidades cuadradas que el motor ya no dibuja.",
+                    faces,
+                    area
+                )
+            },
+            tr(
+                "No cuestan FPS, solo espacio de lightmap. Si son muchas, revisa si falta \
+                NULL en caras que quedaron fuera del mapa.",
+            ),
             Level::Info,
         ),
     ]

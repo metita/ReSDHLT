@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::tr;
+
 /// Subfolder that holds everything a compile produces except the .bsp: logs,
 /// the portal file, the .p0-.p3 intermediates and the copied .map.
 pub const WORK_SUBDIR: &str = "intermedios";
@@ -45,16 +47,16 @@ impl VisMatrix {
 
     pub fn label(self) -> &'static str {
         match self {
-            VisMatrix::Auto => "automático (recomendado)",
-            VisMatrix::Normal => "normal (rápido, mucha RAM)",
-            VisMatrix::Sparse => "sparse (equilibrado)",
-            VisMatrix::Off => "off (mapas enormes)",
+            VisMatrix::Auto => tr("automático (recomendado)"),
+            VisMatrix::Normal => tr("normal (rápido, mucha RAM)"),
+            VisMatrix::Sparse => tr("sparse (equilibrado)"),
+            VisMatrix::Off => tr("off (mapas enormes)"),
         }
     }
 
     pub fn help(self) -> &'static str {
         match self {
-            VisMatrix::Auto => {
+            VisMatrix::Auto => tr(
                 "RAD elige solo. Con la GPU activada usa sparse, porque la GPU solo \
                  calcula las transferencias de esa matriz y así gana más. Sin GPU usa \
                  la matriz normal si ocupa hasta 512 MB, y sparse si no.\n\n\
@@ -62,27 +64,27 @@ impl VisMatrix {
                  en ze_elysium bajó MakeScales de 14 a 3.4 s en CPU. Con 43.000 parches \
                  ocupa 112 MB. Para mapas enormes pasa sola a sparse, así que no se \
                  queda sin memoria.\n\n\
-                 NO cambia la iluminación resultante."
-            }
-            VisMatrix::Normal => {
+                 NO cambia la iluminación resultante.",
+            ),
+            VisMatrix::Normal => tr(
                 "Guarda en memoria, sin comprimir, qué parche de luz ve a qué otro. \
                  Es el más rápido de los tres, pero el consumo de RAM crece con el \
                  cuadrado de la cantidad de parches: en un mapa grande con -chop bajo \
                  puede pedir varios GB y fallar por falta de memoria.\n\n\
-                 NO cambia la iluminación resultante, solo cómo se calcula."
-            }
-            VisMatrix::Sparse => {
+                 NO cambia la iluminación resultante, solo cómo se calcula.",
+            ),
+            VisMatrix::Sparse => tr(
                 "Guarda esa misma información comprimida: solo los pares que \
                  realmente se ven. Usa mucha menos RAM a cambio de CPU: cada consulta \
                  es una búsqueda. Automático la elige sola cuando la normal no entra.\n\n\
-                 NO cambia la iluminación resultante."
-            }
-            VisMatrix::Off => {
+                 NO cambia la iluminación resultante.",
+            ),
+            VisMatrix::Off => tr(
                 "No construye ninguna matriz: recalcula la visibilidad cada vez que la \
                  necesita. La RAM deja de ser un problema, pero es bastante más lento. \
                  Solo tiene sentido cuando los otros dos se quedan sin memoria.\n\n\
-                 NO cambia la iluminación resultante."
-            }
+                 NO cambia la iluminación resultante.",
+            ),
         }
     }
 }
@@ -100,25 +102,25 @@ pub enum AoMode {
 impl AoMode {
     pub fn label(self) -> &'static str {
         match self {
-            AoMode::Off => "apagada",
-            AoMode::Direct => "solo luz directa (-ao)",
-            AoMode::All => "toda la luz (-aoall)",
+            AoMode::Off => tr("apagada"),
+            AoMode::Direct => tr("solo luz directa (-ao)"),
+            AoMode::All => tr("toda la luz (-aoall)"),
         }
     }
 
     pub fn help(self) -> &'static str {
         match self {
-            AoMode::Off => "Sin oclusión ambiental. RAD escribe lo mismo que siempre.",
-            AoMode::Direct => {
+            AoMode::Off => tr("Sin oclusión ambiental. RAD escribe lo mismo que siempre."),
+            AoMode::Direct => tr(
                 "La AO de seedee/SDHLT: oscurece la luz de light, light_spot y \
                  light_environment en rincones y junto a objetos. No toca la luz de las \
-                 texlights, así que un mapa iluminado con texlights casi no cambia."
-            }
-            AoMode::All => {
+                 texlights, así que un mapa iluminado con texlights casi no cambia.",
+            ),
+            AoMode::All => tr(
                 "La misma oclusión aplicada a toda la luz del punto, texlights y rebotes \
                  incluidos. Es la que se nota en mapas iluminados con texlights. En \
-                 ze_elysium oscureció el 27% de las caras con un 4% más de tiempo de RAD."
-            }
+                 ze_elysium oscureció el 27% de las caras con un 4% más de tiempo de RAD.",
+            ),
         }
     }
 }
@@ -134,27 +136,27 @@ pub enum VisQuality {
 impl VisQuality {
     pub fn label(self) -> &'static str {
         match self {
-            VisQuality::Fast => "fast (borrador)",
-            VisQuality::Normal => "normal",
-            VisQuality::Full => "full (para publicar)",
+            VisQuality::Fast => tr("fast (borrador)"),
+            VisQuality::Normal => tr("normal"),
+            VisQuality::Full => tr("full (para publicar)"),
         }
     }
 
     pub fn help(self) -> &'static str {
         match self {
-            VisQuality::Fast => {
+            VisQuality::Fast => tr(
                 "Cálculo aproximado de visibilidad. Compila en segundos, pero el PVS \
                  queda de más: el motor dibuja cosas que en realidad no se ven y los \
-                 FPS bajan. Solo para comprobar que el mapa carga."
-            }
+                 FPS bajan. Solo para comprobar que el mapa carga.",
+            ),
             VisQuality::Normal => {
-                "Cálculo completo estándar. Suficiente mientras construyes el mapa."
+                tr("Cálculo completo estándar. Suficiente mientras construyes el mapa.")
             }
-            VisQuality::Full => {
+            VisQuality::Full => tr(
                 "El PVS más ajustado que las herramientas saben calcular. Tarda más en \
                  compilar y produce MENOS wpoly en juego, es decir más FPS. Úsalo \
-                 siempre en la versión que publicas."
-            }
+                 siempre en la versión que publicas.",
+            ),
         }
     }
 }
@@ -383,29 +385,29 @@ pub enum Preset {
 impl Preset {
     pub fn label(self) -> &'static str {
         match self {
-            Preset::Draft => "Borrador",
-            Preset::Recommended => "Recomendado",
-            Preset::Release => "Publicar",
+            Preset::Draft => tr("Borrador"),
+            Preset::Recommended => tr("Recomendado"),
+            Preset::Release => tr("Publicar"),
         }
     }
 
     pub fn summary(self) -> &'static str {
         match self {
-            Preset::Draft => {
+            Preset::Draft => tr(
                 "Lo más rápido posible, para comprobar que el mapa carga y no tiene \
                  leaks. La iluminación queda fea y los FPS peores que los reales: no \
-                 juzgues el mapa con esto."
-            }
-            Preset::Recommended => {
+                 juzgues el mapa con esto.",
+            ),
+            Preset::Recommended => tr(
                 "El que conviene usar casi siempre. Calidad completa con las mejoras \
-                 medidas de este fork ya aplicadas. Es también el default al abrir."
-            }
-            Preset::Release => {
+                 medidas de este fork ya aplicadas. Es también el default al abrir.",
+            ),
+            Preset::Release => tr(
                 "Para la versión que publicas. Igual que Recomendado pero con el \
                  muestreo de cielo al máximo (-skylevel 7). Cuesta ~1.65x más tiempo \
                  en RAD por una diferencia que no se ve: solo tiene sentido si \
-                 necesitas reproducir exactamente la salida de SDHLT original."
-            }
+                 necesitas reproducir exactamente la salida de SDHLT original.",
+            ),
         }
     }
 
@@ -648,54 +650,68 @@ pub struct Rule {
 pub fn always_rules() -> Vec<Rule> {
     vec![
         Rule {
-            title: "Deja los hilos en automático",
-            body: "Este fork arregló dos bugs por los que las herramientas usaban un \
+            title: tr("Deja los hilos en automático"),
+            body: tr(
+                "Este fork arregló dos bugs por los que las herramientas usaban un \
                    solo hilo: en Linux siempre, y en Windows con CPUs de más de 32 \
                    hilos lógicos. Medido, usar todos los núcleos dio 1.68x en una \
                    máquina de 2; con 8 la diferencia es mucho mayor. No pongas un \
                    número a mano salvo que quieras dejar CPU libre para otra cosa.",
+            ),
         },
         Rule {
-            title: "Define el cliente objetivo para -pre25",
-            body: "El flag cambia el limiter de luz para compatibilidad con motores \
+            title: tr("Define el cliente objetivo para -pre25"),
+            body: tr(
+                "El flag cambia el limiter de luz para compatibilidad con motores \
                    anteriores al aniversario 25. Sigue activado como default histórico, \
                    pero no asumas que una configuración sirve para todos los forks: prueba \
                    las zonas más brillantes con el cliente y servidor reales donde vas a \
                    publicar.",
+            ),
         },
         Rule {
-            title: "VIS en 'full' para lo que publicas",
-            body: "VIS es lo único que decide cuánto le pide el mapa al motor en cada \
+            title: tr("VIS en 'full' para lo que publicas"),
+            body: tr(
+                "VIS es lo único que decide cuánto le pide el mapa al motor en cada \
                    frame. 'full' tarda más en compilar y da menos wpoly en juego. \
                    Compila con 'fast' mientras construyes si quieres, pero nunca \
                    publiques un mapa con VIS rápido.",
+            ),
         },
         Rule {
-            title: "No toques -subdivide",
-            body: "El límite de 240 no es un número conservador: es el techo que impone \
+            title: tr("No toques -subdivide"),
+            body: tr(
+                "El límite de 240 no es un número conservador: es el techo que impone \
                    MAX_SURFACE_EXTENT. Si lo subes, el mapa deja de cargar en el \
                    software renderer y en el HLDS. Bajarlo genera más caras y baja los \
                    FPS. Déjalo en 240.",
+            ),
         },
         Rule {
-            title: "Los FPS los baja el mapper, no el compilador",
-            body: "La fusión de caras del BSP ya elimina entre 19% y 46% de las caras \
+            title: tr("Los FPS los baja el mapper, no el compilador"),
+            body: tr(
+                "La fusión de caras del BSP ya elimina entre 19% y 46% de las caras \
                    (medido en tres mapas) y el PVS de VIS ya es casi exacto. Lo que \
                    mueve la aguja es NULL en todo lo que no se ve, y \
                    SOLIDHINT/BEVELHINT en terreno y escaleras. Mira \
                    docs/FPS_Y_TOOL_TEXTURES.md.",
+            ),
         },
         Rule {
-            title: "Más calidad de luz no cuesta FPS",
-            body: "RAD no cambia la geometría que dibuja el motor, así que -extra y más \
+            title: tr("Más calidad de luz no cuesta FPS"),
+            body: tr(
+                "RAD no cambia la geometría que dibuja el motor, así que -extra y más \
                    bounces cuestan tiempo de compilación y algo de tamaño de BSP, pero \
                    cero FPS en juego. Es el lugar donde puedes ser generoso.",
+            ),
         },
         Rule {
-            title: "Mira el chart cuando compiles en serio",
-            body: "Con 'chart' activado las herramientas imprimen cuánto de cada límite \
+            title: tr("Mira el chart cuando compiles en serio"),
+            body: tr(
+                "Con 'chart' activado las herramientas imprimen cuánto de cada límite \
                    del motor estás usando. Es la forma de enterarte de que vas camino a \
                    un límite antes de chocarlo.",
+            ),
         },
     ]
 }
@@ -742,7 +758,7 @@ pub fn parse_extra_args(extra: &str) -> Result<Vec<String>, String> {
     }
 
     if let Some(q) = quote {
-        return Err(format!("falta cerrar la comilla {q}"));
+        return Err(tf!("falta cerrar la comilla {q}", q));
     }
     if !current.is_empty() {
         out.push(current);
@@ -1063,7 +1079,7 @@ impl Options {
         .filter_map(|(stage, text)| {
             parse_extra_args(text)
                 .err()
-                .map(|e| format!("Parámetros extra de {stage}: {e}."))
+                .map(|e| tf!("Parámetros extra de {stage}: {e}.", stage, e))
         })
         .collect()
     }
@@ -1073,81 +1089,101 @@ impl Options {
         let mut w = Vec::new();
 
         if self.subdivide > 240 {
-            w.push(format!(
-                "-subdivide {} pasa el techo de 240. El mapa no cargará en el software \
-                 renderer ni en el HLDS.",
-                self.subdivide
+            w.push(tf!(
+                "-subdivide {value} pasa el techo de 240. El mapa no cargará en el \
+                 software renderer ni en el HLDS.",
+                value = self.subdivide
             ));
         }
         if self.vis_quality == VisQuality::Fast {
             w.push(
-                "VIS en 'fast': el PVS queda de más y los FPS serán peores que en la \
-                 versión real. No publiques así."
-                    .to_string(),
+                tr(
+                    "VIS en 'fast': el PVS queda de más y los FPS serán peores que en la \
+                 versión real. No publiques así.",
+                )
+                .to_string(),
             );
         }
         if self.rad_fast {
             w.push(
-                "RAD en 'fast': la iluminación es un borrador. No juzgues la luz del \
-                 mapa con esto."
-                    .to_string(),
+                tr(
+                    "RAD en 'fast': la iluminación es un borrador. No juzgues la luz del \
+                 mapa con esto.",
+                )
+                .to_string(),
             );
         }
         if !self.pre25 {
             w.push(
-                "-pre25 desactivado: las zonas más brillantes se verán rotas en \
-                 clientes anteriores al 25 aniversario, que son la mayoría."
-                    .to_string(),
+                tr(
+                    "-pre25 desactivado: las zonas más brillantes se verán rotas en \
+                 clientes anteriores al 25 aniversario, que son la mayoría.",
+                )
+                .to_string(),
             );
         }
         if self.leakonly {
             w.push(
-                "'leakonly' corta BSP en cuanto termina de buscar leaks: no obtendrás \
-                 un mapa jugable."
-                    .to_string(),
+                tr(
+                    "'leakonly' corta BSP en cuanto termina de buscar leaks: no obtendrás \
+                 un mapa jugable.",
+                )
+                .to_string(),
             );
         }
         if self.notjunc || self.noclip {
             w.push(
-                "'notjunc' y 'noclip' están pensadas para pruebas rápidas, no para un \
-                 compilado final."
-                    .to_string(),
+                tr(
+                    "'notjunc' y 'noclip' están pensadas para pruebas rápidas, no para un \
+                 compilado final.",
+                )
+                .to_string(),
             );
         }
         if self.nodeterministic {
             w.push(
-                "Sin determinismo, dos compilados del mismo mapa pueden dar BSPs \
-                 distintos. Ahorra ~0.1% de tiempo; casi nunca compensa."
-                    .to_string(),
+                tr(
+                    "Sin determinismo, dos compilados del mismo mapa pueden dar BSPs \
+                 distintos. Ahorra ~0.1% de tiempo; casi nunca compensa.",
+                )
+                .to_string(),
             );
         }
         if self.skylevel >= 8 {
             w.push(
-                "-skylevel 8 son 65.538 rayos de cielo por muestra. Es enormemente más \
-                 lento y la diferencia con 6 no se ve."
-                    .to_string(),
+                tr(
+                    "-skylevel 8 son 65.538 rayos de cielo por muestra. Es enormemente más \
+                 lento y la diferencia con 6 no se ve.",
+                )
+                .to_string(),
             );
         }
         if self.gpu && (self.ao != AoMode::Off || self.pcf > 1) {
             w.push(
-                "Con oclusión ambiental o sombras suaves, RAD calcula la luz directa en la \
-                 CPU aunque la GPU esté activada. La GPU sigue haciendo las transferencias."
-                    .to_string(),
+                tr(
+                    "Con oclusión ambiental o sombras suaves, RAD calcula la luz directa en la \
+                 CPU aunque la GPU esté activada. La GPU sigue haciendo las transferencias.",
+                )
+                .to_string(),
             );
         }
         if !self.convexfix {
             w.push(
-                "Sin el arreglo de brushes no planos, los sólidos deformados con vertex \
-                 manipulation pueden dejar caras invisibles o rendijas en el juego."
-                    .to_string(),
+                tr(
+                    "Sin el arreglo de brushes no planos, los sólidos deformados con vertex \
+                 manipulation pueden dejar caras invisibles o rendijas en el juego.",
+                )
+                .to_string(),
             );
         }
         if !self.auto_wads {
             w.push(
-                "WADs automáticos desactivado: CSG va a usar las rutas guardadas en el \
+                tr(
+                    "WADs automáticos desactivado: CSG va a usar las rutas guardadas en el \
                  .map. Si el mapa viene de otra PC o de otro disco, va a fallar con \
-                 'Could not open wad file'."
-                    .to_string(),
+                 'Could not open wad file'.",
+                )
+                .to_string(),
             );
         }
         w

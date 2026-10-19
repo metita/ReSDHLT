@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::tr;
 use crate::options::Options;
 
 pub const MAX_NAME: usize = 64;
@@ -51,7 +52,7 @@ impl Project {
         Path::new(self.opts.map_path.trim())
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("(sin mapa)")
+            .unwrap_or(tr("(sin mapa)"))
             .to_string()
     }
 }
@@ -79,6 +80,10 @@ pub struct Library {
     /// Where the game lives and what to do there with a finished map. Global.
     #[serde(default)]
     pub game: GamePrefs,
+    /// Interface language, a code from `i18n::LANGS`. Empty follows the
+    /// system. Global.
+    #[serde(default)]
+    pub lang: String,
 }
 
 /// Trying a compiled map in the game: the folder with the executable, and
@@ -171,6 +176,7 @@ impl Default for Library {
             last_update_check: 0,
             analysis: crate::analysis::Prefs::default(),
             game: GamePrefs::default(),
+            lang: String::new(),
         }
     }
 }
@@ -186,9 +192,19 @@ impl Library {
                     }
                     lib
                 })
-                .map_err(|error| format!("{} está corrupto: {error}", path.display())),
+                .map_err(|error| {
+                    tf!(
+                        "{path} está corrupto: {error}",
+                        path = path.display(),
+                        error
+                    )
+                }),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(format!("no pude leer {}: {error}", path.display())),
+            Err(error) => Err(tf!(
+                "no pude leer {path}: {error}",
+                path = path.display(),
+                error
+            )),
         }
     }
 
@@ -237,7 +253,7 @@ impl Library {
 /// is flushed beside the destination before the old one is moved to `.bak`;
 /// failures restore the previous version instead of leaving truncated JSON.
 pub fn atomic_write(path: &Path, text: &str) -> Result<(), String> {
-    let parent = path.parent().ok_or("ruta de guardado sin carpeta")?;
+    let parent = path.parent().ok_or(tr("ruta de guardado sin carpeta"))?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let name = path
         .file_name()
@@ -294,7 +310,7 @@ pub fn sanitize_name(name: &str) -> String {
         .collect();
     let cleaned = cleaned.trim();
     if cleaned.is_empty() {
-        return "sin nombre".to_string();
+        return tr("sin nombre").to_string();
     }
     cleaned.chars().take(MAX_NAME).collect()
 }
@@ -305,7 +321,7 @@ pub fn name_from_map(map_path: &str) -> String {
         .file_stem()
         .and_then(|n| n.to_str())
         .map(sanitize_name)
-        .unwrap_or_else(|| "nuevo proyecto".to_string())
+        .unwrap_or_else(|| tr("nuevo proyecto").to_string())
 }
 
 pub fn now_secs() -> u64 {
@@ -337,11 +353,11 @@ pub enum FileKind {
 impl FileKind {
     pub fn label(self) -> &'static str {
         match self {
-            FileKind::Map => "mapa",
-            FileKind::Bsp => "compilado",
-            FileKind::Portal => "portales",
-            FileKind::Log => "log",
-            FileKind::Intermediate => "intermedio",
+            FileKind::Map => tr("mapa"),
+            FileKind::Bsp => tr("compilado"),
+            FileKind::Portal => tr("portales"),
+            FileKind::Log => tr("log"),
+            FileKind::Intermediate => tr("intermedio"),
             FileKind::Wad => "wad",
             FileKind::Other => "",
         }
@@ -447,17 +463,17 @@ pub fn fmt_size(bytes: u64) -> String {
 /// "hace 3 min", "hace 2 h", "hace 5 d".
 pub fn fmt_age(t: SystemTime) -> String {
     let Ok(d) = SystemTime::now().duration_since(t) else {
-        return "recién".to_string();
+        return tr("recién").to_string();
     };
     let s = d.as_secs();
     if s < 60 {
-        "recién".to_string()
+        tr("recién").to_string()
     } else if s < 3600 {
-        format!("hace {} min", s / 60)
+        tf!("hace {n} min", n = s / 60)
     } else if s < 86400 {
-        format!("hace {} h", s / 3600)
+        tf!("hace {n} h", n = s / 3600)
     } else {
-        format!("hace {} d", s / 86400)
+        tf!("hace {n} d", n = s / 86400)
     }
 }
 

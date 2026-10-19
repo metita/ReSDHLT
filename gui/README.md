@@ -19,7 +19,7 @@ tipo o un nombre de método.
 
 ## Compilar
 
-Necesitás Rust: https://rustup.rs
+Necesitas Rust: https://rustup.rs
 
 ```powershell
 cd gui
@@ -105,7 +105,7 @@ tienes en tu cuenta de GitHub.
 #### Publicar una versión
 
 ```powershell
-# 1. subí la versión en gui/Cargo.toml (el workflow verifica que coincida)
+# 1. sube la versión en gui/Cargo.toml (el workflow verifica que coincida)
 # 2. commit y tag
 git tag v0.2.0
 git push origin v0.2.0
@@ -131,6 +131,10 @@ publicar algo roto.
   centra con un ancho máximo para que no se estire en pantallas 4K.
 - **Escala** con `A+` / `A-` (se guarda en el perfil), para monitores de alta
   densidad.
+- **Idioma**: español o inglés. Por defecto sigue el idioma del sistema (un
+  Windows en español abre en español; cualquier otro, en inglés) y el botón
+  `🌐` de la barra superior lo fija. Se guarda con los proyectos. Ver
+  [Idiomas](#idiomas).
 - **Log** con filtro de texto, modo "solo problemas", contador de errores y
   avisos, y botones de copiar y guardar a archivo.
 - **Barra de progreso** con el tiempo en vivo de la etapa en curso y el total.
@@ -173,7 +177,7 @@ Escritorio\Mapas└── zm_hola\                     ← el nombre del proyect
 
 El compilado corre dentro de `intermedios`, así que todo lo que ensucian las
 herramientas queda ahí; al terminar bien, el `.bsp` se mueve un nivel arriba.
-Podés apuntar diez mapas a la misma carpeta de salida sin que se mezclen.
+Puedes apuntar diez mapas a la misma carpeta de salida sin que se mezclen.
 
 ### Carpeta de WADs y "WADs automáticos"
 
@@ -293,13 +297,16 @@ gui/
 ├── Cargo.toml
 ├── build.rs        compila assets/icon.rc con rc.exe del SDK y lo linkea
 ├── assets/
-│   ├── make_icon.ps1   genera el .ico y el RGBA crudo (editá esto, no el .ico)
+│   ├── make_icon.ps1   genera el .ico y el RGBA crudo (edita esto, no el .ico)
 │   ├── resdhlt.ico     icono del .exe, 16 a 256 px
 │   ├── icon_64.rgba    mismo icono ya decodificado, para la ventana
 │   (el .rc con el icono y la versión lo genera build.rs)
+├── lang/
+│   └── en.json     traducción al inglés (clave = texto en español)
 └── src/
     ├── main.rs      pestañas, layout y estado de la app
-    ├── theme.rs     paleta y estilo de widgets (todo el color vive acá)
+    ├── i18n.rs      idiomas: tr(), tf!, n_() y el test de cobertura
+    ├── theme.rs     paleta y estilo de widgets (todo el color vive aquí)
     ├── widgets.rs   fila de opción, tarjeta, switch, chip, tab strip
     ├── projects.rs  proyectos guardados y vista de la carpeta
     ├── update.rs    releases de GitHub: comprobación e instalación
@@ -309,7 +316,38 @@ gui/
 ```
 
 Si quieres agregar un flag: va en `options.rs` (campo + a `*_args()`) y una fila
-en la pestaña que corresponda en `main.rs`, usando `row` o `toggle_row`.
+en la pestaña que corresponda en `main.rs`, usando `row` o `toggle_row`. Su
+nombre y su descripción van envueltos en `tr()` y con su traducción en
+`lang/en.json` (ver [Idiomas](#idiomas)).
+
+## Idiomas
+
+El español es el idioma fuente: los textos se escriben en español en el código y
+ese mismo texto es la clave de las otras tablas, `lang/<código>.json`, que se
+embeben en el ejecutable al compilar. Un texto sin traducción se muestra en
+español, nunca vacío.
+
+- `tr("Texto")` traduce un literal.
+- `tf!("Copiado a {dst}", dst = ruta.display())` traduce una plantilla y
+  después rellena sus `{nombre}`, así una traducción puede moverlos de lugar.
+  Los formatos numéricos (`{:.1}`) se resuelven antes y entran como valor.
+- `n_("Texto")` marca un literal que se guarda ahora y se traduce al mostrarse
+  con `tr()`, como las etiquetas de una tabla `const`.
+
+`cargo test` lee el código y falla si un texto marcado no está en alguna tabla,
+si una tabla tiene textos que ya no existen o si los `{nombre}` de los dos lados
+no coinciden. El CI lo corre en cada push.
+
+Al cambiar un texto en español cambia su clave: actualiza la entrada de cada
+tabla en el mismo commit.
+
+Para agregar un idioma: copia `lang/en.json` a `lang/<código>.json`, traduce los
+valores y agrega una línea a `LANGS` en `src/i18n.rs` con el código y el nombre
+del idioma en ese idioma. El selector y la detección del sistema lo toman solos.
+
+El estado del pie se colorea por sus palabras ("Listo", "guardado", "error",
+"falló", "no pude", "Falta", "cancel"), así que las traducciones de los mensajes
+de estado deben conservar esas palabras traducidas igual que en la tabla.
 
 ### Detalles que quizás no se ven
 

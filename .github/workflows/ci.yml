@@ -36,6 +36,11 @@ jobs:
       working-directory: gui
       run: cargo clippy --locked --all-targets -- -D warnings
 
+    # Includes the check that every interface text has its translations.
+    - name: Test the GUI
+      working-directory: gui
+      run: cargo test --locked
+
     - name: Build the release GUI
       working-directory: gui
       env:
