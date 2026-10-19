@@ -65,7 +65,7 @@ opciones de las demás pestañas. Se abre y queda listo para compilar.
   página entera scrollea. Click elige, doble click abre, y cada fila tiene su
   botón **Abrir**. Con más de 8 proyectos aparece un filtro por nombre o mapa.
 - La pestaña usa el ancho completo de la ventana: el panel del log se oculta
-  ahí, porque no tiene nada que decir mientras administrás proyectos.
+  ahí, porque no tiene nada que decir mientras administras proyectos.
 - **Carpeta del proyecto**: lista lo que hay ahí ahora mismo — el `.bsp`, y el
   contenido de `intermedios/` — con tamaño y antigüedad. Click elige, doble
   click abre, y **click derecho** da Abrir, Mostrar en la carpeta, Copiar ruta,
