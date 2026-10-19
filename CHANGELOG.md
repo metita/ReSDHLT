@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- RAD: `zhlt_embedlightmap` on water no longer leaves a dark grid on the
+  surface (#6). The engine maps water textures its own way (no texture shift,
+  one repeat every 64 units whatever the size, an 8 unit wave warp) and the
+  bake assumed the mapping of ordinary faces, so each face's lightmap was
+  drawn shrunk into 64 unit tiles, borders included. Water faces are now baked
+  into a texture that repeats every 128 units, with the texinfo scaled to
+  match, a margin of edge light wider than the warp, and the water texture
+  sampled at its in-game scale. All the faces of a texinfo share the period,
+  so the pattern and the warp carry on across their edges. Measured on a
+  solid-colour copy of the map in the report, the light jump across face
+  edges went from 14.4 to 0.7 (0.2 inside a face).
+- BSP: the water of `zhlt_embedlightmap` entities is subdivided into 80 unit
+  pieces, so RAD's period stays at 128 units and the waves warp twice as far
+  as on plain water rather than five times. Other faces and water without the
+  key compile to the same `.bsp` as before.
+
 ## [0.22.0] - 2026-10-19
 
 ### Added

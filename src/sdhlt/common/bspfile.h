@@ -87,6 +87,17 @@
 #define TEXTURE_STEP        16 // this constant was previously defined in lightmap.cpp. --vluzacn
 #define MAX_SURFACE_EXTENT  16 // if lightmap extent exceeds 16, the map will not be able to load in 'Software' renderer and HLDS. //--vluzacn
 
+// GoldSrc draws water (SURF_DRAWTURB) with its own texture mapping (GL_SubdivideSurface
+// and EmitWaterPolys in hw.dll): the texinfo shift is ignored, the texture repeats every
+// TURB_TEXTURE_PERIOD texture units whatever its size, and the wave warp moves the lookup
+// up to TURB_WARP_AMPLITUDE units either way.
+#define TURB_TEXTURE_PERIOD 64
+#define TURB_WARP_AMPLITUDE 8
+// HLBSP subdivides the water of zhlt_embedlightmap entities at this size (pieces of 80
+// units) so that HLRAD can bake each piece into a texture that repeats every
+// 2 * TURB_TEXTURE_PERIOD units.
+#define EMBEDLIGHTMAP_TURB_SUBDIVIDE 96
+
 #define ENGINE_ENTITY_RANGE 4096.0
 //=============================================================================
 

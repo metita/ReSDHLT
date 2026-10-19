@@ -129,6 +129,32 @@ static bool     GridSubdivideCut(const face_t* const f, const texinfo_t* const t
 }
 
 // =====================================================================================
+//  IsEmbeddedTurbFace
+//      Water in an entity with zhlt_embedlightmap. HLRAD bakes it into a texture
+//      whose wave warp grows with the size of the face, so these faces are cut to
+//      EMBEDLIGHTMAP_TURB_SUBDIVIDE instead (see EmbedLightmapInTextures).
+// =====================================================================================
+static bool     IsEmbeddedTurbFace(const face_t* const f)
+{
+    static int      cachedmodel = -1;
+    static bool     cachedembed = false;
+    const int       modnum = g_nummodels - 1;              // the model being built
+
+    if (modnum != cachedmodel)
+    {
+        const entity_t* ent = EntityForModel(modnum);
+        cachedmodel = modnum;
+        cachedembed = modnum != 0 && ent != &g_entities[0] && IntForKey(ent, "zhlt_embedlightmap");
+    }
+    if (!cachedembed)
+    {
+        return false;
+    }
+    const char*     name = GetTextureByNumber(f->texturenum);
+    return name[0] == '!' || name[0] == '*' || !strncasecmp(name, "water", 5) || !strncasecmp(name, "laser", 5);
+}
+
+// =====================================================================================
 //  SubdivideFace
 //      If the face is >256 in either texture direction, carve a valid sized
 //      piece off and insert the remainder in the next link
@@ -172,10 +198,13 @@ void            SubdivideFace(face_t* f, face_t** prevptr)
         return; // ideally these should have their tex_special flag set, so its here jic
 	if (f->facestyle == face_discardable)
 		return;
-	
+
+    const bool      turbembed = IsEmbeddedTurbFace(f);
+    const int       subdivide_size = turbembed ? EMBEDLIGHTMAP_TURB_SUBDIVIDE : g_subdivide_size;
+
     for (axis = 0; axis < 2; axis++)
     {
-        while (g_gridsubdivide)
+        while (g_gridsubdivide && !turbembed)
         {
             vec_t           cut;
 
@@ -214,7 +243,7 @@ void            SubdivideFace(face_t* f, face_t** prevptr)
             f = back;
             *prevptr = f;
         }
-        while (!g_gridsubdivide)
+        while (!g_gridsubdivide || turbembed)
         {
 			mins = 99999999;
 			maxs = -99999999;
@@ -232,7 +261,7 @@ void            SubdivideFace(face_t* f, face_t** prevptr)
                 }
             }
 
-            if ((maxs - mins) <= g_subdivide_size)
+            if ((maxs - mins) <= subdivide_size)
             {
                 break;
             }
@@ -244,7 +273,7 @@ void            SubdivideFace(face_t* f, face_t** prevptr)
             v = VectorNormalize(temp);
 
             VectorCopy(temp, plane.normal);
-            plane.dist = (mins + g_subdivide_size - TEXTURE_STEP) / v; //plane.dist = (mins + g_subdivide_size - 16) / v; //--vluzacn
+            plane.dist = (mins + subdivide_size - TEXTURE_STEP) / v; //plane.dist = (mins + g_subdivide_size - 16) / v; //--vluzacn
             next = f->next;
             SplitFace(f, &plane, &front, &back);
             if (!front || !back)

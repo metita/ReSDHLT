@@ -192,6 +192,20 @@ scrolling, and transparent surfaces stopped being transparent. The baked names
 now preserve the prefix the engine looks for. The same feature also produces 24
 to 34% less texture data than it used to.
 
+On water it also used to bake the light in the wrong place. The engine draws
+water with its own texture mapping: it ignores the texture shift, repeats the
+texture every 64 units whatever its size, and warps the lookup up to 8 units
+either way. The bake assumed the mapping of every other surface, so each face's
+lightmap came out shrunk into 64 unit tiles with a dark border around each one.
+Water is now baked for the mapping the engine actually uses. Each face gets a
+texture that repeats every 128 units, with a margin of its own edge light that
+the warp never crosses, and the water texture keeps the scale it has in game. To
+fit in that, BSP cuts the water of `zhlt_embedlightmap` entities into 80 unit
+pieces instead of 224. The waves warp twice as far as on plain water, which is
+the price of a period long enough for the lightmap. Every piece is a 128x128
+texture (32x32 at `zhlt_embedlightmapresolution 4`). The 2048 textures RAD can
+bake in one map cover about 3,600 by 3,600 units of water.
+
 CSG accepts 512 WAD paths instead of 128. The old ceiling is easy to hit with a
 large texture library, and CSG aborted rather than ignoring the excess.
 

@@ -909,6 +909,13 @@ void NewTextures_PushTexture (int size, void *data)
 //      Returns the length of the prefix written to prefix_out, or -1 when the
 //      name cannot be preserved and the face must be left alone.
 // =====================================================================================
+static bool IsTurbTextureName (const char *texname)
+{
+	return texname[0] == '!' || texname[0] == '*'
+		|| !strncasecmp (texname, "water", 5)
+		|| !strncasecmp (texname, "laser", 5);
+}
+
 int BakedTexturePrefix (const char *texname, char *prefix_out)
 {
 	// Conveyor and masked at once. "{scroll" is seven characters and the name
@@ -934,9 +941,7 @@ int BakedTexturePrefix (const char *texname, char *prefix_out)
 
 	// Every spelling of water maps onto '!': the engine gives them all
 	// SURF_DRAWTURB, and '!' is the one that fits in a single character.
-	if (texname[0] == '!' || texname[0] == '*'
-		|| !strncasecmp (texname, "water", 5)
-		|| !strncasecmp (texname, "laser", 5))
+	if (IsTurbTextureName (texname))
 	{
 		prefix_out[0] = '!';
 		return 1;
@@ -1131,6 +1136,138 @@ static bool GetValidTextureName (int miptex, char name[16])
 	return true;
 }
 
+static int EmbedLightmapResolution (entity_t *ent)
+{
+	int resolution = DEFAULT_EMBEDLIGHTMAP_RESOLUTION;
+	if (IntForKey (ent, "zhlt_embedlightmapresolution"))
+	{
+		resolution = IntForKey (ent, "zhlt_embedlightmapresolution");
+		if (resolution <= 0 || resolution > TEXTURE_STEP || ((resolution - 1) & resolution) != 0)
+		{
+			Error ("resolution cannot be %d; valid values are 1, 2, 4 ... %d.", resolution, (int)TEXTURE_STEP);
+		}
+	}
+	return resolution;
+}
+
+// =====================================================================================
+//  Embedded lightmaps on water
+//      The engine draws water through a path of its own (GL_SubdivideSurface and
+//      EmitWaterPolys in hw.dll), and that path reads the texinfo differently from
+//      every other surface:
+//
+//          s = DotProduct (v, vecs[0])                     the shift is never added
+//          s = (s + turbsin[(t * 0.125 + time) * TURBSCALE]) / 64
+//
+//      The texture repeats every 64 texture units whatever its size, and the wave
+//      warp moves the lookup up to 8 units either way. The bake for ordinary faces
+//      relies on the shift to place the face inside its texture and on the texture
+//      being drawn one texel per unit. On water neither holds, so the whole face
+//      came out squeezed into 64 unit tiles, dark borders included.
+//
+//      A water face is baked instead into a texture that repeats every 64 * n
+//      units, with the texinfo vectors divided by n. The face sits inside one
+//      period, surrounded by its own edge light far enough that the warp never
+//      reaches the far side, and the water texture is sampled at the scale the
+//      engine draws it, so the pattern carries on from one face to the next. All
+//      the faces of a texinfo share n, or the warp would not line up between them.
+//
+//      The warp is fixed in texture units, so it grows n times. HLBSP cuts these
+//      faces to EMBEDLIGHTMAP_TURB_SUBDIVIDE units, which makes n 2.
+// =====================================================================================
+static void TurbFaceRange (int facenum, const texinfo_t *tex, vec_t mins[2], vec_t maxs[2])
+{
+	const dface_t *f = &g_dfaces[facenum];
+	mins[0] = mins[1] = 1e30;
+	maxs[0] = maxs[1] = -1e30;
+	for (int i = 0; i < f->numedges; i++)
+	{
+		int e = g_dsurfedges[f->firstedge + i];
+		const dvertex_t *v = &g_dvertexes[e >= 0? g_dedges[e].v[0]: g_dedges[-e].v[1]];
+		for (int k = 0; k < 2; k++)
+		{
+			vec_t val = DotProduct (v->point, tex->vecs[k]);
+			mins[k] = qmin (mins[k], val);
+			maxs[k] = qmax (maxs[k], val);
+		}
+	}
+}
+
+static int TurbPeriodMultiple (vec_t extent, int resolution)
+{
+	// 64 n has to hold the face, the warp on both sides of it and two texels for
+	// the bilinear filter and the mips.
+	int n = (int)ceil ((extent + 4 * resolution) / (TURB_TEXTURE_PERIOD - 2 * TURB_WARP_AMPLITUDE));
+	return qmax (n, 1);
+}
+
+static void BakeTurbTexels (int facenum, const texinfo_t *tex, const radtexture_t *src,
+							const int texmins[2], const int texsize[2], int period, const int texturesize[2],
+							float (*texture)[5], vec_t denominator, vec_t gamma)
+{
+	vec_t mins[2], maxs[2];
+	vec_t step[2];   // texture units per baked texel
+	vec_t first[2];  // texture units of the period that holds the face
+	int sub[2];      // samples of the water texture per baked texel, along each axis
+	const int srcsize[2] = {src->width, src->height};
+
+	TurbFaceRange (facenum, tex, mins, maxs);
+	for (int k = 0; k < 2; k++)
+	{
+		step[k] = (vec_t)period / texturesize[k];
+		first[k] = (mins[k] + maxs[k]) / 2 - period / 2;
+		sub[k] = qmax (1, qmin ((int)ceil (step[k] * srcsize[k] / TURB_TEXTURE_PERIOD - 0.001), 8));
+	}
+
+	for (int dt = 0; dt < texturesize[1]; dt++)
+	{
+		for (int ds = 0; ds < texturesize[0]; ds++)
+		{
+			float (*dest)[5] = &texture[dt * texturesize[0] + ds];
+			const int d[2] = {ds, dt};
+			vec_t u[2];
+
+			// Light from the texel centre, moved into the period around the face:
+			// past its edges GetLight holds the edge value.
+			for (int k = 0; k < 2; k++)
+			{
+				u[k] = (d[k] + 0.5) * step[k];
+				u[k] -= period * floor ((u[k] - first[k]) / period);
+			}
+			vec3_t light;
+			GetLight (&g_dfaces[facenum], texsize,
+					  (u[0] + tex->vecs[0][3]) / TEXTURE_STEP - texmins[0],
+					  (u[1] + tex->vecs[1][3]) / TEXTURE_STEP - texmins[1], light);
+
+			for (int b = 0; b < sub[1]; b++)
+			{
+				for (int a = 0; a < sub[0]; a++)
+				{
+					// The water texture where the engine draws it. The period is a
+					// whole number of its repeats, so it needs no shift.
+					const double frac[2] = {(a + 0.5) / sub[0], (b + 0.5) / sub[1]};
+					int is[2];
+					for (int k = 0; k < 2; k++)
+					{
+						double s = (d[k] + frac[k]) * step[k] * srcsize[k] / TURB_TEXTURE_PERIOD;
+						s -= srcsize[k] * floor (s / srcsize[k]);
+						is[k] = qmax (0, qmin ((int)floor (s), srcsize[k] - 1));
+					}
+					const byte src_index = src->canvas[is[1] * src->width + is[0]];
+
+					(*dest)[4] += 1;
+					for (int k = 0; k < 3; k++)
+					{
+						float v = src->palette[src_index][k] * pow (light[k] / denominator, gamma);
+						(*dest)[k] += 255 * qmax (0, qmin (v, 255));
+					}
+					(*dest)[3] += 255;
+				}
+			}
+		}
+	}
+}
+
 void EmbedLightmapInTextures ()
 {
 	if (!g_lightdatasize)
@@ -1158,10 +1295,32 @@ void EmbedLightmapInTextures ()
 	int shared_bytes = 0;
 	bool logged = false;
 
+	// The period multiple of each texinfo's water, the largest its faces need.
+	const int numtexinfo = g_numtexinfo;
+	int *turbperiod = (int *)calloc (qmax (numtexinfo, 1), sizeof (int));
+	hlassume (turbperiod != NULL, assume_NoMemory);
+	for (i = 0; i < g_numfaces; i++)
+	{
+		const dface_t *f = &g_dfaces[i];
+		entity_t *ent = g_face_entity[i];
+		char texname[16];
+		if (f->lightofs == -1 || f->texinfo < 0 || f->texinfo >= numtexinfo || ent == &g_entities[0]
+			|| !IntForKey (ent, "zhlt_embedlightmap")
+			|| !GetValidTextureName (g_texinfo[f->texinfo].miptex, texname)
+			|| !IsTurbTextureName (texname))
+		{
+			continue;
+		}
+		vec_t mins[2], maxs[2];
+		TurbFaceRange (i, &g_texinfo[f->texinfo], mins, maxs);
+		const int n = TurbPeriodMultiple (qmax (maxs[0] - mins[0], maxs[1] - mins[1]), EmbedLightmapResolution (ent));
+		turbperiod[f->texinfo] = qmax (turbperiod[f->texinfo], n);
+	}
+
 	for (i = 0; i < g_numfaces; i++)
 	{
 		dface_t *f = &g_dfaces[i];
-		
+
 		if (f->lightofs == -1) // some faces don't have lightmap
 		{
 			continue;
@@ -1226,15 +1385,9 @@ void EmbedLightmapInTextures ()
 		}
 		vec_t denominator = DEFAULT_EMBEDLIGHTMAP_DENOMINATOR;
 		vec_t gamma = DEFAULT_EMBEDLIGHTMAP_GAMMA;
-		int resolution = DEFAULT_EMBEDLIGHTMAP_RESOLUTION;
-		if (IntForKey (ent, "zhlt_embedlightmapresolution"))
-		{
-			resolution = IntForKey (ent, "zhlt_embedlightmapresolution");
-			if (resolution <= 0 || resolution > TEXTURE_STEP || ((resolution - 1) & resolution) != 0)
-			{
-				Error ("resolution cannot be %d; valid values are 1, 2, 4 ... %d.", resolution, (int)TEXTURE_STEP);
-			}
-		}
+		const int resolution = EmbedLightmapResolution (ent);
+		// Texture units the baked water texture repeats over, 0 for anything else.
+		const int period = IsTurbTextureName (texname)? TURB_TEXTURE_PERIOD * qmax (turbperiod[originaltexinfonum], 1): 0;
 
 		// calculate texture size and allocate memory for all miplevels
 
@@ -1258,12 +1411,19 @@ void EmbedLightmapInTextures ()
 
 		for (k = 0; k < 2; k++)
 		{
-			texturesize[k] = (texsize[k] + 1) * TEXTURE_STEP;
-			if (texturesize[k] < texsize[k] * TEXTURE_STEP + resolution * 4)
+			if (period)
 			{
-				texturesize[k] = texsize[k] * TEXTURE_STEP + resolution * 4; // prevent edge bleeding
+				texturesize[k] = (period + resolution - 1) / resolution;
 			}
-			texturesize[k] = (texturesize[k] + resolution - 1) / resolution;
+			else
+			{
+				texturesize[k] = (texsize[k] + 1) * TEXTURE_STEP;
+				if (texturesize[k] < texsize[k] * TEXTURE_STEP + resolution * 4)
+				{
+					texturesize[k] = texsize[k] * TEXTURE_STEP + resolution * 4; // prevent edge bleeding
+				}
+				texturesize[k] = (texturesize[k] + resolution - 1) / resolution;
+			}
 			texturesize[k] += 15 - (texturesize[k] + 15) % 16; // must be multiples of 16
 			if (poweroftwo)
 			{
@@ -1298,67 +1458,74 @@ void EmbedLightmapInTextures ()
 				(*dest)[4] = 0;
 			}
 		}
-		for (t = -side[1]; t < texsize[1] * TEXTURE_STEP + side[1]; t++)
+		if (period)
 		{
-			for (s = -side[0]; s < texsize[0] * TEXTURE_STEP + side[0]; s++)
+			BakeTurbTexels (i, originaltexinfo, tex, texmins, texsize, period, texturesize, texture, denominator, gamma);
+		}
+		else
+		{
+			for (t = -side[1]; t < texsize[1] * TEXTURE_STEP + side[1]; t++)
 			{
-				double s_vec, t_vec;
-				double src_s, src_t;
-				int src_is, src_it;
-				byte src_index;
-				byte src_color[3];
-				double dest_s, dest_t;
-				int dest_is, dest_it;
-				float (*dest)[5];
-				double light_s, light_t;
-				vec3_t light;
-
-				s_vec = s + texmins[0] * TEXTURE_STEP + 0.5;
-				t_vec = t + texmins[1] * TEXTURE_STEP + 0.5;
-
-				if (resolution == 1)
+				for (s = -side[0]; s < texsize[0] * TEXTURE_STEP + side[0]; s++)
 				{
-					dest_s = s_vec;
-					dest_t = t_vec;
-				}
-				else // the final blurred texture is shifted by a half pixel so that lightmap samples align with the center of pixels
-				{
-					dest_s = s_vec / resolution + 0.5;
-					dest_t = t_vec / resolution + 0.5;
-				}
-				dest_s = dest_s - texturesize[0] * floor (dest_s / texturesize[0]);
-				dest_t = dest_t - texturesize[1] * floor (dest_t / texturesize[1]);
-				dest_is = (int)floor (dest_s); // dest_is = dest_s % texturesize[0]
-				dest_it = (int)floor (dest_t); // dest_it = dest_t % texturesize[1]
-				dest_is = qmax (0, qmin (dest_is, texturesize[0] - 1));
-				dest_it = qmax (0, qmin (dest_it, texturesize[1] - 1));
-				dest = &texture[dest_it * texturesize[0] + dest_is];
+					double s_vec, t_vec;
+					double src_s, src_t;
+					int src_is, src_it;
+					byte src_index;
+					byte src_color[3];
+					double dest_s, dest_t;
+					int dest_is, dest_it;
+					float (*dest)[5];
+					double light_s, light_t;
+					vec3_t light;
 
-				src_s = s_vec;
-				src_t = t_vec;
-				src_s = src_s - tex->width * floor (src_s / tex->width);
-				src_t = src_t - tex->height * floor (src_t / tex->height);
-				src_is = (int)floor (src_s); // src_is = src_s % tex->width
-				src_it = (int)floor (src_t); // src_it = src_t % tex->height
-				src_is = qmax (0, qmin (src_is, tex->width - 1));
-				src_it = qmax (0, qmin (src_it, tex->height - 1));
-				src_index = tex->canvas[src_it * tex->width + src_is];
-				VectorCopy (tex->palette[src_index], src_color);
+					s_vec = s + texmins[0] * TEXTURE_STEP + 0.5;
+					t_vec = t + texmins[1] * TEXTURE_STEP + 0.5;
 
-				// get light from the center of the destination pixel
-				light_s = (s_vec + resolution * (dest_is + 0.5 - dest_s)) / TEXTURE_STEP - texmins[0];
-				light_t = (t_vec + resolution * (dest_it + 0.5 - dest_t)) / TEXTURE_STEP - texmins[1];
-				GetLight (f, texsize, light_s, light_t, light);
-
-				(*dest)[4] += 1;
-				if (!(texname[0] == '{' && src_index == 255))
-				{
-					for (k = 0; k < 3; k++)
+					if (resolution == 1)
 					{
-						float v = src_color[k] * pow (light[k] / denominator, gamma);
-						(*dest)[k] += 255 * qmax (0, qmin (v, 255));
+						dest_s = s_vec;
+						dest_t = t_vec;
 					}
-					(*dest)[3] += 255;
+					else // the final blurred texture is shifted by a half pixel so that lightmap samples align with the center of pixels
+					{
+						dest_s = s_vec / resolution + 0.5;
+						dest_t = t_vec / resolution + 0.5;
+					}
+					dest_s = dest_s - texturesize[0] * floor (dest_s / texturesize[0]);
+					dest_t = dest_t - texturesize[1] * floor (dest_t / texturesize[1]);
+					dest_is = (int)floor (dest_s); // dest_is = dest_s % texturesize[0]
+					dest_it = (int)floor (dest_t); // dest_it = dest_t % texturesize[1]
+					dest_is = qmax (0, qmin (dest_is, texturesize[0] - 1));
+					dest_it = qmax (0, qmin (dest_it, texturesize[1] - 1));
+					dest = &texture[dest_it * texturesize[0] + dest_is];
+
+					src_s = s_vec;
+					src_t = t_vec;
+					src_s = src_s - tex->width * floor (src_s / tex->width);
+					src_t = src_t - tex->height * floor (src_t / tex->height);
+					src_is = (int)floor (src_s); // src_is = src_s % tex->width
+					src_it = (int)floor (src_t); // src_it = src_t % tex->height
+					src_is = qmax (0, qmin (src_is, tex->width - 1));
+					src_it = qmax (0, qmin (src_it, tex->height - 1));
+					src_index = tex->canvas[src_it * tex->width + src_is];
+					VectorCopy (tex->palette[src_index], src_color);
+
+					// get light from the center of the destination pixel
+					light_s = (s_vec + resolution * (dest_is + 0.5 - dest_s)) / TEXTURE_STEP - texmins[0];
+					light_t = (t_vec + resolution * (dest_it + 0.5 - dest_t)) / TEXTURE_STEP - texmins[1];
+					GetLight (f, texsize, light_s, light_t, light);
+
+					(*dest)[4] += 1;
+					if (!(texname[0] == '{' && src_index == 255))
+					{
+						for (k = 0; k < 3; k++)
+						{
+							float v = src_color[k] * pow (light[k] / denominator, gamma);
+							(*dest)[k] += 255 * qmax (0, qmin (v, 255));
+						}
+						(*dest)[3] += 255;
+					}
 				}
 			}
 		}
@@ -1457,9 +1624,7 @@ void EmbedLightmapInTextures ()
 				palettemaxcolors = 255;
 				VectorCopy (tex->palette[255], palette[255]); // the transparency color
 			}
-			else if (texname[0] == '!' || texname[0] == '*'
-					 || !strncasecmp (texname, "water", 5)
-					 || !strncasecmp (texname, "laser", 5))
+			else if (IsTurbTextureName (texname))
 			{
 				// All four spellings are water to the engine, so all four keep
 				// their fog entries, not just the '!' one.
@@ -1515,7 +1680,18 @@ void EmbedLightmapInTextures ()
 		g_numtexinfo++;
 
 		*info = g_texinfo[originaltexinfonum];
-		if (resolution != 1)
+		if (period)
+		{
+			// One repeat of the water texture now spans the whole period. The
+			// shift only places the lightmap, which the engine never builds for
+			// water, but it is scaled along so the surface extents stay in step.
+			for (k = 0; k < 2; k++)
+			{
+				VectorScale (info->vecs[k], (vec_t)TURB_TEXTURE_PERIOD / period, info->vecs[k]);
+				info->vecs[k][3] = info->vecs[k][3] * TURB_TEXTURE_PERIOD / period;
+			}
+		}
+		else if (resolution != 1)
 		{
 			// apply a scale and a shift over the original vectors
 			for (k = 0; k < 2; k++)
@@ -1659,6 +1835,7 @@ void EmbedLightmapInTextures ()
 			free (texturemips[miplevel]);
 		}
 	}
+	free (turbperiod);
 	NewTextures_Write (); // update texdata now
 
 	if (logged)
