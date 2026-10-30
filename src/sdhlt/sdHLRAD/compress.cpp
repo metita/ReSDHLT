@@ -39,7 +39,7 @@ const size_t vector_size[vector_type_count] =
 
 void fail ()
 {
-	Error ("Compatability test failed. Please disable HLRAD_TRANSFERDATA_COMPRESS in cmdlib.h and recompile ZHLT.");
+	Error ("Transfer compression self test failed: this build packs light transfers wrongly. Please report it with your compiler and its version.");
 }
 
 void compress_compatability_test ()

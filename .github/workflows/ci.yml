@@ -78,3 +78,13 @@ jobs:
 
     - name: Build
       run: cmake --build ${{ github.workspace }}/build --config Release --parallel
+
+    # RAD checks its transfer compression on startup, before opening the map.
+    # A compiler can build it fine and still get this wrong, so the run has to
+    # reach the missing map to count.
+    - name: Run the RAD startup checks
+      if: runner.os == 'Linux'
+      working-directory: ${{ runner.temp }}
+      run: |
+        ${{ github.workspace }}/tools/sdHLRAD nomap 2>&1 | tee rad.log || true
+        grep -q "Error opening nomap.bsp" rad.log

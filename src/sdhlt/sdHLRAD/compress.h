@@ -39,7 +39,8 @@ extern const size_t vector_size[];
 inline unsigned int bitget
 	(unsigned int i, unsigned int start, unsigned int end)
 {
-	return (i & ~(~0u << end)) >> start;
+	// end can be 32, and shifting by the type's width is undefined
+	return (end < 32 ? i & ~(~0u << end) : i) >> start;
 }
 
 inline unsigned int bitput
@@ -71,6 +72,16 @@ inline unsigned int float_istoosmall
 	(unsigned int i)
 {
 	return i < 0x30800000u;
+}
+
+// A component 32 or more exponents below the largest one rounds to nothing. Zero
+// always lands here, and shifting by the type's width or more is undefined: x86
+// wraps the count, while clang at -O2 and up discards the whole packed value.
+inline unsigned int vector_component
+	(unsigned int i, unsigned int max)
+{
+	const unsigned int shift = 1 + max - bitget (i, 23, 31);
+	return shift < 32 ? (bitget (i, 0, 23) | bitput (1, 23, 24)) >> shift : 0;
 }
 
 inline void float_compress
@@ -193,9 +204,9 @@ inline void vector_compress
 		{
 			max = *p1>*p2? (*p1>*p3? *p1: *p3): (*p2>*p3? *p2: *p3);
 			max = float_istoobig (max)? 0x7F : float_istoosmall (max)? 0x60 : bitget (max, 23, 31);
-			i1 = float_istoobig (*p1)? ~0u : (bitget (*p1, 0, 23) | bitput (1, 23, 24)) >> (1 + max - bitget (*p1, 23, 31));
-			i2 = float_istoobig (*p2)? ~0u : (bitget (*p2, 0, 23) | bitput (1, 23, 24)) >> (1 + max - bitget (*p2, 23, 31));
-			i3 = float_istoobig (*p3)? ~0u : (bitget (*p3, 0, 23) | bitput (1, 23, 24)) >> (1 + max - bitget (*p3, 23, 31));
+			i1 = float_istoobig (*p1)? ~0u : vector_component (*p1, max);
+			i2 = float_istoobig (*p2)? ~0u : vector_component (*p2, max);
+			i3 = float_istoobig (*p3)? ~0u : vector_component (*p3, max);
 		}
 		if (t == VECTOR32)
 			m[0] = 0

@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- RAD: builds made with clang at `-O2` or higher stopped on startup with
+  "Compatability test failed", which also asked to disable a macro that no
+  longer exists. Packing an RGB transfer shifted each component by its distance
+  from the largest one, and a zero component needs a shift far wider than the
+  value. Clang discarded the packed value. A component that far below the
+  largest one is now zero.
+- RAD: with that check passing, clang builds lit maps wrongly under
+  `-rgbtransfers -rgbcompress 1` or `2`, because reading the top bits of a word
+  also shifted by the full width. Those compiles now match GCC and MSVC byte
+  for byte.
+
 ## [0.22.1] - 2026-10-19
 
 ### Fixed
