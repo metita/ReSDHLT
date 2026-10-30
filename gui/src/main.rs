@@ -4037,8 +4037,9 @@ impl App {
             )
             .on_hover_text(tr(
                 "Para flags que no están en la interfaz. Se agregan al final de la línea \
-                 de comandos. Las comillas agrupan rutas con espacios; una comilla sin \
-                 cerrar bloquea la compilación y muestra el error.",
+                 de comandos, así que el primero debe empezar con -. Las comillas agrupan \
+                 rutas con espacios. Un parámetro mal escrito o una comilla sin cerrar \
+                 bloquea la compilación y muestra el error.",
             ));
             if let Some(error) = options::parse_extra_args(field).err() {
                 ui.label(RichText::new(error).color(ERR).small());
@@ -4315,7 +4316,7 @@ impl App {
                     } else if !self.checks.map_ok {
                         tr("Falta un .map válido.")
                     } else if !self.opts.extra_args_errors().is_empty() {
-                        tr("Corrige las comillas de los parámetros extra.")
+                        tr("Corrige los parámetros extra.")
                     } else {
                         self.checks
                             .plan_errors

@@ -594,6 +594,16 @@ mod tests {
     }
 
     #[test]
+    fn extra_arguments_reject_a_leading_bare_word() {
+        assert!(parse_extra_args("hlcsg -hullfile giant.hull").is_err());
+        assert_eq!(
+            parse_extra_args("-hullfile giant.hull").unwrap(),
+            ["-hullfile", "giant.hull"]
+        );
+        assert!(parse_extra_args("   ").unwrap().is_empty());
+    }
+
+    #[test]
     fn gpu_and_new_bsp_controls_reach_the_command_line() {
         let mut options = Options::default();
         options.lmoptimize = true;
@@ -762,6 +772,14 @@ pub fn parse_extra_args(extra: &str) -> Result<Vec<String>, String> {
     }
     if !current.is_empty() {
         out.push(current);
+    }
+    // The tools take a bare word as the map, which the GUI already passes, so
+    // this would make them reject the real map path as an unknown option.
+    if let Some(token) = out.first().filter(|t| !t.starts_with('-')) {
+        return Err(tf!(
+            "\"{token}\" no es un flag: los flags empiezan con - y el nombre de la herramienta no va aquí",
+            token
+        ));
     }
     Ok(out)
 }

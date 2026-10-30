@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `-rgbtransfers -rgbcompress 1` or `2`, because reading the top bits of a word
   also shifted by the full width. Those compiles now match GCC and MSVC byte
   for byte.
+- GUI: extra parameters that start with a bare word, like the tool's name in
+  `hlcsg -hullfile giant.hull`, now block the compile with a clear message.
+  The tool took that word as the map and then stopped with "Unknown option" on
+  the real map path.
 
 ## [0.22.1] - 2026-10-19
 
