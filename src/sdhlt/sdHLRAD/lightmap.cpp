@@ -2546,6 +2546,29 @@ void            BuildSkyLeafList()
 	// understand. A black map is not worth that bet: the optimisation switches
 	// itself off instead.
 	g_skyleaves_usable = (g_numskyleaves > 0);
+
+	// An env_sky brush is CONTENTS_SKY but BSP writes no face for it, so the
+	// empty leaves beside it hold no "sky" face and the list above misses it:
+	// everything lit through env_sky would go dark. A sky leaf without a sky
+	// face means such a brush exists: switch the optimisation off.
+	for (int leafnum = 1; leafnum < g_numleafs && g_skyleaves_usable; leafnum++)
+	{
+		const dleaf_t *leaf = &g_dleafs[leafnum];
+		if (leaf->contents != CONTENTS_SKY)
+		{
+			continue;
+		}
+		bool has_sky_face = false;
+		for (int m = 0; m < leaf->nummarksurfaces && !has_sky_face; m++)
+		{
+			const dface_t *f = &g_dfaces[g_dmarksurfaces[leaf->firstmarksurface + m]];
+			has_sky_face = !strncasecmp (GetTextureByNumber (f->texinfo), "sky", 3);
+		}
+		if (!has_sky_face)
+		{
+			g_skyleaves_usable = false;
+		}
+	}
 }
 
 // True when a sky ray from a sample with this PVS could reach a sky brush.
