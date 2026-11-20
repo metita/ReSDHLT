@@ -131,7 +131,7 @@ the margin is in not generating the input faces.
 - What really lowers the PVS is **blocking the line of sight**: corridors with bends, level changes,
   walls that cut long sightlines. An open map where everything is visible from everywhere will have
   high `wpoly` and no compiler can fix that.
-- `info_portal` + `info_leaf` (specific to SDHLT) force visibility between two specific leafs. They are for
+- `info_portal` (specific to SDHLT, it targets any entity with a targetname) forces visibility between two specific leafs. They are for
   one-off cases, not for lowering `wpoly` in general.
 
 ## 8. About lighting
