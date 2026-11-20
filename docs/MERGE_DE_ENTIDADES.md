@@ -1,142 +1,141 @@
-# Merge de entidades estáticas (`-mergeentities`)
+# Static entity merging (`-mergeentities`)
 
-Guía para el que hace el mapa. Explica qué problema resuelve la opción, cuándo
-usarla y en qué casos el compilador se va a negar a fusionar.
+A guide for the person making the map. It explains what problem the option solves, when to
+use it, and in which cases the compiler will refuse to merge.
 
-## El problema
+## The problem
 
-Cada entidad brush del mapa cuesta **un modelo BSP**. El límite del formato son
-512 modelos (`MAX_MAP_MODELS`), pero el techo que de verdad duele está en el
-motor: la tabla de precache de modelos es una sola y la comparten los `*N` del
-BSP con los modelos de jugadores, armas, props y sprites. Un mapa que gasta 300
-slots en decoración deja al servidor sin lugar para lo demás.
+Every brush entity in the map costs **one BSP model**. The format limit is
+512 models (`MAX_MAP_MODELS`), but the ceiling that really hurts is in the
+engine: the model precache table is a single one, shared by the BSP's `*N` models
+with player models, weapons, props and sprites. A map that spends 300
+slots on decoration leaves the server with no room for everything else.
 
-Eso se paga por entidad, no por brush. Un `func_illusionary` de 1 brush y otro
-de 80 brushes cuestan exactamente lo mismo: un slot.
+That is paid per entity, not per brush. A 1-brush `func_illusionary` and another
+one with 80 brushes cost exactly the same: one slot.
 
-El caso típico es un campo de arbustos. Se hacen con `func_illusionary` porque
-es la única forma de tener transparencia — el `rendermode` es una propiedad de
-entidad en tiempo de ejecución, así que un brush de `worldspawn` (o un
-`func_detail`, que termina fusionado dentro de `worldspawn` en CSG) no puede
-tenerlo. Si son 200 arbustos, son 200 entidades y 200 slots.
+The typical case is a field of bushes. They are made with `func_illusionary` because
+it is the only way to get transparency: `rendermode` is a runtime entity
+property, so a `worldspawn` brush (or a `func_detail`, which ends up merged into
+`worldspawn` in CSG) cannot have it. If there are 200 bushes, that is 200 entities and 200 slots.
 
-## Qué hace la opción
+## What the option does
 
-En CSG, antes de que nada empiece a repartir modelos, se buscan entidades brush
-que sean **intercambiables** y se las fusiona en una sola. Los brushes no se
-tocan: siguen siendo los mismos, con la misma geometría, las mismas texturas y
-la misma iluminación. Lo único que cambia es de qué entidad cuelgan.
+In CSG, before anything starts handing out models, it looks for brush entities
+that are **interchangeable** and merges them into one. The brushes are not
+touched: they stay the same, with the same geometry, the same textures and
+the same lighting. The only thing that changes is which entity they hang from.
 
-200 arbustos idénticos repartidos por el mapa pasan a ser un puñado de
-entidades, una por zona.
+200 identical bushes spread around the map become a handful of
+entities, one per area.
 
-## Uso
+## Usage
 
 ```
-sdHLCSG mapa.map -mergeentities
+sdHLCSG map.map -mergeentities
 ```
 
-Opciones:
+Options:
 
-| Opción | Efecto |
+| Option | Effect |
 |---|---|
-| `-mergeentities` | activa la fusión (por defecto está apagada) |
-| `-mergesize #` | tamaño máximo del grupo fusionado, en unidades. Por defecto 1024. `0` = sin límite |
-| `-mergeblend` | permite fusionar también los render modes que el motor mezcla (ver más abajo) |
+| `-mergeentities` | enables merging (off by default) |
+| `-mergesize #` | maximum size of the merged group, in units. Default 1024. `0` = no limit |
+| `-mergeblend` | also allows merging the render modes that the engine blends (see below) |
 
-`-mergesize` y `-mergeblend` activan la fusión por sí solos, no hace falta pasar
-también `-mergeentities`.
+`-mergesize` and `-mergeblend` enable merging by themselves, there is no need to also pass
+`-mergeentities`.
 
-Al terminar, CSG informa lo que hizo:
+When it finishes, CSG reports what it did:
 
 ```
 Merged 23 static brush entities into 4 (19 models freed)
 ```
 
-Con `-verbose` además lista cada grupo, con su clase y el tamaño de la caja que
-quedó:
+With `-verbose` it also lists each group, with its class and the size of the box that
+resulted:
 
 ```
 merge: 8 func_illusionary entities -> entity 1, box 368 x 32 x 96
 ```
 
-## Por qué existe `-mergesize`
+## Why `-mergesize` exists
 
-Una entidad brush se descarta con el bounding box de su modelo: si la caja no
-está en el PVS del jugador, el motor ni la manda ni la dibuja.
+A brush entity is culled using its model's bounding box: if the box is
+not in the player's PVS, the engine neither sends nor draws it.
 
-Si se fusionaran todos los arbustos del mapa en una sola entidad, esa caja sería
-del tamaño del mapa y estaría en el PVS desde casi cualquier lado. El resultado
-sería peor que no fusionar nada: se ahorran slots pero se dibuja decoración que
-no se ve.
+If all the bushes in the map were merged into a single entity, that box would be
+the size of the map and would be in the PVS from almost anywhere. The result
+would be worse than not merging at all: slots are saved but decoration that
+cannot be seen gets drawn.
 
-Por eso los candidatos se agrupan por cercanía y un grupo deja de crecer cuando
-su caja pasaría de `-mergesize` unidades en cualquier eje. El default de 1024
-mantiene los grupos dentro de algo parecido a una habitación o un sector. Si el
-mapa es muy abierto se puede subir; si es de pasillos, bajarlo.
+That is why candidates are grouped by proximity, and a group stops growing when
+its box would exceed `-mergesize` units on any axis. The default of 1024
+keeps groups within something like a room or a sector. If the
+map is very open it can be raised; if it is made of corridors, lower it.
 
-## Qué se fusiona y qué no
+## What gets merged and what does not
 
-Se fusionan solo entidades que son demostrablemente equivalentes. Para entrar,
-una entidad tiene que cumplir **todo** esto:
+Only entities that are provably equivalent are merged. To qualify,
+an entity must meet **all** of the following:
 
-- Clase de la lista blanca: `func_illusionary` o `func_wall`. Son las dos clases
-  que no se mueven, no piensan y no se activan.
-- **Todos** los keyvalues idénticos a los de las otras del grupo. Dos arbustos
-  con distinto `renderamt` van a grupos distintos.
-- Sin `targetname`, `target`, `killtarget`, `globalname`, `parentname`,
-  `master`, `netname` ni `message`. Cualquiera de esas claves ata la entidad al
-  resto del mapa.
-- Sin brush de origin (`origin` en 0 0 0).
-- Sin `zhlt_usemodel` ni `zhlt_minsmaxs`.
-- Sin `zhlt_nomerge` `1`.
-- `rendermode` **Normal (0)** o **Solid (4)**, salvo que se pase `-mergeblend`.
+- Class on the allowlist: `func_illusionary` or `func_wall`. These are the two classes
+  that do not move, do not think and cannot be triggered.
+- **All** keyvalues identical to those of the others in the group. Two bushes
+  with a different `renderamt` go to different groups.
+- No `targetname`, `target`, `killtarget`, `globalname`, `parentname`,
+  `master`, `netname` or `message`. Any of those keys ties the entity to the
+  rest of the map.
+- No origin brush (`origin` at 0 0 0).
+- No `zhlt_usemodel` or `zhlt_minsmaxs`.
+- No `zhlt_nomerge` `1`.
+- `rendermode` **Normal (0)** or **Solid (4)**, unless `-mergeblend` is passed.
 
-Todo lo demás queda como estaba.
+Everything else stays as it was.
 
-### Lo del `rendermode`
+### About `rendermode`
 
-Las entidades transparentes que el motor **mezcla** (Texture, Additive, Glow,
-Color) se ordenan por profundidad usando **un solo punto por entidad**. Si se
-fusionan varias en una, todas pasan a compartir ese punto y se pueden dibujar en
-el orden equivocado entre ellas.
+Transparent entities that the engine **blends** (Texture, Additive, Glow,
+Color) are sorted by depth using **a single point per entity**. If several are
+merged into one, they all end up sharing that point and may be drawn in the
+wrong order relative to each other.
 
-Los dos modos que no tienen ese problema son:
+The two modes that do not have that problem are:
 
-- **Normal (0)**: opaco, no se ordena.
-- **Solid (4)**: el alpha test que se usa con las texturas `{`. Recorta el píxel,
-  no lo mezcla, así que tampoco se ordena.
+- **Normal (0)**: opaque, not sorted.
+- **Solid (4)**: the alpha test used with `{` textures. It cuts out the pixel,
+  it does not blend it, so it is not sorted either.
 
-Y **Solid es justamente el que usan los arbustos**, así que el caso que motiva
-todo esto entra sin restricciones. Los otros modos quedan afuera salvo que se
-pida `-mergeblend` a propósito.
+And **Solid is precisely the one bushes use**, so the case that motivates
+all this is accepted without restrictions. The other modes are left out unless
+`-mergeblend` is requested on purpose.
 
-### Opt-out manual
+### Manual opt-out
 
-Para dejar una entidad concreta fuera de la fusión, agregarle:
+To leave a specific entity out of merging, add this to it:
 
 ```
 zhlt_nomerge  1
 ```
 
-Sirve cuando se quiere conservar una entidad separada por alguna razón que el
-compilador no puede ver.
+It is useful when you want to keep an entity separate for some reason that the
+compiler cannot see.
 
-## Recomendaciones
+## Recommendations
 
-- Los arbustos y la vegetación: `func_illusionary`, textura `{`, **rendermode
-  Solid, renderamt 255**, sin nombre. Se fusionan solos.
-- No hace falta agrupar a mano en el editor. Da igual, y a mano es más fácil
-  equivocarse y meter en el grupo algo que tenga `targetname`.
-- Si el mapa es muy abierto, probar `-mergesize 2048` y mirar `r_speeds`. Si
-  aparece decoración dibujándose desde lejos, bajarlo.
-- Con `-onlyents` la opción se ignora: ahí CSG solo reescribe el lump de
-  entidades de un BSP que ya tiene los modelos armados, y cambiar la lista de
-  entidades los desalinearía.
+- Bushes and vegetation: `func_illusionary`, `{` texture, **rendermode
+  Solid, renderamt 255**, no name. They merge on their own.
+- There is no need to group by hand in the editor. It makes no difference, and doing it by hand makes it easier to
+  slip up and put something with a `targetname` in the group.
+- If the map is very open, try `-mergesize 2048` and watch `r_speeds`. If
+  decoration shows up being drawn from far away, lower it.
+- With `-onlyents` the option is ignored: there CSG only rewrites the entity
+  lump of a BSP that already has its models built, and changing the entity list
+  would misalign them.
 
-## Lo que esto no es
+## What this is not
 
-No da transparencia a `func_detail` ni a los brushes del mundo. Eso no se puede:
-el `rendermode` sólo existe para entidades, y `func_detail` deja de ser una
-entidad en CSG. Lo que hace esta opción es quitarle al `func_illusionary` casi
-todo su costo, que es el motivo real por el que uno querría evitarlo.
+It does not give transparency to `func_detail` or to world brushes. That cannot be done:
+`rendermode` only exists for entities, and `func_detail` stops being an
+entity in CSG. What this option does is take away almost all of the cost of
+`func_illusionary`, which is the real reason one would want to avoid it.

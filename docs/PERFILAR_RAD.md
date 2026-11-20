@@ -1,22 +1,22 @@
-# Perfilar RAD en tu máquina
+# Profiling RAD on your machine
 
-RAD es **más del 95%** del tiempo de compilación, así que es el único lugar donde queda tiempo real por
-ganar. Esta guía es para que midas en tu CPU, que tiene más núcleos y menos ruido que el entorno donde
-hice el análisis (2 núcleos, ±8% de varianza).
+RAD is **more than 95%** of compile time, so it is the only place where real time is left to
+gain. This guide is for you to measure on your own CPU, which has more cores and less noise than the
+environment where I did the analysis (2 cores, ±8% variance).
 
-No necesitas instalar nada: el profiler está dentro de RAD.
+You do not need to install anything: the profiler is built into RAD.
 
 ---
 
-## 1. Perfil rápido (sin recompilar)
+## 1. Quick profile (no rebuild)
 
-Con los binarios normales ya tienes el nivel de fases:
+With the regular binaries you already get the phase-level view:
 
 ```powershell
-sdHLRAD -profile -threads 1 mimapa
+sdHLRAD -profile -threads 1 mymap
 ```
 
-Te va a dar algo así:
+You will get something like this:
 
 ```
 ---- profile ----
@@ -26,30 +26,30 @@ GatherSampleLight                146152      42399.9    47.9%     290108.3
 FinalLightFace                      653         15.8     0.0%      24239.2
 ```
 
-`GatherSampleLight` está anidada dentro de `BuildFacelights`, así que ese 47.9% es ~94% del tiempo de
-`BuildFacelights`. Traducción: **casi todo el tiempo de RAD se va en juntar luz por muestra**.
+`GatherSampleLight` is nested inside `BuildFacelights`, so that 47.9% is ~94% of the time of
+`BuildFacelights`. In plain terms: **almost all of RAD's time goes into gathering light per sample**.
 
-> Usá `-threads 1` para perfilar. Con varios hilos los tiempos se solapan y las cifras se vuelven
-> difíciles de interpretar.
+> Use `-threads 1` when profiling. With several threads the timings overlap and the numbers become
+> hard to interpret.
 
-## 2. Perfil completo (con contadores internos)
+## 2. Full profile (with internal counters)
 
-Los contadores de las funciones internas del ray casting están apagados en compilación, a propósito:
-`TestLine_r` se entra ~1.800 millones de veces por mapa, así que incluso un chequeo apagado costaría
-casi un segundo por compilación. Para activarlos:
+The counters for the internal ray casting functions are compiled out on purpose:
+`TestLine_r` is entered ~1.8 billion times per map, so even a disabled check would cost
+almost a second per compile. To enable them:
 
 ```powershell
 cmake -B build-profile -S . -DSDHLT_PROFILE=ON
 cmake --build build-profile -j
 ```
 
-Y después:
+And then:
 
 ```powershell
-tools\sdHLRAD -profile -threads 1 mimapa
+tools\sdHLRAD -profile -threads 1 mymap
 ```
 
-Ahora agrega:
+It now adds:
 
 ```
 TestLine                       62245301 (count only)
@@ -58,109 +58,109 @@ TestSegmentAgainstOpaqueList   38965499 (count only)
 CheckVisBit                    43864129 (count only)
 ```
 
-**Atención:** este build es más lento por la instrumentación misma. Sirve para *entender* dónde va el trabajo,
-no para medir tiempos. Para medir tiempos usá el build normal.
+**Note:** this build is slower because of the instrumentation itself. It is useful for *understanding* where the work goes,
+not for measuring times. To measure times, use the regular build.
 
-## 3. Lo que ya está descartado
+## 3. What has already been ruled out
 
-Para que no gastes tiempo dos veces:
+So you do not spend time twice:
 
-- **Bajar más el nivel de skylight.** Nivel 5 y 4 dan poco más de velocidad que el 6 (2.19× y 2.29× vs
-  1.84×) pero la diferencia visible crece rápido (2/255 y 5/255). El 6 es el punto de quiebre.
-- **Convertir la recursión de `TestLine_r` en loop.** Tres de sus cuatro caminos son tail calls, así que
-  parece la optimización obvia. La hice: la iluminación salió byte-idéntica (correcta) pero **más lenta**,
-  tanto copiando endpoints (2.69s vs 2.59s) como con punteros (2.76s). GCC ya emite menos llamadas
-  recursivas de lo que sugiere el código, y las llamadas son baratas por el *return stack buffer*.
-  Revertido.
-- **`-O3` y LTO.** Sin mejora medible; la varianza interna supera la diferencia. Detalle en
+- **Lowering the skylight level further.** Levels 5 and 4 give only a little more speed than 6 (2.19× and 2.29× vs
+  1.84×), but the visible difference grows quickly (2/255 and 5/255). Level 6 is the breaking point.
+- **Turning the recursion in `TestLine_r` into a loop.** Three of its four paths are tail calls, so
+  it looks like the obvious optimization. I did it: the lighting came out byte-identical (correct) but **slower**,
+  both when copying endpoints (2.69s vs 2.59s) and when using pointers (2.76s). GCC already emits fewer recursive
+  calls than the code suggests, and the calls are cheap thanks to the *return stack buffer*.
+  Reverted.
+- **`-O3` and LTO.** No measurable improvement, since the internal variance is larger than the difference. Details in
   `BENCHMARKS.md` §3.
-- **Fusión de caras / `TryMerge`.** 0.7% de margen. Detalle en `BENCHMARKS.md` §5.
+- **Face merging / `TryMerge`.** 0.7% of headroom. Details in `BENCHMARKS.md` §5.
 
-## 4. Lo que YA se consiguió: `-skylevel`
+## 4. What has ALREADY been achieved: `-skylevel`
 
-Contar rayos por origen dio el hallazgo grande: el **95.8% de todos los rayos** salen del loop de
-skylight. `-softsky` solo ofrecía nivel 7 (16.386 rayos por muestra) o nivel 4 (258). Ahora hay
+Counting rays per origin gave the big finding: **95.8% of all rays** come from the skylight
+loop. `-softsky` only offered level 7 (16,386 rays per sample) or level 4 (258). Now there is
 `-skylevel N`:
 
-| nivel | rayos | vs nivel 7 | dif max |
+| level | rays | vs level 7 | max diff |
 |---|---|---|---|
 | 4 | 258 | 2.29× | 5/255 |
-| 5 | 1.026 | 2.19× | 2/255 |
-| **6 (default)** | **4.098** | **1.84×** | **1/255** |
-| 7 | 16.386 | 1.00× | 0 |
+| 5 | 1,026 | 2.19× | 2/255 |
+| **6 (default)** | **4,098** | **1.84×** | **1/255** |
+| 7 | 16,386 | 1.00× | 0 |
 
-`-skylevel 7` reproduce la iluminación de upstream byte a byte si la necesitas.
+`-skylevel 7` reproduces upstream's lighting byte for byte if you need it.
 
-## 5. Dónde sí buscar todavía
+## 5. Where there is still room to look
 
-El dato importante del perfil:
+The important finding from the profile:
 
 | | ba_dust_island | koth_sandy |
 |---|---|---|
-| rayos `TestLine` por `GatherSampleLight` | **426** | 374 |
-| descensos de árbol por rayo | 30 | 20 |
+| `TestLine` rays per `GatherSampleLight` | **426** | 374 |
+| tree descents per ray | 30 | 20 |
 
-El costo está en **cuántos rayos se lanzan**, no en lo que cuesta cada uno. Así que las líneas con
-sentido son algorítmicas:
+The cost is in **how many rays are cast**, not in what each one costs. So the lines worth pursuing
+are algorithmic:
 
-1. **Lanzar menos rayos.** ¿Se pueden descartar antes las fuentes de luz que no pueden llegar a una
-   muestra? Un test de PVS o de distancia previo al `TestLine` evitaría el rayo completo.
-2. **Cachear visibilidad.** Muestras vecinas prueban las mismas luces contra la misma geometría. Si hay
-   correlación explotable, se ahorran rayos enteros.
-3. **Early-out más agresivo.** Si la contribución de una luz va a quedar por debajo del umbral de
-   `-limiter`, el rayo no hace falta.
+1. **Cast fewer rays.** Can light sources that cannot reach a sample be discarded earlier?
+   A PVS or distance test before `TestLine` would avoid the whole ray.
+2. **Cache visibility.** Neighboring samples test the same lights against the same geometry. If there is
+   exploitable correlation, whole rays are saved.
+3. **More aggressive early-out.** If a light's contribution is going to fall below the `-limiter`
+   threshold, the ray is not needed.
 
-> Las tres se hicieron después **sin cambiar la iluminación**: descartando por bloques de muestras con
-> cotas conservadoras y probando haces enteros de rayos libres o bloqueados. Ver `BENCHMARKS.md` §11.
+> All three were done later **without changing the lighting**: discarding by blocks of samples with
+> conservative bounds and testing whole bundles of rays that are either free or blocked. See `BENCHMARKS.md` §11.
 
-Cualquiera de esas **cambia la iluminación**, así que hay que decidir explícitamente cuánta desviación es
-aceptable. Y ahí la validación cambia: ya no sirve exigir el lump `lighting` byte-idéntico.
+Any of those **changes the lighting**, so you have to explicitly decide how much deviation is
+acceptable. And that changes the validation: requiring a byte-identical `lighting` lump no longer works.
 
-### Culling de cielo por leaf: ya medido, no paga
+### Per-leaf sky culling: already measured, does not pay off
 
-Parecía la mejor idea: 67% de los rayos de cielo se ocluyen, así que saltear el loop para muestras que no
-ven cielo sería gratis en calidad. Mide el techo antes de implementarlo, contando entradas al loop con
-cero impactos:
+It looked like the best idea: 67% of sky rays are occluded, so skipping the loop for samples that
+do not see the sky would cost nothing in quality. Measure the ceiling before implementing it, by counting entries to the loop with
+zero hits:
 
-| mapa | entradas | cero impactos | techo |
+| map | entries | zero hits | ceiling |
 |---|---|---|---|
-| koth_sandy | 2.028 | 466 | 23% |
-| ba_dust_island | 6.623 | 137 | **2.1%** |
+| koth_sandy | 2,028 | 466 | 23% |
+| ba_dust_island | 6,623 | 137 | **2.1%** |
 
-En el mapa pesado el 98% de las muestras ve algo de cielo. Los mapas caros son caros *porque* son
-exteriores. El desperdicio está **dentro** de cada loop, no en loops enteros, así que el culling por
-muestra no lo toca.
+On the heavy map, 98% of the samples see some sky. The expensive maps are expensive *because* they are
+outdoors. The waste is **inside** each loop, not in whole loops, so per-sample culling
+does not touch it.
 
-### Lo que quedaría (cambia la iluminación)
+### What would remain (changes the lighting)
 
-Los niveles de cielo son una jerarquía de subdivisión (258 → 1.026 → 4.098 → 16.386). Un esquema
-coarse-to-fine podría testear grueso primero y saltar las subdivisiones de las regiones totalmente
-ocluidas. Es real pero complejo y aproxima, así que ya no se valida con hash byte-idéntico.
+The sky levels are a subdivision hierarchy (258 → 1,026 → 4,098 → 16,386). A
+coarse-to-fine scheme could test coarsely first and skip the subdivisions of the fully
+occluded regions. It is real but complex and approximate, so it can no longer be validated with a byte-identical hash.
 
-## 6. Cómo medir un cambio, sin engañarse
+## 6. How to measure a change without fooling yourself
 
-Tres cosas que aprendí midiendo aquí y te ahorran errores:
+Three things I learned measuring here that will save you mistakes:
 
-**Intercala A/B.** Una medición no intercalada me dio una "regresión del 20%" que era otra compilación
-corriendo en la misma máquina. Alterna binario viejo / binario nuevo en la misma tanda:
+**Interleave A/B.** A non-interleaved measurement gave me a "20% regression" that was another compile
+running on the same machine. Alternate the old binary and the new binary in the same batch:
 
 ```powershell
-python scripts\compilebench.py --tools tools_viejo --map m.map --threads 1 --runs 4 --json a.json
-python scripts\compilebench.py --tools tools_nuevo --map m.map --threads 1 --runs 4 --json b.json
+python scripts\compilebench.py --tools tools_old --map m.map --threads 1 --runs 4 --json a.json
+python scripts\compilebench.py --tools tools_new --map m.map --threads 1 --runs 4 --json b.json
 python scripts\compilebench.py --compare a.json b.json
 ```
 
-**Mira todas las corridas, no el promedio.** `compilebench.py` imprime `all_totals`. Si la dispersión
-dentro de una variante supera la diferencia entre variantes, no mediste nada. Eso es exactamente lo que
-pasó con `-O3` y LTO.
+**Look at every run, not the average.** `compilebench.py` prints `all_totals`. If the spread
+within one variant is larger than the difference between variants, you measured nothing. That is exactly what
+happened with `-O3` and LTO.
 
-**Verifica correctitud aparte del tiempo.** Una optimización de ray casting que no pretende cambiar el
-resultado debe dar el lump `lighting` idéntico:
+**Verify correctness separately from time.** A ray casting optimization that does not intend to change the
+result must give an identical `lighting` lump:
 
 ```powershell
-python scripts\compilebench.py --compare a.json b.json   # incluye hash por lump
-python scripts\bspcheck.py mimapa.bsp                    # geometria
+python scripts\compilebench.py --compare a.json b.json   # includes per-lump hash
+python scripts\bspcheck.py mymap.bsp                     # geometry
 ```
 
-Si el hash de `lighting` cambia y no era la intención, la optimización está mal — sin importar cuánto
-haya acelerado.
+If the `lighting` hash changes and that was not the intent, the optimization is wrong, no matter how much
+it sped things up.

@@ -1,155 +1,155 @@
-# Bajar `wpoly` y subir FPS en CS 1.6
+# Lowering `wpoly` and raising FPS in CS 1.6
 
-Esta es la guía práctica para el que hace el mapa. Está separada del resto de la documentación
-porque es, medida contra cualquier otra cosa, **la palanca más grande que existe sobre los FPS** —
-y no está en el compilador, está en cómo se construye el mapa.
+This is the practical guide for the person making the map. It is kept apart from the rest of the documentation
+because it is, measured against anything else, **the biggest lever there is over FPS**,
+and it is not in the compiler, it is in how the map is built.
 
-## Por qué esta guía existe
+## Why this guide exists
 
-Las herramientas de compilación pueden hacer poco por los FPS. VIS ya calcula un PVS prácticamente
-exacto, y la fusión de caras del BSP ya elimina entre el **19% y el 46%** de las caras según el mapa
-(medido en tres mapas reales de este repo, ver §6). No hay un flag mágico que falte.
+The compile tools can do little for FPS. VIS already computes a practically exact PVS,
+and the BSP's face merging already eliminates between **19% and 46%** of faces depending on the map
+(measured on three real maps from this repo, see §6). There is no magic flag missing.
 
-Lo que sí mueve la aguja es reducir **qué tiene que dibujar el motor en cada frame**. Eso lo decide
-la geometría y el bloqueo de visibilidad, o sea el mapper.
+What does move the needle is reducing **what the engine has to draw every frame**. That is decided
+by geometry and visibility blocking, in other words, by the mapper.
 
-## 1. Medir antes de optimizar
+## 1. Measure before optimizing
 
-En consola:
+In the console:
 
 ```
 developer 1
 r_speeds 1
 ```
 
-Vas a ver `wpoly` (polígonos de mundo) y `epoly` (entidades/modelos).
+You will see `wpoly` (world polygons) and `epoly` (entities/models).
 
-Referencias prácticas para CS 1.6:
+Practical references for CS 1.6:
 
-| `wpoly` | Situación |
+| `wpoly` | Situation |
 |---|---|
-| < 600 | Cómodo |
-| 600 – 800 | Aceptable |
-| 800 – 1000 | Empieza a doler en máquinas modestas |
-| > 1000 | Zona de problemas |
+| < 600 | Comfortable |
+| 600 – 800 | Acceptable |
+| 800 – 1000 | Starts to hurt on modest machines |
+| > 1000 | Problem zone |
 
-Reejecuta el mapa anotando `wpoly` en los mismos puntos antes y después de cada cambio. Sin eso estás
-adivinando. El script `scripts/compilebench.py` de este repo te da el conteo total de caras del BSP,
-que es útil como número global, pero `r_speeds` es el que te dice qué pasa **en cada lugar**.
+Rerun the map, noting `wpoly` at the same points before and after each change. Without that you are
+guessing. The `scripts/compilebench.py` script in this repo gives you the BSP's total face count,
+which is useful as a global number, but `r_speeds` is the one that tells you what happens **in each place**.
 
-## 2. NULL — la herramienta más rentable
+## 2. NULL, the most cost-effective tool
 
-`NULL` **borra la cara** en vez de dibujarla. Toda superficie que el jugador no puede ver debería ser
-NULL: caras traseras de paredes, la parte de abajo del piso, los lados de bloques contra otros bloques,
-las tapas de cajas a las que no se sube.
+`NULL` **deletes the face** instead of drawing it. Every surface the player cannot see should be
+NULL: back faces of walls, the underside of the floor, the sides of blocks against other blocks,
+the tops of boxes that cannot be climbed.
 
-Es la mejora de FPS más directa y de riesgo cero: si el jugador no la ve, no debería costar nada.
+It is the most direct FPS improvement and zero risk: if the player does not see it, it should cost nothing.
 
-> Atención: NULL elimina la cara pero **no** el bloqueo de visibilidad ni la colisión. El brush sigue siendo
-> sólido y sigue bloqueando VIS. Es exactamente lo que quieres.
+> Note: NULL removes the face but **not** the visibility blocking or the collision. The brush is still
+> solid and still blocks VIS. That is exactly what you want.
 
-## 3. HINT y SKIP — controlar los cortes del BSP
+## 3. HINT and SKIP: controlling the BSP cuts
 
-- **HINT**: fuerza al BSP a cortar en ese plano, creando un límite de leaf donde ti quieras.
-- **SKIP**: la cara no se dibuja ni se tiene en cuenta; se usa en las otras caras del brush de hint.
+- **HINT**: forces the BSP to cut at that plane, creating a leaf boundary wherever you want.
+- **SKIP**: the face is neither drawn nor taken into account; it is used on the other faces of the hint brush.
 
-Un brush de hint típico: la cara que define el corte con `HINT`, las otras cinco con `SKIP`.
+A typical hint brush: the face that defines the cut gets `HINT`, the other five get `SKIP`.
 
-**Dónde ponerlos:** en los pasajes entre zonas grandes — puertas, pasillos, codos. La idea es que
-cuando estés en la zona A, el PVS no incluya toda la zona B. Un hint bien puesto en una puerta puede
-sacar cientos de `wpoly`.
+**Where to put them:** in the passages between large zones: doors, corridors, bends. The idea is that
+when you are in zone A, the PVS does not include all of zone B. A well-placed hint in a doorway can
+remove hundreds of `wpoly`.
 
-**Dónde NO ponerlos:** por todas partes "por si acaso". Los hints de más fragmentan el BSP, suben el
-conteo de caras y hacen VIS más lento, empeorando las dos cosas que querías arreglar.
+**Where NOT to put them:** everywhere "just in case". Extra hints fragment the BSP, raise the
+face count and make VIS slower, making worse the two things you wanted to fix.
 
-## 4. SOLIDHINT y BEVELHINT — evitar subdivisión inútil
+## 4. SOLIDHINT and BEVELHINT: avoiding useless subdivision
 
-Aquí está el techo que conviene entender. El BSP subdivide las caras porque el motor no puede tener
-lightmaps más grandes que cierto extent:
+This is the ceiling worth understanding. The BSP subdivides faces because the engine cannot have
+lightmaps larger than a certain extent:
 
 ```c
-#define TEXTURE_STEP        16   // luxels por unidad de lightmap
-#define MAX_SURFACE_EXTENT  16   // limite del software renderer y del HLDS
+#define TEXTURE_STEP        16   // luxels per lightmap unit
+#define MAX_SURFACE_EXTENT  16   // limit of the software renderer and the HLDS
 #define DEFAULT_SUBDIVIDE_SIZE ((MAX_SURFACE_EXTENT-1)*TEXTURE_STEP)  // = 240
 ```
 
-**No se puede subir `-subdivide` por encima de 240**: el mapa deja de cargar en software renderer y en
-el HLDS. Así que "compilo con subdivide grande y gano FPS" no es una opción real.
+**`-subdivide` cannot be raised above 240**: the map stops loading in the software renderer and in
+the HLDS. So "I compile with a large subdivide and gain FPS" is not a real option.
 
-Lo que sí se puede es evitar cortes innecesarios:
+What can be done is avoiding unnecessary cuts:
 
-- **`-gridsubdivide`** (BSP, o "Subdividir por celdas de luz" en la GUI): el límite real del motor no
-  son 240 unidades sino 16 celdas de lightmap por eje. La regla clásica corta cada 224 unidades sin
-  mirar dónde cae la cara en la grilla, y una pared de 256 alineada sale partida en 224 + 32. Con esta
-  opción BSP cuenta las celdas como el motor y corta solo cuando hacen falta: entre 3 % y 20 % menos
-  caras en los mapas de prueba, sin tocar el mapa. Rinde más cuanto más alineada a la grilla de 16
-  esté la geometría y las texturas estén a escala 1 sin rotar. Detalle en `docs/BENCHMARKS.md` §10.4.
+- **`-gridsubdivide`** (BSP, or "Subdivide by light cells" in the GUI): the engine's real limit
+  is not 240 units but 16 lightmap cells per axis. The classic rule cuts every 224 units without
+  looking at where the face falls on the grid, and an aligned 256 wall comes out split into 224 + 32. With this
+  option BSP counts cells like the engine does and cuts only when needed: 3% to 20% fewer
+  faces on the test maps, without touching the map. It pays off more the more the geometry is aligned to the 16 grid
+  and the textures are at scale 1 with no rotation. Details in `docs/BENCHMARKS.md` §10.4.
 
-- **SOLIDHINT**: elimina la subdivisión de caras que provoca ese brush sobre las caras que toca.
-  Clásico en terreno, rampas, escaleras y formas complejas, donde el BSP genera un picadillo de
-  caras chiquitas sin necesidad.
-- **BEVELHINT** (propio de SDHLT): actúa como `SOLIDHINT` **y** `BEVEL` a la vez — evita la
-  subdivisión y bisela los clipnodes en la misma pasada. Es lo que quieres en terreno y en clipping de
-  escaleras en espiral.
+- **SOLIDHINT**: eliminates the face subdivision that this brush causes on the faces it touches.
+  A classic for terrain, ramps, stairs and complex shapes, where the BSP generates a mess of
+  tiny faces for no reason.
+- **BEVELHINT** (specific to SDHLT): acts as `SOLIDHINT` **and** `BEVEL` at once. It avoids
+  subdivision and bevels the clipnodes in the same pass. It is what you want on terrain and on clipping of
+  spiral stairs.
 
-Estas dos suelen dar reducciones grandes de conteo de caras en geometría irregular, que es justo donde
-`wpoly` se dispara.
+These two usually give large reductions in face count on irregular geometry, which is exactly where
+`wpoly` shoots up.
 
-## 5. El resto del kit
+## 5. The rest of the kit
 
-| Textura | Para qué |
+| Texture | What it is for |
 |---|---|
-| `CLIP` | Colisión sin cara visible. Para suavizar escaleras y bordes |
-| `CLIPBEVEL` / `CLIPBEVELBRUSH` | Colisión biselada, evita quedarse trabado en esquinas |
-| `NOCLIP` | Visible pero sin colisión |
-| `BEVEL` | Bisela clipnodes, contra el trabarse en salientes |
-| `SPLITFACE` | Subdivide las caras que toca a lo largo de sus bordes (equivalente a `zhlt_chopdown`) |
-| `ORIGIN` | Define el punto de rotación de entidades brush |
-| `CONTENTWATER` | Contenido de agua |
-| `BOUNDINGBOX` | Define el bbox de una entidad |
-| `%texname` | Minlight por textura. `%texname` = `_minlight 1.0`; `%#texname` con `#` de 0 a 255 |
+| `CLIP` | Collision with no visible face. For smoothing stairs and edges |
+| `CLIPBEVEL` / `CLIPBEVELBRUSH` | Beveled collision, avoids getting stuck on corners |
+| `NOCLIP` | Visible but with no collision |
+| `BEVEL` | Bevels clipnodes, against getting stuck on protrusions |
+| `SPLITFACE` | Subdivides the faces it touches along its edges (equivalent to `zhlt_chopdown`) |
+| `ORIGIN` | Defines the rotation point of brush entities |
+| `CONTENTWATER` | Water contents |
+| `BOUNDINGBOX` | Defines an entity's bbox |
+| `%texname` | Per-texture minlight. `%texname` = `_minlight 1.0`; `%#texname` with `#` from 0 to 255 |
 
-## 6. Lo que hace el compilador por sí solo
+## 6. What the compiler does on its own
 
-Medido con este repo sobre tres mapas reales, la fusión de caras coplanares del BSP
-(`MergeAll` / `TryMerge`) ya elimina:
+Measured with this repo on three real maps, the BSP's coplanar face merging
+(`MergeAll` / `TryMerge`) already eliminates:
 
-| Mapa | Caras finales | Liberadas por fusión | Reducción |
+| Map | Final faces | Freed by merging | Reduction |
 |---|---|---|---|
 | ba_coliseum | 1144 | 975 | 46% |
 | koth_sandy | 1259 | 303 | 19% |
 | ba_dust_island | 583 | 149 | 20% |
 
-O sea: el compilador ya está haciendo un trabajo considerable, y llega a un punto fijo por plano
-(cada fusión reintenta contra toda la lista). No esperes ganancias grandes de tocar ese algoritmo;
-el margen está en no generar las caras de entrada.
+In other words: the compiler is already doing considerable work, and it reaches a fixed point per plane
+(each merge retries against the whole list). Do not expect big gains from touching that algorithm;
+the margin is in not generating the input faces.
 
-## 7. VIS: `-full` y bloqueo de visibilidad
+## 7. VIS: `-full` and visibility blocking
 
-- Compila el release final con **`-full`** en VIS. Tarda más, da el PVS más ajustado, y eso es menos
-  `wpoly` en juego.
-- Lo que de verdad baja el PVS es **bloquear la línea de visión**: pasillos con codos, desniveles,
-  paredes que cortan sightlines largas. Un mapa abierto donde se ve todo desde todas partes va a tener
-  `wpoly` alto y no hay compilador que lo arregle.
-- `info_portal` + `info_leaf` (propios de SDHLT) fuerzan visibilidad entre dos leafs concretos. Sirven
-  para casos puntuales, no para bajar `wpoly` en general.
+- Compile the final release with **`-full`** in VIS. It takes longer, gives the tightest PVS, and that means less
+  `wpoly` in game.
+- What really lowers the PVS is **blocking the line of sight**: corridors with bends, level changes,
+  walls that cut long sightlines. An open map where everything is visible from everywhere will have
+  high `wpoly` and no compiler can fix that.
+- `info_portal` + `info_leaf` (specific to SDHLT) force visibility between two specific leafs. They are for
+  one-off cases, not for lowering `wpoly` in general.
 
-## 8. Sobre la iluminación
+## 8. About lighting
 
-RAD **no afecta `wpoly`**. Los lightmaps no cambian la geometría que se dibuja. Subir la calidad de luz
-te cuesta tiempo de compilación y algo de tamaño del BSP, pero **no FPS en juego**. Es el área donde
-puedes ser generoso sin miedo:
+RAD **does not affect `wpoly`**. Lightmaps do not change the geometry that gets drawn. Raising light quality
+costs you compile time and some BSP size, but **not FPS in game**. It is the area where
+you can be generous without fear:
 
-- `-extra` (que en SDHLT sube `-bounce` a mínimo 12)
-- `-chop` / `-texchop` más bajos para más detalle, a costa de tiempo y tamaño
+- `-extra` (which in SDHLT raises `-bounce` to a minimum of 12)
+- lower `-chop` / `-texchop` for more detail, at the cost of time and size
 
-## 9. Orden de trabajo sugerido
+## 9. Suggested order of work
 
-1. `r_speeds 1` y encontrar los puntos donde `wpoly` está alto.
-2. `NULL` en todo lo invisible. Es lo más barato y no rompe nada.
-3. `SOLIDHINT` / `BEVELHINT` en terreno y formas complejas.
-4. `HINT` en los pasajes entre zonas grandes, **de a uno y midiendo**.
-5. Si sigue alto: es diseño. Cortar sightlines.
-6. Release final con `-full` en VIS.
+1. `r_speeds 1` and find the points where `wpoly` is high.
+2. `NULL` on everything invisible. It is the cheapest and breaks nothing.
+3. `SOLIDHINT` / `BEVELHINT` on terrain and complex shapes.
+4. `HINT` in the passages between large zones, **one at a time and measuring**.
+5. If it is still high: it is design. Cut sightlines.
+6. Final release with `-full` in VIS.
 
-Los pasos 2 y 3 casi siempre dan más que cualquier flag del compilador.
+Steps 2 and 3 almost always give more than any compiler flag.
