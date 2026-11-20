@@ -763,19 +763,82 @@ mod tests {
             "el .zip no coincide con la release"
         );
 
-        let out = work.join("pkg");
-        unzip(&zip, &out).unwrap();
-        for needed in [
+        let needed = [
             "resdhlt-gui.exe",
             "tools/sdHLCSG.exe",
             "tools/sdHLBSP.exe",
             "tools/sdHLVIS.exe",
             "tools/sdHLRAD.exe",
             "tools/sdhlt.wad",
-        ] {
-            assert!(out.join(needed).is_file(), "falta {needed} en la release");
+        ];
+
+        // The package itself is judged by the zip index. Looking at the
+        // extracted files instead made this test flaky on the Windows runners,
+        // where the very same release sometimes came out without
+        // resdhlt-gui.exe (the antivirus removes freshly written executables).
+        let entries = zip_entries(&zip).unwrap();
+        for name in needed {
+            assert!(
+                entries.iter().any(|e| e.eq_ignore_ascii_case(name)),
+                "falta {name} en la release, el .zip trae: {entries:?}"
+            );
+        }
+
+        // Unpacking is still exercised, but a file that was in the zip and is
+        // gone afterwards only warns, it says nothing about the release.
+        let out = work.join("pkg");
+        unzip(&zip, &out).unwrap();
+        for name in needed {
+            if !out.join(name).is_file() {
+                eprintln!(
+                    "aviso: {name} estaba en el .zip y no está tras descomprimir (antivirus?)"
+                );
+            }
         }
         let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// Entry names of a zip, read from its index without extracting anything.
+    #[cfg(windows)]
+    fn zip_entries(zip: &Path) -> Result<Vec<String>, String> {
+        let mut cmd = Command::new("powershell");
+        cmd.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "Add-Type -AssemblyName System.IO.Compression.FileSystem; \
+                 $z = [IO.Compression.ZipFile]::OpenRead('{}'); \
+                 try {{ $z.Entries | ForEach-Object {{ $_.FullName }} }} finally {{ $z.Dispose() }}",
+                ps_literal(zip)
+            ),
+        ]);
+        hide_console(&mut cmd);
+        let out = cmd.output().map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.trim().replace('\\', "/"))
+            .filter(|l| !l.is_empty())
+            .collect())
+    }
+
+    #[cfg(not(windows))]
+    fn zip_entries(zip: &Path) -> Result<Vec<String>, String> {
+        let out = Command::new("unzip")
+            .args(["-Z1", &zip.display().to_string()])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect())
     }
 
     /// End to end against GitHub, using a repo that does publish releases.
