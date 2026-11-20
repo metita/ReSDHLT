@@ -503,7 +503,6 @@ bool CMeshDesc :: StudioConstructMesh( model_t *pModel )
 
 	// compute default pose for building mesh from
 	mstudioseqdesc_t *pseqdesc = (mstudioseqdesc_t *)((byte *)phdr + phdr->seqindex);
-	mstudioseqgroup_t *pseqgroup = (mstudioseqgroup_t *)((byte *)phdr + phdr->seqgroupindex) + pseqdesc->seqgroup;
 
 	// sanity check
 	if( pseqdesc->seqgroup != 0 )
@@ -512,11 +511,10 @@ bool CMeshDesc :: StudioConstructMesh( model_t *pModel )
 		return false;
 	}
 
-#ifdef VERSION_64BIT
-	mstudioanim_t *panim = (mstudioanim_t *)((byte *)phdr + /*pseqgroup->data +*/ pseqdesc->animindex);
-#else
-	mstudioanim_t *panim = (mstudioanim_t *)((byte *)phdr + pseqgroup->data + pseqdesc->animindex);
-#endif
+	// in group 0 animindex is relative to the start of the file (same as StudioGetAnim in the HLSDK).
+	// mstudioseqgroup_t::data is a runtime-only hack and, with a pointer inside cache_user_t,
+	// it is not even at the file offset on 64-bit builds, so it must not be read here.
+	mstudioanim_t *panim = (mstudioanim_t *)((byte *)phdr + pseqdesc->animindex);
 	mstudiobone_t *pbone = (mstudiobone_t *)((byte *)phdr + phdr->boneindex);
 	static vec3_t pos[MAXSTUDIOBONES];
 	static vec4_t q[MAXSTUDIOBONES];
