@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.23.0] - 2026-11-20
 
 ### Added
 - VIS: `info_portal` can now target any entity with a targetname, brush entities
@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `neighbor` grows layers of leaves around the `info_portal` and the new
   `targetneighbor` around the target (max 16 each). `reverse` seals those
   leaves off instead of opening them and `oneway` limits the link to the
-  `info_portal` side. Ported from SDHLT v1.3.1.
+  `info_portal` side. Ported from SDHLT v1.3.1, written by seedee.
 - VIS: warning when a brush entity's bounding box overlaps more than 48 leaves,
   because the engine then falls back to a coarser visibility test for it.
 
@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - VIS: several `info_portal` in one leaf no longer overwrite each other's
   `neighbor` depth, a missing target no longer links to a bogus leaf and the
   links survive `-maxdistance`.
+- GUI tests: the check of the published release read the files left after
+  unpacking, and on the Windows runners `resdhlt-gui.exe` sometimes was not
+  there even though the zip has it. It now reads the zip index and only warns
+  about a file missing after unpacking.
 
 ## [0.22.3] - 2026-11-20
 

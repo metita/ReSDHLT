@@ -400,7 +400,8 @@ This fork exists because other people did the hard part first.
 **[seedee](https://github.com/seedee)** maintains
 [SDHLT](https://github.com/seedee/SDHLT), which is what ReSDHLT forked from and
 what most of this codebase still is. Studio model shadows, `BEVELHINT`,
-`SPLITFACE`, `info_portal`, the `%` minlight flag, `-worldextent` and the portal
+`SPLITFACE`, `info_portal` (including the 1.3.1 rework that lets it target any
+entity, brush entities too), the `%` minlight flag, `-worldextent` and the portal
 file handling for J.A.C.K. are all his work. Thanks for the base and for keeping
 these tools alive.
 
