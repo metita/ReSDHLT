@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.3] - 2026-11-20
+
+### Fixed
+- RAD: on Linux builds, a map with a studio model (`cycler`, `env_model` and
+  similar) could crash with a segmentation fault while loading the model's
+  collision mesh. The sequence group's `data` field was read at the wrong file
+  offset because the structure holds a pointer, which is 8 bytes on 64-bit.
+  The animation of sequence group 0 is now found from `animindex` alone, the
+  way the engine does it.
+
 ## [0.22.2] - 2026-10-30
 
 ### Fixed
