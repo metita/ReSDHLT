@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.0] - 2026-11-27
+
+### Added
+- RAD: full Vulkan GPU raytracing for studio model shadows (`-studioshadow` /
+  `-studioshadowall`), using a per-model flat binary BVH with Möller-Trumbore
+  intersection and 1-bit per-pixel alpha masks for `STUDIO_NF_TRANSPARENT`
+  textures. Maps with studio models no longer fall back to CPU gather.
+- RAD: dedicated Vulkan compute shader (`ao.comp`) for ray-traced ambient
+  occlusion under `-aoall`, unlocking GPU gather when `-aoall` is enabled.
+- RAD: GPU-accelerated `BuildVisLeafs` for both normal and sparse vismatrices
+  via a persistent Vulkan BSP trace session (`trace_begin` / `trace_run` /
+  `trace_end`).
+- RAD: optional `-extraadapt [threshold]` flag for adaptive `-extra`
+  supersampling (off by default).
+
+### Changed
+- RAD: GPU gather now supports deep BSP trees up to depth 192 (`d96`, `d128`,
+  `d192`) using a compact `d32` / single-style (`s1_d32`) fast path that only
+  re-dispatches overflowing samples on the deeper pipeline.
+- RAD: `-gpuauto` now counts `light_environment` sun-spread rays (`numsunnormals`)
+  so outdoor maps with `_spread` use the GPU automatically.
+- RAD: 13-probe adaptive sun-cone early-out for spread `light_environment`
+  entities (CPU and GPU), 2-level coarse-to-fine sky dome for `-softsky`
+  (CPU and GPU), and automatic merging of identical `light_environment` entities.
+- RAD: replaced AABB-vs-AABB studio model intersection on CPU with an exact
+  ray-segment slab test and global union AABB early-out.
+
 ## [0.23.0] - 2026-11-20
 
 ### Added
