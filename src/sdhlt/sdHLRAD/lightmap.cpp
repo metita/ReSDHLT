@@ -2148,6 +2148,80 @@ void            CreateDirectLights()
 							VectorNormalize (dl->sunnormals[i]);
 						}
 					}
+					// Reorder sunnormals so indices 0..12 are 13 well-distributed cone probes
+					// (1 center + 8 outer rim + 4 mid-ring). Both CPU and GPU test these 13
+					// first; if all 13 hit sky or all 13 are blocked, the remaining rays are
+					// skipped while penumbras still trace all sun normals in full detail.
+					if (dl->numsunnormals > 16)
+					{
+						vec3_t ax1, ax2;
+						vec3_t ref = {0, 0, 1};
+						if (fabs (dl->normal[2]) > 0.9) { ref[0] = 1; ref[2] = 0; }
+						CrossProduct (dl->normal, ref, ax1);
+						VectorNormalize (ax1);
+						CrossProduct (dl->normal, ax1, ax2);
+						VectorNormalize (ax2);
+
+						double min_dot = 1.0;
+						for (i = 0; i < dl->numsunnormals; i++)
+						{
+							double d = DotProduct (dl->sunnormals[i], dl->normal);
+							if (d < min_dot) min_dot = d;
+						}
+						const double cone_sin = sqrt (qmax (0.0, 1.0 - min_dot * min_dot));
+
+						vec3_t targets[13];
+						VectorCopy (dl->normal, targets[0]);
+						for (int k = 0; k < 8; k++)
+						{
+							const double ang = k * (2.0 * Q_PI / 8.0);
+							const double ca = cos (ang) * cone_sin;
+							const double sa = sin (ang) * cone_sin;
+							for (int c = 0; c < 3; c++)
+							{
+								targets[1 + k][c] = (vec_t)(dl->normal[c] * min_dot + ax1[c] * ca + ax2[c] * sa);
+							}
+							VectorNormalize (targets[1 + k]);
+						}
+						const double mid_sin = cone_sin * 0.5;
+						const double mid_cos = sqrt (qmax (0.0, 1.0 - mid_sin * mid_sin));
+						for (int k = 0; k < 4; k++)
+						{
+							const double ang = (k + 0.5) * (2.0 * Q_PI / 4.0);
+							const double ca = cos (ang) * mid_sin;
+							const double sa = sin (ang) * mid_sin;
+							for (int c = 0; c < 3; c++)
+							{
+								targets[9 + k][c] = (vec_t)(dl->normal[c] * mid_cos + ax1[c] * ca + ax2[c] * sa);
+							}
+							VectorNormalize (targets[9 + k]);
+						}
+
+						for (int p = 0; p < 13; p++)
+						{
+							int best = p;
+							double bestd = -2.0;
+							for (int j = p; j < dl->numsunnormals; j++)
+							{
+								double d = DotProduct (dl->sunnormals[j], targets[p]);
+								if (d > bestd)
+								{
+									bestd = d;
+									best = j;
+								}
+							}
+							if (best != p)
+							{
+								vec3_t tn;
+								VectorCopy (dl->sunnormals[p], tn);
+								VectorCopy (dl->sunnormals[best], dl->sunnormals[p]);
+								VectorCopy (tn, dl->sunnormals[best]);
+								vec_t tw = dl->sunnormalweights[p];
+								dl->sunnormalweights[p] = dl->sunnormalweights[best];
+								dl->sunnormalweights[best] = tw;
+							}
+						}
+					}
 				}
 				else
 				{
@@ -2277,6 +2351,36 @@ void            CreateDirectLights()
             free(dl);
         }
 		directlights[0] = skylights;
+		// Merge identical skylights in leaf 0 (e.g. duplicate light_environment
+		// entities with identical angle/spread/style). Addition is distributive
+		// over sky visibility, so tracing the exact same sun/sky rays once is exact.
+		for (directlight_t *a = directlights[0]; a; a = a->next)
+		{
+			if (a->type != emit_skylight)
+				continue;
+			directlight_t **pp = &a->next;
+			while (*pp)
+			{
+				directlight_t *b = *pp;
+				if (b->type == emit_skylight
+					&& b->style == a->style
+					&& b->topatch == a->topatch
+					&& fabs (b->sunspreadangle - a->sunspreadangle) <= NORMAL_EPSILON
+					&& VectorCompare (b->normal, a->normal))
+				{
+					VectorAdd (a->intensity, b->intensity, a->intensity);
+					VectorAdd (a->diffuse_intensity, b->diffuse_intensity, a->diffuse_intensity);
+					VectorAdd (a->diffuse_intensity2, b->diffuse_intensity2, a->diffuse_intensity2);
+					*pp = b->next;
+					free (b->sunnormals);
+					free (b->sunnormalweights);
+					free (b);
+					numdlights--;
+					continue;
+				}
+				pp = &b->next;
+			}
+		}
 	}
 	if (g_sky_lighting_fix)
 	{
@@ -2335,6 +2439,7 @@ void            DeleteDirectLights()
 int		g_numskynormals[SKYLEVELMAX+1];
 vec3_t	*g_skynormals[SKYLEVELMAX+1];
 vec_t	*g_skynormalsizes[SKYLEVELMAX+1];
+unsigned int *g_skyparents[SKYLEVELMAX+1];
 typedef double point_t[3];
 typedef struct {int point[2]; bool divided; int child[2];} edge_t;
 typedef struct {int edge[3]; int dir[3];} triangle_t;
@@ -2492,6 +2597,47 @@ void BuildDiffuseNormals ()
 	free (points);
 	free (edges);
 	free (triangles);
+
+	// For fine sky levels (>= 5), precompute the 3 nearest level-4 (258-vertex)
+	// coarse parents for each fine direction (packed 9+9+9 bits) so CPU and GPU
+	// can skip tracing fine sky rays inside open sky or fully occluded walls.
+	for (int lv = 0; lv <= SKYLEVELMAX; lv++)
+	{
+		g_skyparents[lv] = NULL;
+	}
+	const int ncoarse = g_numskynormals[4];
+	for (int lv = 5; lv <= SKYLEVELMAX; lv++)
+	{
+		const int n = g_numskynormals[lv];
+		g_skyparents[lv] = (unsigned int *)calloc ((size_t)n, sizeof (unsigned int));
+		hlassume (g_skyparents[lv] != NULL, assume_NoMemory);
+		for (int idx = ncoarse; idx < n; idx++)
+		{
+			const vec_t *v = g_skynormals[lv][idx];
+			int b0 = 0, b1 = 0, b2 = 0;
+			vec_t d0 = -2.0f, d1 = -2.0f, d2 = -2.0f;
+			for (int c = 0; c < ncoarse; c++)
+			{
+				const vec_t d = DotProduct (v, g_skynormals[4][c]);
+				if (d > d0)
+				{
+					d2 = d1; b2 = b1;
+					d1 = d0; b1 = b0;
+					d0 = d;  b0 = c;
+				}
+				else if (d > d1)
+				{
+					d2 = d1; b2 = b1;
+					d1 = d;  b1 = c;
+				}
+				else if (d > d2)
+				{
+					d2 = d;  b2 = c;
+				}
+			}
+			g_skyparents[lv][idx] = (unsigned int)b0 | ((unsigned int)b1 << 9) | ((unsigned int)b2 << 18);
+		}
+	}
 }
 // =====================================================================================
 //  Sky reachability
@@ -3110,7 +3256,12 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 							// check intensity
 							if (!(l->intensity[0] || l->intensity[1] || l->intensity[2]))
 								continue;
-						  // loop over the normals
+						  // loop over the normals (with 13-probe adaptive sun cone early-out)
+						  extern int num_models;
+						  const bool use_sun_probe = (l->numsunnormals > 16 && !pcf && g_opaque_face_count == 0 && num_models == 0);
+						  int probe_tested = 0;
+						  int probe_hits = 0;
+						  bool probe_all_sky = false;
 						  for (int j = 0; j < l->numsunnormals; j++)
 						  {
 							// make sure the angle is okay
@@ -3120,32 +3271,48 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 								continue;
 							}
 
-							// search back to see if we can hit a sky brush
-							VectorScale (l->sunnormals[j], -BOGUS_RANGE, delta);
-							VectorAdd(pos, delta, delta);
-							vec3_t skyhit;
-							VectorCopy (delta, skyhit);
-							if (TestLine(pos, delta
-								, skyhit
-								) != CONTENTS_SKY)
-							{
-								continue;                      // occluded
-							}
+							vec3_t transparency = {1.0, 1.0, 1.0};
+							int opaquestyle = -1;
+							float skyvis = 1.0f;
 
-							vec3_t transparency;
-							int opaquestyle;
-							if (TestSegmentAgainstOpaqueList(pos, 
-								skyhit
-								, transparency
-								, opaquestyle
-								))
+							if (!probe_all_sky)
 							{
-								continue;
-							}
-							const float skyvis = pcf? PCFShadowSky (pos, l->sunnormals[j], &pcfplane): 1.0f;
-							if (skyvis <= 0.0f)
-							{
-								continue;
+								// search back to see if we can hit a sky brush
+								VectorScale (l->sunnormals[j], -BOGUS_RANGE, delta);
+								VectorAdd(pos, delta, delta);
+								vec3_t skyhit;
+								VectorCopy (delta, skyhit);
+								const bool hit_sky = (TestLine(pos, delta, skyhit) == CONTENTS_SKY);
+								if (use_sun_probe && j < 13)
+								{
+									probe_tested++;
+									if (hit_sky) probe_hits++;
+									if (j == 12 && probe_tested == 13)
+									{
+										if (probe_hits == 0)
+											break;
+										if (probe_hits == 13)
+											probe_all_sky = true;
+									}
+								}
+								if (!hit_sky)
+								{
+									continue;                      // occluded
+								}
+
+								if (TestSegmentAgainstOpaqueList(pos, 
+									skyhit
+									, transparency
+									, opaquestyle
+									))
+								{
+									continue;
+								}
+								skyvis = pcf? PCFShadowSky (pos, l->sunnormals[j], &pcfplane): 1.0f;
+								if (skyvis <= 0.0f)
+								{
+									continue;
+								}
 							}
 
 							vec3_t add_one;
@@ -3197,8 +3364,27 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 							int skylevel = g_softsky ? g_skylevel : SKYLEVEL_SOFTSKYOFF;
 							vec3_t *skynormals = g_skynormals[skylevel];
 							vec_t *skyweights = g_skynormalsizes[skylevel];
-							for (int j = 0; j < g_numskynormals[skylevel]; j++)
+							const int numsky = g_numskynormals[skylevel];
+							extern int num_models;
+							const bool use_coarse_sky = (skylevel >= 5 && g_skyparents[skylevel] != NULL
+								&& !pcf && !g_raybench && g_opaque_face_count == 0 && num_models == 0);
+							unsigned int coarse_sky[9] = {0};
+							unsigned int coarse_blk[9] = {0};
+							int coarse_tested = 0, coarse_hits = 0;
+							bool all_coarse_sky = false;
+							for (int j = 0; j < numsky; j++)
 							{
+								if (use_coarse_sky && j == 258)
+								{
+									if (coarse_tested > 0 && coarse_hits == 0)
+									{
+										break;
+									}
+									if (coarse_tested > 0 && coarse_hits == coarse_tested)
+									{
+										all_coarse_sky = true;
+									}
+								}
 								// make sure the angle is okay
 								dot = -DotProduct (normal, skynormals[j]);
 								if (dot <= NORMAL_EPSILON) //ON_EPSILON / 10 //--vluzacn
@@ -3206,36 +3392,78 @@ static void     GatherSampleLight(const vec3_t pos, const byte* const pvs, const
 									continue;
 								}
 
-								// search back to see if we can hit a sky brush
-								VectorScale (skynormals[j], -BOGUS_RANGE, delta);
-								VectorAdd(pos, delta, delta);
-								vec3_t skyhit;
-								VectorCopy (delta, skyhit);
-								if (g_raybench)
+								vec3_t transparency = {1.0, 1.0, 1.0};
+								int opaquestyle = -1;
+								float skyvis = 1.0f;
+
+								bool need_trace = true;
+								if (all_coarse_sky)
 								{
-									RayBenchCapture (pos, delta);
+									need_trace = false;
 								}
-								if (TestLine(pos, delta
-									, skyhit
-									) != CONTENTS_SKY)
+								else if (use_coarse_sky && j >= 258)
 								{
-									continue;                                  // occluded
+									const unsigned int p = g_skyparents[skylevel][j];
+									const unsigned int v0 = p & 511u;
+									const unsigned int v1 = (p >> 9) & 511u;
+									const unsigned int v2 = (p >> 18) & 511u;
+									if ((coarse_sky[v0 >> 5] & (1u << (v0 & 31)))
+										&& (coarse_sky[v1 >> 5] & (1u << (v1 & 31)))
+										&& (coarse_sky[v2 >> 5] & (1u << (v2 & 31))))
+									{
+										need_trace = false;
+									}
+									else if ((coarse_blk[v0 >> 5] & (1u << (v0 & 31)))
+										&& (coarse_blk[v1 >> 5] & (1u << (v1 & 31)))
+										&& (coarse_blk[v2 >> 5] & (1u << (v2 & 31))))
+									{
+										continue;
+									}
 								}
 
-								vec3_t transparency;
-								int opaquestyle;
-								if (TestSegmentAgainstOpaqueList(pos, 
-									skyhit
-									, transparency
-									, opaquestyle
-									))
+								if (need_trace)
 								{
-									continue;
-								}
-								const float skyvis = pcf? PCFShadowSky (pos, skynormals[j], &pcfplane): 1.0f;
-								if (skyvis <= 0.0f)
-								{
-									continue;
+									// search back to see if we can hit a sky brush
+									VectorScale (skynormals[j], -BOGUS_RANGE, delta);
+									VectorAdd(pos, delta, delta);
+									vec3_t skyhit;
+									VectorCopy (delta, skyhit);
+									if (g_raybench)
+									{
+										RayBenchCapture (pos, delta);
+									}
+									const bool hit_sky = (TestLine(pos, delta, skyhit) == CONTENTS_SKY);
+									if (use_coarse_sky && j < 258)
+									{
+										coarse_tested++;
+										if (hit_sky)
+										{
+											coarse_hits++;
+											coarse_sky[j >> 5] |= (1u << (j & 31));
+										}
+										else
+										{
+											coarse_blk[j >> 5] |= (1u << (j & 31));
+										}
+									}
+									if (!hit_sky)
+									{
+										continue;                                  // occluded
+									}
+
+									if (TestSegmentAgainstOpaqueList(pos, 
+										skyhit
+										, transparency
+										, opaquestyle
+										))
+									{
+										continue;
+									}
+									skyvis = pcf? PCFShadowSky (pos, skynormals[j], &pcfplane): 1.0f;
+									if (skyvis <= 0.0f)
+									{
+										continue;
+									}
 								}
 
 								vec_t factor = qmin (qmax (0.0, (1 - DotProduct (l->normal, skynormals[j])) / 2), 1.0); // how far this piece of sky has deviated from the sun
@@ -3925,7 +4153,222 @@ enum
 	LM_NORMAL = 0,
 	LM_COLLECT,
 	LM_APPLY,
+	LM_COLLECT_ADAPT_BASE,
+	LM_APPLY_ADAPT_REFINE,
+	LM_APPLY_ADAPT_FINAL,
 };
+
+// =====================================================================================
+//  Adaptive -extra supersampling helpers
+//      With -extra (lmcache_density == 3), evaluate the 1x1 luxel centers first,
+//      detect intra-face contrast / normal changes / blocked/nudged samples, and
+//      only trace the remaining 3x3 sub-samples where lighting varies. Smooth
+//      interior cells are bilinearly interpolated from their 4 luxel centers.
+// =====================================================================================
+static inline bool IsAdaptiveBasePoint (const lightinfo_t *l, int i)
+{
+	const int ix = i % l->lmcachewidth;
+	const int iy = i / l->lmcachewidth;
+	const int dx = ix - l->lmcache_offset;
+	const int dy = iy - l->lmcache_offset;
+	return dx >= 0 && dy >= 0
+		&& dx <= l->texsize[0] * l->lmcache_density
+		&& dy <= l->texsize[1] * l->lmcache_density
+		&& (dx % l->lmcache_density) == 0
+		&& (dy % l->lmcache_density) == 0;
+}
+
+static inline bool AdaptiveSamplesClose (const vec3_t *a, const vec3_t *b, const byte *styles, float thresh)
+{
+	for (int s = 0; s < ALLSTYLES && styles[s] != 255; s++)
+	{
+		for (int c = 0; c < 3; c++)
+		{
+			if (fabs (a[s][c] - b[s][c]) > thresh)
+			{
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+// Marks bit 3 (8) in lmflags for every non-base point that needs full 3x3 tracing.
+static void BuildAdaptiveRefineMask (const lightinfo_t *l, unsigned char *lmflags, const byte *styles)
+{
+	const int w = l->lmcachewidth;
+	const int h = l->lmcacheheight;
+	const int d = l->lmcache_density;
+	const int off = l->lmcache_offset;
+	const int nu = l->texsize[0];
+	const int nv = l->texsize[1];
+	const float thresh = g_extraadapt;
+
+	for (int i = 0; i < w * h; i++)
+	{
+		lmflags[i] &= (unsigned char)~8;
+	}
+
+	// Mark each base luxel that has contrast against its 4-neighbors.
+	std::vector<unsigned char> base_hot ((size_t)(nu + 1) * (nv + 1), 0);
+	for (int v = 0; v <= nv; v++)
+	{
+		for (int u = 0; u <= nu; u++)
+		{
+			const int c = (v * d + off) * w + (u * d + off);
+			bool hot = (lmflags[c] & 5) != 0;
+			if (!hot && u < nu)
+			{
+				const int r = (v * d + off) * w + ((u + 1) * d + off);
+				if (!AdaptiveSamplesClose (l->lmcache[c], l->lmcache[r], styles, thresh))
+					hot = true;
+			}
+			if (!hot && u > 0)
+			{
+				const int lf = (v * d + off) * w + ((u - 1) * d + off);
+				if (!AdaptiveSamplesClose (l->lmcache[c], l->lmcache[lf], styles, thresh))
+					hot = true;
+			}
+			if (!hot && v < nv)
+			{
+				const int dn = ((v + 1) * d + off) * w + (u * d + off);
+				if (!AdaptiveSamplesClose (l->lmcache[c], l->lmcache[dn], styles, thresh))
+					hot = true;
+			}
+			if (!hot && v > 0)
+			{
+				const int up = ((v - 1) * d + off) * w + (u * d + off);
+				if (!AdaptiveSamplesClose (l->lmcache[c], l->lmcache[up], styles, thresh))
+					hot = true;
+			}
+			base_hot[(size_t)v * (nu + 1) + u] = hot ? 1 : 0;
+		}
+	}
+
+	// Outer blur margin: only trace if cross-surface, blocked, normal changed, or nearest luxel is hot.
+	const int max_dx = nu * d;
+	const int max_dy = nv * d;
+	for (int iy = 0; iy < h; iy++)
+	{
+		const int dy = iy - off;
+		for (int ix = 0; ix < w; ix++)
+		{
+			const int dx = ix - off;
+			if (dx >= 0 && dy >= 0 && dx <= max_dx && dy <= max_dy)
+			{
+				continue;
+			}
+			const int idx = iy * w + ix;
+			const int cu = qmax (0, qmin ((dx + d / 2) / d, nu));
+			const int cv = qmax (0, qmin ((dy + d / 2) / d, nv));
+			const int cbase = (cv * d + off) * w + (cu * d + off);
+			if ((lmflags[idx] & 5) != 0
+				|| base_hot[(size_t)cv * (nu + 1) + cu]
+				|| DotProduct (l->lmcache_normal[idx], l->lmcache_normal[cbase]) < 0.995)
+			{
+				lmflags[idx] |= 8;
+			}
+		}
+	}
+
+	// Interior luxel cells [u..u+1] x [v..v+1].
+	for (int v = 0; v < nv; v++)
+	{
+		for (int u = 0; u < nu; u++)
+		{
+			const int x0 = u * d + off;
+			const int y0 = v * d + off;
+			const int c00 = y0 * w + x0;
+
+			bool refine = base_hot[(size_t)v * (nu + 1) + u]
+				|| base_hot[(size_t)v * (nu + 1) + (u + 1)]
+				|| base_hot[(size_t)(v + 1) * (nu + 1) + u]
+				|| base_hot[(size_t)(v + 1) * (nu + 1) + (u + 1)];
+
+			for (int oy = 0; oy <= d && !refine; oy++)
+			{
+				for (int ox = 0; ox <= d; ox++)
+				{
+					const int pi = (y0 + oy) * w + (x0 + ox);
+					if ((lmflags[pi] & 5) != 0
+						|| DotProduct (l->lmcache_normal[pi], l->lmcache_normal[c00]) < 0.995)
+					{
+						refine = true;
+						break;
+					}
+				}
+			}
+			if (refine)
+			{
+				for (int oy = 0; oy <= d; oy++)
+				{
+					for (int ox = 0; ox <= d; ox++)
+					{
+						const int pi = (y0 + oy) * w + (x0 + ox);
+						if (!IsAdaptiveBasePoint (l, pi))
+						{
+							lmflags[pi] |= 8;
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+static void FillAdaptiveInterpolated (lightinfo_t *l, const unsigned char *lmflags, const byte *styles)
+{
+	const int w = l->lmcachewidth;
+	const int h = l->lmcacheheight;
+	const int d = l->lmcache_density;
+	const int off = l->lmcache_offset;
+	const int nu = l->texsize[0];
+	const int nv = l->texsize[1];
+	const int max_dx = nu * d;
+	const int max_dy = nv * d;
+
+	for (int iy = 0; iy < h; iy++)
+	{
+		for (int ix = 0; ix < w; ix++)
+		{
+			const int idx = iy * w + ix;
+			if ((lmflags[idx] & 8) || IsAdaptiveBasePoint (l, idx))
+			{
+				continue;
+			}
+			const int dx = qmax (0, qmin (ix - off, max_dx));
+			const int dy = qmax (0, qmin (iy - off, max_dy));
+			const int u0 = dx / d;
+			const int v0 = dy / d;
+			const int rx = dx - u0 * d;
+			const int ry = dy - v0 * d;
+			const int u1 = (rx > 0 && u0 < nu) ? u0 + 1 : u0;
+			const int v1 = (ry > 0 && v0 < nv) ? v0 + 1 : v0;
+			const vec_t fx = (vec_t)rx / (vec_t)d;
+			const vec_t fy = (vec_t)ry / (vec_t)d;
+			const vec_t w00 = (1.0f - fx) * (1.0f - fy);
+			const vec_t w10 = fx * (1.0f - fy);
+			const vec_t w01 = (1.0f - fx) * fy;
+			const vec_t w11 = fx * fy;
+
+			const int c00 = (v0 * d + off) * w + (u0 * d + off);
+			const int c10 = (v0 * d + off) * w + (u1 * d + off);
+			const int c01 = (v1 * d + off) * w + (u0 * d + off);
+			const int c11 = (v1 * d + off) * w + (u1 * d + off);
+
+			for (int s = 0; s < ALLSTYLES && styles[s] != 255; s++)
+			{
+				for (int c = 0; c < 3; c++)
+				{
+					l->lmcache[idx][s][c] = w00 * l->lmcache[c00][s][c]
+						+ w10 * l->lmcache[c10][s][c]
+						+ w01 * l->lmcache[c01][s][c]
+						+ w11 * l->lmcache[c11][s][c];
+				}
+			}
+		}
+	}
+}
 
 // =====================================================================================
 //  AmbientOcclusionAlpha
@@ -3961,6 +4404,7 @@ static vec_t AmbientOcclusionAlpha (const vec3_t spot, const vec3_t pointnormal)
 	}
 	const vec_t saturlimit = totalweight * (1.0 - AO_SATURATION_EPSILON);
 	const vec_t minweight = g_ao_minweight * totalweight / qmax (numaccepted, 1); // relative to the mean ray weight
+	const bool check_opaque = (g_opaque_face_count != 0) || StudioSphereNearAny (spot, g_ao_scale);
 	for (int k = 0; k < aonum; k++)
 	{
 		vec_t d = DotProduct (pointnormal, aonormals[k]);
@@ -3976,7 +4420,7 @@ static vec_t AmbientOcclusionAlpha (const vec3_t spot, const vec3_t pointnormal)
 		vec3_t dest;
 		VectorMA (spot, g_ao_scale, aonormals[k], dest);
 		bool hit = TestLine (spot, dest) == CONTENTS_SOLID;
-		if (!hit)
+		if (!hit && check_opaque)
 		{
 			vec3_t transparency;
 			int opaquestyle;
@@ -4196,7 +4640,7 @@ static void BuildGatherTiles (const lightinfo_t *l, const std::vector<lmsample_t
 	}
 }
 
-void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflags)
+void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflags, void **prep_store = NULL)
 {
 	int facenum;
 	int i, j;
@@ -4205,19 +4649,31 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 	byte pvs2[(MAX_MAP_LEAFS + 7) / 8];
 	int lastoffset2 = -2;
 	const int numpoints = l->lmcachewidth * l->lmcacheheight;
+	const bool adapt_eligible = (g_extraadapt > 0.0f && l->lmcache_density == 3 && !l->translucent_b && !g_ao_enable && !g_drawnudge);
 
 	facenum = l->surfnum;
-	memset (l->lmcache, 0, numpoints * sizeof (vec3_t [ALLSTYLES]));
+	if (pass != LM_APPLY_ADAPT_REFINE && pass != LM_APPLY_ADAPT_FINAL)
+	{
+		memset (l->lmcache, 0, numpoints * sizeof (vec3_t [ALLSTYLES]));
+	}
 
+	const bool need_prep = (pass == LM_NORMAL || pass == LM_COLLECT || pass == LM_COLLECT_ADAPT_BASE);
 	std::vector<lmsample_t> &prep = t_lmsamples;
-	if (pass != LM_APPLY)
+	if (need_prep)
 	{
 		prep.resize (numpoints);
+	}
+	const bool cpu_adapt = (pass == LM_NORMAL && adapt_eligible);
+	std::vector<unsigned char> cpu_adapt_flags;
+	if (cpu_adapt)
+	{
+		cpu_adapt_flags.assign (numpoints, 0);
+		lmflags = cpu_adapt_flags.data ();
 	}
 
 	// for each sample whose light we need to calculate: where it is, its
 	// normal and its leaf
-	for (i = 0; pass != LM_APPLY && i < numpoints; i++)
+	for (i = 0; need_prep && i < numpoints; i++)
 	{
 		vec_t s, t;
 		vec_t s_vec, t_vec;
@@ -4350,8 +4806,89 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 		}
 		if (lmflags)
 		{
-			lmflags[i] = (unsigned char)((p.blocked? 1: 0) | (p.nudged? 2: 0));
+			lmflags[i] = (unsigned char)((p.blocked? 1: 0) | (p.nudged? 2: 0) | (p.surface != facenum? 4: 0));
 		}
+	}
+
+	// GPU adaptive pass 1: save prep for pass 2 so SetSampleFromST / GetPhongNormal
+	// never run twice.
+	if (pass == LM_COLLECT_ADAPT_BASE && adapt_eligible && prep_store)
+	{
+		lmsample_t *saved = (lmsample_t *)malloc ((size_t)numpoints * sizeof (lmsample_t));
+		hlassume (saved != NULL, assume_NoMemory);
+		memcpy (saved, prep.data (), (size_t)numpoints * sizeof (lmsample_t));
+		*prep_store = saved;
+	}
+
+	// GPU adaptive pass 2 (LM_APPLY_ADAPT_REFINE): apply pass-1 base results,
+	// compute refine mask, bilinearly fill flat interior cells, then record ONLY
+	// the refined non-base samples from the saved prep array.
+	if (pass == LM_APPLY_ADAPT_REFINE)
+	{
+		if (adapt_eligible && prep_store && *prep_store)
+		{
+			for (i = 0; i < numpoints; i++)
+			{
+				if (!IsAdaptiveBasePoint (l, i))
+					continue;
+				if ((lmflags[i] & 1) == 0)
+				{
+					GpuGatherApply (l->lmcache[i], styles);
+				}
+			}
+			BuildAdaptiveRefineMask (l, lmflags, styles);
+			FillAdaptiveInterpolated (l, lmflags, styles);
+			GpuGatherResetFace (facenum);
+			lmsample_t *saved = (lmsample_t *)(*prep_store);
+			g_gpu_phase = 1;
+			for (i = 0; i < numpoints; i++)
+			{
+				if (!(lmflags[i] & 8) || (lmflags[i] & 1))
+					continue;
+				lmsample_t *p = &saved[i];
+				if (!g_visdatasize)
+				{
+					if (lastoffset == -2)
+					{
+						memset (pvs, 255, (g_dmodels[0].visleafs + 7) / 8);
+						lastoffset = 0;
+					}
+				}
+				else
+				{
+					int thisoffset = p->visofs;
+					if (thisoffset != lastoffset)
+					{
+						if (thisoffset == -1)
+							memset (pvs, 0, (g_dmodels[0].visleafs + 7) / 8);
+						else
+							DecompressVis (&g_dvisdata[thisoffset], pvs, (MAX_MAP_LEAFS + 7) / 8);
+						lastoffset = thisoffset;
+					}
+				}
+				GatherSampleLight (p->spot, pvs, p->pointnormal, l->lmcache[i], styles, 0, l->miptex, p->surface, NULL, NULL);
+			}
+			free (saved);
+			*prep_store = NULL;
+			return;
+		}
+		// Non-eligible face (e.g. translucent): apply all pass-1 results now.
+		pass = LM_APPLY;
+	}
+
+	// GPU adaptive pass 3 (LM_APPLY_ADAPT_FINAL): apply refined non-base results.
+	if (pass == LM_APPLY_ADAPT_FINAL)
+	{
+		if (adapt_eligible)
+		{
+			for (i = 0; i < numpoints; i++)
+			{
+				if (!(lmflags[i] & 8) || (lmflags[i] & 1))
+					continue;
+				GpuGatherApply (l->lmcache[i], styles);
+			}
+		}
+		return;
 	}
 
 	// The blocks are for the CPU gather alone: the GPU collect records each
@@ -4363,9 +4900,27 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 		BuildGatherTiles (l, prep, 0);
 	}
 
+	const int num_adapt_passes = cpu_adapt ? 2 : 1;
+	for (int apass = 0; apass < num_adapt_passes; apass++)
+	{
+		if (cpu_adapt && apass == 1)
+		{
+			BuildAdaptiveRefineMask (l, lmflags, styles);
+		}
 	// then the gather, in the same order as ever
 	for (i = 0; i < numpoints; i++)
 	{
+		if (pass == LM_COLLECT_ADAPT_BASE && adapt_eligible && !IsAdaptiveBasePoint (l, i))
+		{
+			continue;
+		}
+		if (cpu_adapt)
+		{
+			if (apass == 0 && !IsAdaptiveBasePoint (l, i))
+				continue;
+			if (apass == 1 && !(lmflags[i] & 8))
+				continue;
+		}
 		vec3_t *sampled = l->lmcache[i];
 		bool blocked;
 		bool nudged;
@@ -4513,6 +5068,21 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 			{
 				l->lmcache_ao[i] = blocked? 0: AmbientOcclusionAlpha (p->spot, p->pointnormal);
 			}
+			else if (g_ao_enable && g_ao_all && pass == LM_APPLY && !g_face_ao_skip[facenum])
+			{
+				if (blocked)
+				{
+					l->lmcache_ao[i] = 0;
+				}
+				else
+				{
+					vec_t gpu_alpha = 0;
+					if (GpuGatherApplyAO (&gpu_alpha))
+					{
+						l->lmcache_ao[i] = gpu_alpha;
+					}
+				}
+			}
 			else if (ao && !blocked)
 			{
 				ApplyAmbientOcclusion (p->spot, p->pointnormal, sampled, emitterlight, styles);
@@ -4539,6 +5109,11 @@ void CalcLightmap (lightinfo_t *l, byte *styles, int pass, unsigned char *lmflag
 			}
 		}
 	}
+	} // end apass
+	if (cpu_adapt)
+	{
+		FillAdaptiveInterpolated (l, lmflags, styles);
+	}
 }
 
 // BuildFacelights is split in two so that the GPU path does not have to run it
@@ -4555,6 +5130,7 @@ typedef struct
 	lightinfo_t     l;
 	unsigned char   f_styles[ALLSTYLES];
 	unsigned char  *lmflags;                               // per lmcache point, LM_COLLECT only
+	void           *prep;                                  // lmsample_t* kept across GPU adaptive passes
 }
 facebuild_t;
 
@@ -4613,15 +5189,17 @@ static bool     BuildFacelights_Begin(const int facenum, facebuild_t *fb, int pa
     CalcFaceVectors(&l);
     CalcFaceExtents(&l);
     CalcPoints(&l);
-	if (pass == LM_COLLECT)
+	if (pass == LM_COLLECT || pass == LM_COLLECT_ADAPT_BASE)
 	{
 		fb->lmflags = (unsigned char *)calloc ((size_t)l.lmcachewidth * l.lmcacheheight, 1);
 		hlassume (fb->lmflags != NULL, assume_NoMemory);
 	}
+	fb->prep = NULL;
 	CalcLightmap (&l
 		, f_styles
 		, pass
 		, fb->lmflags
+		, &fb->prep
 		);
 	return true;
 }
@@ -4653,13 +5231,18 @@ static void     BuildFacelights_End(const int facenum, facebuild_t *fb, int pass
 
 	(void)plane;
 
-	if (pass == LM_APPLY)
+	if (pass == LM_APPLY || pass == LM_APPLY_ADAPT_FINAL)
 	{
 		// The device's answers land in l.lmcache exactly where the CPU gather
 		// would have written them; everything below is untouched CPU code.
-		CalcLightmap (&l, f_styles, LM_APPLY, fb->lmflags);
+		CalcLightmap (&l, f_styles, pass, fb->lmflags);
 		free (fb->lmflags);
 		fb->lmflags = NULL;
+		if (fb->prep)
+		{
+			free (fb->prep);
+			fb->prep = NULL;
+		}
 	}
 
     lightmapwidth = l.texsize[0] + 1;
@@ -5302,6 +5885,18 @@ void            BuildFacelights(const int facenum)
 
 // The two halves, for the -gpu chunk loop. The state between them lives in the
 // caller's facebuild_t, so the expensive first half happens exactly once.
+void            RadGpuResolveStudioItem(const vec3_t pos, const byte* const pvs, const vec3_t normal,
+                                        int step, int miptex, int face,
+                                        vec3_t* sample_out, byte* styles_out)
+{
+	GatherSampleLight (pos, pvs, normal, sample_out, styles_out, step, miptex, face, NULL, NULL);
+}
+
+vec_t           RadGpuComputeAO_CPU(const vec3_t spot, const vec3_t normal)
+{
+	return AmbientOcclusionAlpha (spot, normal);
+}
+
 bool            RadGpuFaceBegin(int facenum, void *state)
 {
 	facebuild_t *fb = (facebuild_t *)state;
@@ -5312,16 +5907,33 @@ bool            RadGpuFaceBegin(int facenum, void *state)
 	return BuildFacelights_Begin (facenum, fb, LM_COLLECT);
 }
 
+bool            RadGpuFaceBeginAdaptive(int facenum, void *state)
+{
+	facebuild_t *fb = (facebuild_t *)state;
+	GpuGatherBeginFace (facenum);
+	return BuildFacelights_Begin (facenum, fb, LM_COLLECT_ADAPT_BASE);
+}
+
+void            RadGpuFaceRefineAdaptive(int facenum, void *state)
+{
+	facebuild_t *fb = (facebuild_t *)state;
+	GpuGatherBeginFace (facenum);
+	CalcLightmap (&fb->l, fb->f_styles, LM_APPLY_ADAPT_REFINE, fb->lmflags, &fb->prep);
+}
+
 void            RadGpuFaceEnd(int facenum, void *state)
 {
 	facebuild_t *fb = (facebuild_t *)state;
 	GpuGatherBeginFace (facenum);
-	BuildFacelights_End (facenum, fb, LM_APPLY);
+	const bool adaptive = (g_extraadapt > 0.0f && g_extra && !g_ao_enable && !g_drawnudge);
+	BuildFacelights_End (facenum, fb, adaptive? LM_APPLY_ADAPT_FINAL: LM_APPLY);
 }
 
 void            RadGpuFaceAbandon(void *state)
 {
 	facebuild_t *fb = (facebuild_t *)state;
+	free (fb->prep);
+	fb->prep = NULL;
 	free (fb->lmflags);
 	fb->lmflags = NULL;
 	free (fb->l.lmcache);

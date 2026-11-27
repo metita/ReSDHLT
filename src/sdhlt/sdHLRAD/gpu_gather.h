@@ -36,12 +36,14 @@ extern int      g_gpu_phase;
 // covers, in which case RAD runs its ordinary CPU pass.
 extern bool     GpuBuildFacelights();
 extern void     GpuGatherBeginFace(int facenum);
+extern void     GpuGatherResetFace(int facenum);
 extern void     GpuGatherIntercept(const vec3_t pos, const byte* const pvs, const vec3_t normal,
                                    vec3_t* sample, byte* styles, int step, int miptex,
                                    int texlightgap_surfacenum);
 // Drops the next stored result for the current face into a sample/styles pair,
 // through the same coring and style-slot tail the CPU gather ends with.
 extern void     GpuGatherApply(vec3_t* sample, byte* styles);
+extern bool     GpuGatherApplyAO(vec_t* alpha_out);
 extern const char* GpuDeviceDescription();
 
 // Provided by lightmap.cpp, which owns the state the marshaller needs.
@@ -50,9 +52,15 @@ extern struct directlight_s* RadGpuDirectLights(int leafnum);
 extern void     RadGpuResetFace(int facenum);
 extern void     RadGpuTexToWorld(int surfacenum, vec3_t textoworld[2]);
 extern bool     RadGpuSampleMayReachSky(const byte* const pvs);
+extern void     RadGpuResolveStudioItem(const vec3_t pos, const byte* const pvs, const vec3_t normal,
+                                        int step, int miptex, int face,
+                                        vec3_t* sample_out, byte* styles_out);
+extern vec_t    RadGpuComputeAO_CPU(const vec3_t spot, const vec3_t normal);
 
 // The two halves of BuildFacelights, so the expensive first one runs once.
 extern bool     RadGpuFaceBegin(int facenum, void* state);
+extern bool     RadGpuFaceBeginAdaptive(int facenum, void* state);
+extern void     RadGpuFaceRefineAdaptive(int facenum, void* state);
 extern void     RadGpuFaceEnd(int facenum, void* state);
 extern void     RadGpuFaceAbandon(void* state);
 extern size_t   RadGpuFaceStateSize();

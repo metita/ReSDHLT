@@ -421,6 +421,7 @@ extern void     MakeShadowSplits();
 
 extern bool		g_fastmode;
 extern bool     g_extra;
+extern float    g_extraadapt;
 extern vec3_t   g_ambient;
 extern vec_t    g_direct_scale;
 extern vec_t	g_limitthreshold;
@@ -550,6 +551,7 @@ extern void     PairEdges();
 extern int		g_numskynormals[SKYLEVELMAX+1]; // 0, 6, 18, 66, 258, 1026, 4098, 16386, 65538
 extern vec3_t*	g_skynormals[SKYLEVELMAX+1]; //[numskynormals]
 extern vec_t*	g_skynormalsizes[SKYLEVELMAX+1]; // the weight of each normal
+extern unsigned int* g_skyparents[SKYLEVELMAX+1];
 extern void     BuildDiffuseNormals ();
 extern void     BuildFacelights(int facenum);
 extern void     PrecompLightmapOffsets();
@@ -742,6 +744,9 @@ extern void		GetAlternateOrigin (const vec3_t pos, const vec3_t normal, const pa
 extern void LoadStudioModels(void);
 extern void FreeStudioModels(void);
 extern bool TestSegmentAgainstStudioList(const vec_t* p1, const vec_t* p2);
+extern int  ExportStudioBoxes(float *out6, int max_boxes);
+extern bool ExportStudioBVH(std::vector<float> &out);
+extern bool StudioSphereNearAny(const vec3_t center, vec_t radius);
 extern uint64_t StudioModelFingerprint(void);
 extern bool g_studioshadow;
 extern bool g_studioshadowall;

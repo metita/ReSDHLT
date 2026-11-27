@@ -1,4 +1,8 @@
 #include "qrad.h"
+#include "gpu_gather.h"
+#ifdef SDHLT_GPU
+#include "gpu/gpu.h"
+#endif
 
 #define PROOF_UNSET -1                  // a group's state for a face, not looked at yet
 #include <algorithm>
@@ -31,8 +35,83 @@ leafpatch_t;
 static std::vector<std::vector<leafpatch_t> > s_leafpatches;  // BuildVisMatrix only
 static std::vector<std::vector<int> > s_leaffaces;           // faces with a patch in each leaf, sorted
 
+#ifdef SDHLT_GPU
+static bool s_vis_gpu = false;
+static const size_t VIS_GPU_BATCH = 131072;
 
+struct visray_t
+{
+    unsigned patchnum;
+    unsigned m;
+    unsigned bitset;
+    vec3_t origin1;
+    vec3_t origin2;
+};
 
+static void RecordVisiblePair(unsigned patchnum, unsigned m, unsigned bitset,
+                              const vec3_t origin1, const vec3_t origin2)
+{
+    vec3_t transparency = {1.0, 1.0, 1.0};
+    int opaquestyle = -1;
+    if (TestSegmentAgainstOpaqueList(origin1, origin2, transparency, opaquestyle))
+    {
+        return;
+    }
+    if (opaquestyle != -1)
+    {
+        AddStyleToStyleArray(m, patchnum, opaquestyle);
+        AddStyleToStyleArray(patchnum, m, opaquestyle);
+    }
+    if (g_customshadow_with_bouncelight && !VectorCompare(transparency, vec3_one))
+    {
+        AddTransparencyToRawArray(patchnum, m, transparency);
+    }
+#ifdef _MSC_VER
+    _InterlockedOr8((volatile char*)&s_vismatrix[bitset >> 3], (char)(1 << (bitset & 7)));
+#else
+    __atomic_fetch_or(&s_vismatrix[bitset >> 3], (byte)(1 << (bitset & 7)), __ATOMIC_RELAXED);
+#endif
+}
+
+static void FlushVisRays(std::vector<visray_t>& pending,
+                         std::vector<rad::gpu::trace_segment>& segs,
+                         std::vector<rad::gpu::trace_result>& results)
+{
+    if (pending.empty())
+    {
+        return;
+    }
+    segs.resize(pending.size());
+    for (size_t k = 0; k < pending.size(); k++)
+    {
+        segs[k].start[0] = (float)pending[k].origin1[0];
+        segs[k].start[1] = (float)pending[k].origin1[1];
+        segs[k].start[2] = (float)pending[k].origin1[2];
+        segs[k].stop[0] = (float)pending[k].origin2[0];
+        segs[k].stop[1] = (float)pending[k].origin2[1];
+        segs[k].stop[2] = (float)pending[k].origin2[2];
+    }
+    const bool ok = rad::gpu::trace_run(segs.data(), segs.size(), results);
+    for (size_t k = 0; k < pending.size(); k++)
+    {
+        const visray_t& r = pending[k];
+        bool clear;
+        if (!ok || (results[k].flags & 2))
+        {
+            clear = (TestLine(r.origin1, r.origin2) == CONTENTS_EMPTY);
+        }
+        else
+        {
+            clear = (results[k].contents == CONTENTS_EMPTY);
+        }
+        if (clear)
+        {
+            RecordVisiblePair(r.patchnum, r.m, r.bitset, r.origin1, r.origin2);
+        }
+    }
+    pending.clear();
+}
+#endif
 
 // =====================================================================================
 //  TestPatchToFace
@@ -42,6 +121,11 @@ static void     TestPatchToFace(const unsigned patchnum, const int facenum, cons
 								, byte *pvs
 								, const double (*groupbox)[3]             // the box around the patch's group, with proof
 								, signed char *proof                      // what is known of the group to this face
+#ifdef SDHLT_GPU
+								, std::vector<visray_t>* pending
+								, std::vector<rad::gpu::trace_segment>* segs
+								, std::vector<rad::gpu::trace_result>* results
+#endif
 								)
 {
     patch_t*        patch = &g_patches[patchnum];
@@ -108,6 +192,23 @@ static void     TestPatchToFace(const unsigned patchnum, const int facenum, cons
 					// between the patch origins, not the alternate ones
 					const bool exact = proof && origin1[0] == patch->origin[0] && origin1[1] == patch->origin[1] && origin1[2] == patch->origin[2]
 						&& origin2[0] == patch2->origin[0] && origin2[1] == patch2->origin[1] && origin2[2] == patch2->origin[2];
+#ifdef SDHLT_GPU
+					if (s_vis_gpu && pending && (!exact || *proof == BEAM_MIXED))
+					{
+						visray_t vr;
+						vr.patchnum = patchnum;
+						vr.m = m;
+						vr.bitset = bitpos + m;
+						VectorCopy (origin1, vr.origin1);
+						VectorCopy (origin2, vr.origin2);
+						pending->push_back (vr);
+						if (pending->size () >= VIS_GPU_BATCH)
+						{
+							FlushVisRays (*pending, *segs, *results);
+						}
+						continue;
+					}
+#endif
 					if (exact? BeamRayBlocked (origin1, origin2, proof, groupbox, 8, FacePatchBox (facenum), 8):
 						TestLine(
 						origin1, origin2
@@ -177,6 +278,15 @@ static void     BuildVisLeafs(int threadnum)
     std::vector<signed char> proofs;
     std::vector<const patch_t*> group;
     double          groupbox[8][3];
+#ifdef SDHLT_GPU
+    std::vector<visray_t> pending;
+    std::vector<rad::gpu::trace_segment> segs;
+    std::vector<rad::gpu::trace_result> results;
+    if (s_vis_gpu)
+    {
+        pending.reserve(VIS_GPU_BATCH);
+    }
+#endif
 
     while (1)
     {
@@ -259,11 +369,21 @@ static void     BuildVisLeafs(int threadnum)
 				{
 					proof = PatchGroupFaceState ((int)group.size (), facenum2);
 				}
-				TestPatchToFace (patchnum, facenum2, head, bitpos, pvs, groupbox, &proof);
+				TestPatchToFace (patchnum, facenum2, head, bitpos, pvs, groupbox, &proof
+#ifdef SDHLT_GPU
+								, s_vis_gpu? &pending: NULL, &segs, &results
+#endif
+								);
 			}
 		}
 
     }
+#ifdef SDHLT_GPU
+    if (s_vis_gpu)
+    {
+        FlushVisRays(pending, segs, results);
+    }
+#endif
 }
 
 #ifdef SYSTEM_WIN32
@@ -314,7 +434,30 @@ static void     BuildVisMatrix()
     }
 
     BuildFacePatchBoxes();
+#ifdef SDHLT_GPU
+    s_vis_gpu = false;
+    if (g_gpu && rad::gpu::available())
+    {
+        const int tnodecount = ExportTnodes(NULL, 0);
+        if (tnodecount > 0)
+        {
+            std::vector<rad::gpu::tnode_gpu> tnodes((size_t)tnodecount);
+            if (ExportTnodes((gputnode_t*)tnodes.data(), tnodecount) == tnodecount
+                && rad::gpu::trace_begin(tnodes, (uint32_t)VIS_GPU_BATCH))
+            {
+                s_vis_gpu = true;
+            }
+        }
+    }
+#endif
     NamedRunThreadsOn(g_dmodels[0].visleafs, g_estimate, BuildVisLeafs);
+#ifdef SDHLT_GPU
+    if (s_vis_gpu)
+    {
+        rad::gpu::trace_end();
+        s_vis_gpu = false;
+    }
+#endif
     FreeFacePatchBoxes();
     std::vector<std::vector<leafpatch_t> >().swap(s_leafpatches);
     std::vector<std::vector<int> >().swap(s_leaffaces);

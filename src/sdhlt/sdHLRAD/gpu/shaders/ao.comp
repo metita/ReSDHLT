@@ -1,0 +1,108 @@
+// ao.comp - ray-traced ambient occlusion (-aoall) on GPU
+// One thread = one sample (spot + normal). Mirrors AmbientOcclusionAlpha in
+// lightmap.cpp for BSP geometry; samples near opaque/studio AABBs or that
+// overflow the d32 traversal stack return -1.0f so the host computes them on CPU.
+
+#version 450
+
+layout(local_size_x = 64) in;
+
+#extension GL_GOOGLE_include_directive : require
+#define TRACE_TNODE_BINDING 0
+#include "trace_lib.glsl"
+
+const float AO_SATURATION_EPSILON = 0.001;
+
+struct AoSample
+{
+    float px, py, pz;
+    float nx, ny, nz;
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer AoNormalBuffer { float aoNormals[]; }; // 4 floats per normal
+layout(std430, set = 0, binding = 2) readonly buffer AoSampleBuffer { AoSample samples[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer AoOutBuffer { float outAlpha[]; };
+
+layout(push_constant) uniform Params
+{
+    uint numSamples;
+    uint numAoNormals;
+    float aoScale;
+    float aoGain;
+    float aoOpacity;
+    float aoMinWeight;
+};
+
+void main()
+{
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= numSamples)
+        return;
+
+    AoSample s = samples[idx];
+    float totalWeight = 0.0;
+    int numAccepted = 0;
+
+    for (uint k = 0u; k < numAoNormals; k++)
+    {
+        float anx = aoNormals[k * 4u + 0u];
+        float any = aoNormals[k * 4u + 1u];
+        float anz = aoNormals[k * 4u + 2u];
+        float w = aoNormals[k * 4u + 3u];
+        float d = s.nx * anx + s.ny * any + s.nz * anz;
+        if (d <= NORMAL_EPSILON)
+            continue;
+        totalWeight += d * w;
+        numAccepted++;
+    }
+    if (totalWeight <= 0.0)
+    {
+        outAlpha[idx] = 0.0;
+        return;
+    }
+
+    float saturLimit = totalWeight * (1.0 - AO_SATURATION_EPSILON);
+    float minWeight = aoMinWeight * totalWeight / float(max(numAccepted, 1));
+    float occluded = 0.0;
+    int anyOverflow = 0;
+    float sink1, sink2, sink3;
+
+    for (uint k = 0u; k < numAoNormals; k++)
+    {
+        float anx = aoNormals[k * 4u + 0u];
+        float any = aoNormals[k * 4u + 1u];
+        float anz = aoNormals[k * 4u + 2u];
+        float aw = aoNormals[k * 4u + 3u];
+        float d = s.nx * anx + s.ny * any + s.nz * anz;
+        if (d <= NORMAL_EPSILON)
+            continue;
+        float w = d * aw;
+        if (w < minWeight)
+            continue;
+        float dx = s.px + aoScale * anx;
+        float dy = s.py + aoScale * any;
+        float dz = s.pz + aoScale * anz;
+        int tf = 0;
+        int tr = traceLine(s.px, s.py, s.pz, dx, dy, dz, sink1, sink2, sink3, tf);
+        anyOverflow |= (tf & TRACE_FLAG_STACK_OVERFLOW);
+        if (tr == CONTENTS_SOLID)
+        {
+            occluded += w;
+            if (occluded >= saturLimit)
+            {
+                occluded = totalWeight;
+                break;
+            }
+        }
+    }
+
+    if (anyOverflow != 0)
+    {
+        outAlpha[idx] = -1.0;
+        return;
+    }
+    float occlusion = occluded / totalWeight;
+    if (aoGain != 1.0)
+        occlusion = pow(occlusion, aoGain);
+    outAlpha[idx] = occlusion * aoOpacity;
+}

@@ -39,6 +39,76 @@ static std::atomic<uint64_t> s_sparse_source_patches(0);
 static std::atomic<uint64_t> s_sparse_candidate_faces(0);
 static std::atomic<uint64_t> s_sparse_visible_pairs(0);
 
+#ifdef SDHLT_GPU
+static bool s_sparse_vis_gpu = false;
+static const size_t SPARSE_GPU_BATCH = 131072;
+
+struct sparse_visray_t
+{
+    unsigned local_idx;
+    unsigned patchnum;
+    unsigned m;
+    vec3_t origin1;
+    vec3_t origin2;
+};
+
+static void FlushSparseVisRays(std::vector<sparse_visray_t>& pending,
+                               std::vector<rad::gpu::trace_segment>& segs,
+                               std::vector<rad::gpu::trace_result>& results,
+                               std::vector<std::vector<unsigned> >& leaf_visible)
+{
+    if (pending.empty())
+    {
+        return;
+    }
+    segs.resize(pending.size());
+    for (size_t k = 0; k < pending.size(); k++)
+    {
+        segs[k].start[0] = (float)pending[k].origin1[0];
+        segs[k].start[1] = (float)pending[k].origin1[1];
+        segs[k].start[2] = (float)pending[k].origin1[2];
+        segs[k].stop[0] = (float)pending[k].origin2[0];
+        segs[k].stop[1] = (float)pending[k].origin2[1];
+        segs[k].stop[2] = (float)pending[k].origin2[2];
+    }
+    const bool ok = rad::gpu::trace_run(segs.data(), segs.size(), results);
+    for (size_t k = 0; k < pending.size(); k++)
+    {
+        const sparse_visray_t& r = pending[k];
+        bool clear;
+        if (!ok || (results[k].flags & 2))
+        {
+            clear = (TestLine(r.origin1, r.origin2) == CONTENTS_EMPTY);
+        }
+        else
+        {
+            clear = (results[k].contents == CONTENTS_EMPTY);
+        }
+        if (!clear)
+        {
+            continue;
+        }
+        vec3_t transparency = {1.0, 1.0, 1.0};
+        int opaquestyle = -1;
+        if (TestSegmentAgainstOpaqueList(r.origin1, r.origin2, transparency, opaquestyle))
+        {
+            continue;
+        }
+        if (opaquestyle != -1)
+        {
+            AddStyleToStyleArray(r.m, r.patchnum, opaquestyle);
+            AddStyleToStyleArray(r.patchnum, r.m, opaquestyle);
+        }
+        if (g_customshadow_with_bouncelight && !VectorCompare(transparency, vec3_one))
+        {
+            AddTransparencyToRawArray(r.patchnum, r.m, transparency);
+        }
+        leaf_visible[r.local_idx].push_back(r.m);
+    }
+    pending.clear();
+}
+#endif
+
 // Vismatrix protected
 static int IsVisbitInArray(const unsigned x, const unsigned y)
 {
@@ -200,6 +270,13 @@ static void     TestPatchToFace(const unsigned patchnum, const int facenum, cons
 								, std::vector<unsigned>& visible_patches
 								, const double (*groupbox)[3]             // the box around the patch's group, with proof
 								, signed char *proof                      // what is known of the group to this face
+#ifdef SDHLT_GPU
+								, unsigned local_idx
+								, std::vector<sparse_visray_t>* pending
+								, std::vector<rad::gpu::trace_segment>* segs
+								, std::vector<rad::gpu::trace_result>* results
+								, std::vector<std::vector<unsigned> >* leaf_visible
+#endif
 								)
 {
     (void)head;
@@ -267,6 +344,23 @@ static void     TestPatchToFace(const unsigned patchnum, const int facenum, cons
 					// between the patch origins, not the alternate ones
 					const bool exact = proof && origin1[0] == patch->origin[0] && origin1[1] == patch->origin[1] && origin1[2] == patch->origin[2]
 						&& origin2[0] == patch2->origin[0] && origin2[1] == patch2->origin[1] && origin2[2] == patch2->origin[2];
+#ifdef SDHLT_GPU
+					if (s_sparse_vis_gpu && pending && (!exact || *proof == BEAM_MIXED))
+					{
+						sparse_visray_t vr;
+						vr.local_idx = local_idx;
+						vr.patchnum = patchnum;
+						vr.m = m;
+						VectorCopy (origin1, vr.origin1);
+						VectorCopy (origin2, vr.origin2);
+						pending->push_back (vr);
+						if (pending->size () >= SPARSE_GPU_BATCH)
+						{
+							FlushSparseVisRays (*pending, *segs, *results, *leaf_visible);
+						}
+						continue;
+					}
+#endif
 					if (exact? BeamRayBlocked (origin1, origin2, proof, groupbox, 8, FacePatchBox (facenum), 8):
 						TestLine(
 						origin1, origin2
@@ -332,6 +426,16 @@ static void     BuildVisLeafs(int threadnum)
 	uint64_t local_source_patches = 0;
 	uint64_t local_candidate_faces = 0;
 	uint64_t local_visible_pairs = 0;
+#ifdef SDHLT_GPU
+	std::vector<sparse_visray_t> pending;
+	std::vector<rad::gpu::trace_segment> segs;
+	std::vector<rad::gpu::trace_result> results;
+	std::vector<std::vector<unsigned> > leaf_visible;
+	if (s_sparse_vis_gpu)
+	{
+		pending.reserve(SPARSE_GPU_BATCH);
+	}
+#endif
 
     while (1)
     {
@@ -377,6 +481,16 @@ static void     BuildVisLeafs(int threadnum)
 		candidate_faces.erase(std::unique(candidate_faces.begin(), candidate_faces.end()), candidate_faces.end());
 
 		const std::vector<unsigned>& source_patches = s_patches_by_leaf[i];
+#ifdef SDHLT_GPU
+		if (s_sparse_vis_gpu)
+		{
+			leaf_visible.resize(source_patches.size());
+			for (size_t s = 0; s < source_patches.size(); s++)
+			{
+				leaf_visible[s].clear();
+			}
+		}
+#endif
 		for (size_t source = 0; source < source_patches.size(); ++source)
 		{
 			const unsigned patchnum = source_patches[source];
@@ -410,11 +524,41 @@ static void     BuildVisLeafs(int threadnum)
 					proof = PatchGroupFaceState((int)group.size(), *target);
 				}
 				TestPatchToFace(patchnum, *target, head, pvs,
-				                visible_generation.data(), generation, visible_patches,
-				                groupbox, &proof);
+				                visible_generation.data(), generation,
+#ifdef SDHLT_GPU
+				                s_sparse_vis_gpu ? leaf_visible[source] : visible_patches,
+				                groupbox, &proof,
+				                (unsigned)source,
+				                s_sparse_vis_gpu ? &pending : NULL, &segs, &results, &leaf_visible);
+#else
+				                visible_patches, groupbox, &proof);
+#endif
 			}
+#ifdef SDHLT_GPU
+			if (!s_sparse_vis_gpu)
+			{
+				local_visible_pairs += SetVisColumn((int)patchnum, visible_patches);
+			}
+#else
 			local_visible_pairs += SetVisColumn((int)patchnum, visible_patches);
+#endif
 		}
+#ifdef SDHLT_GPU
+		if (s_sparse_vis_gpu)
+		{
+			FlushSparseVisRays(pending, segs, results, leaf_visible);
+			for (size_t source = 0; source < source_patches.size(); ++source)
+			{
+				std::vector<unsigned>& vp = leaf_visible[source];
+				if (vp.size() > 1)
+				{
+					std::sort(vp.begin(), vp.end());
+					vp.erase(std::unique(vp.begin(), vp.end()), vp.end());
+				}
+				local_visible_pairs += SetVisColumn((int)source_patches[source], vp);
+			}
+		}
+#endif
 
     }
 	s_sparse_source_patches.fetch_add(local_source_patches, std::memory_order_relaxed);
@@ -463,7 +607,30 @@ static void     BuildVisMatrix()
 	s_sparse_visible_pairs.store(0, std::memory_order_relaxed);
 	const double started = I_FloatTime();
     BuildFacePatchBoxes();
+#ifdef SDHLT_GPU
+    s_sparse_vis_gpu = false;
+    if (g_gpu && rad::gpu::available())
+    {
+        const int tnodecount = ExportTnodes(NULL, 0);
+        if (tnodecount > 0)
+        {
+            std::vector<rad::gpu::tnode_gpu> tnodes((size_t)tnodecount);
+            if (ExportTnodes((gputnode_t*)tnodes.data(), tnodecount) == tnodecount
+                && rad::gpu::trace_begin(tnodes, (uint32_t)SPARSE_GPU_BATCH))
+            {
+                s_sparse_vis_gpu = true;
+            }
+        }
+    }
+#endif
     NamedRunThreadsOn(g_dmodels[0].visleafs, g_estimate, BuildVisLeafs);
+#ifdef SDHLT_GPU
+    if (s_sparse_vis_gpu)
+    {
+        rad::gpu::trace_end();
+        s_sparse_vis_gpu = false;
+    }
+#endif
     FreeFacePatchBoxes();
 	Log("Sparse visibility: %llu source patches, %.2fM candidate faces, %.2fM visible pairs (%.2f seconds)\n",
 		(unsigned long long)s_sparse_source_patches.load(std::memory_order_relaxed),

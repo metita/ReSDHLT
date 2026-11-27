@@ -149,6 +149,7 @@ char            g_vismatfile[_MAX_PATH] = "";
 bool            g_incremental = DEFAULT_INCREMENTAL;
 float           g_indirect_sun = DEFAULT_INDIRECT_SUN;
 bool            g_extra = DEFAULT_EXTRA;
+float           g_extraadapt = 0.0f;
 bool            g_texscale = DEFAULT_TEXSCALE;
 
 float           g_smoothing_threshold;
@@ -3870,6 +3871,17 @@ int             main(const int argc, char** argv)
             g_extra = true;
             g_cli_overrides.extra = true;
         }
+		else if (!strcasecmp(argv[i], "-extraadapt"))
+        {
+            g_extra = true;
+            g_cli_overrides.extra = true;
+            g_extraadapt = 3.0f;
+            if (i + 1 < argc && (argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9' || argv[i + 1][0] == '.'))
+            {
+                g_extraadapt = (float)atof(argv[++i]);
+                if (g_extraadapt < 0.0f) g_extraadapt = 0.0f;
+            }
+        }
         else if (!strcasecmp(argv[i], "-bounce"))
         {
             if (i + 1 < argc)	//added "1" .--vluzacn
@@ -4740,10 +4752,9 @@ int             main(const int argc, char** argv)
         && !gpu_gather_disabled;
     g_gpu_transfers = (gpu_all_requested || gpu_transfers_requested)
         && !gpu_transfers_disabled;
-    if (g_ao_enable && g_gpu_gather)
+    if (g_ao_enable && !g_ao_all && g_gpu_gather)
     {
-        // AO rays are traced on the CPU sample by sample, and its texlight exemption
-        // needs the gather to keep texlight light apart, which the kernel does not
+        // -ao (direct only) needs the gather to keep texlight light apart, which the kernel does not
         Log("-ao: the direct-light gather runs on the CPU; -gpu still covers transfers\n");
         g_gpu_gather = false;
     }

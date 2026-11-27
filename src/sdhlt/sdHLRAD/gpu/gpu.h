@@ -58,6 +58,13 @@ namespace rad
                          const std::vector<trace_segment> &segments,
                          std::vector<trace_result> &results);
 
+        // Persistent session for BuildVisLeafs: uploads tnodes once to device-local
+        // memory and reuses segment/result/readback buffers across thread flushes.
+        bool trace_begin(const std::vector<tnode_gpu> &tnodes, uint32_t max_segments);
+        bool trace_run(const trace_segment *segments, size_t count,
+                       std::vector<trace_result> &results);
+        void trace_end();
+
         // ===== direct lighting gather =====
         // mirrors of the std430 structs in shaders/gathercomp; all layouts
         // are scalar only on purpose (std430 vec3/ivec2 alignment)
@@ -134,6 +141,8 @@ namespace rad
             int32_t sky_step_match = 0;
             float indirect_sun = 0;
             float light_skip = 0;            // -lightskip: no shadow ray for a light adding less than this
+            uint32_t num_sky_normals = 0;    // explicit count when coarse parent triples follow sky_normals
+            uint32_t studio_box_ofs = 0;     // offset into face_gap where studio AABBs are packed (0 = none)
         };
 
         // a (work item, light) pair the kernel routed to the cpu (the surface
@@ -250,5 +259,21 @@ namespace rad
                           const std::vector<uint32_t> &emitters,
                           const std::vector<float> &factors,
                           std::vector<bounce_result> &results);
+
+        // ===== ambient occlusion (-aoall) =====
+        struct ao_sample
+        {
+            float pos[3];
+            float normal[3];
+        };
+        static_assert(sizeof(ao_sample) == 24, "must match GLSL AoSample");
+
+        bool ao_begin(const std::vector<tnode_gpu> &tnodes,
+                      const std::vector<float> &ao_normals,
+                      uint32_t max_samples);
+        bool ao_run(const ao_sample *samples, size_t count,
+                    float ao_scale, float ao_gain, float ao_opacity, float ao_minweight,
+                    std::vector<float> &alphas);
+        void ao_end();
     }
 }

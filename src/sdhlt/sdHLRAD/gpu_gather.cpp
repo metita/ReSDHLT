@@ -52,6 +52,7 @@ namespace
     {
         // collect
         std::vector< std::vector< rad::gpu::work_item_gpu > > face_items;
+        std::vector< std::vector< int > > face_miptex;
         std::vector< std::vector< byte > > pvs_rows;
         std::map< std::string, int > row_lookup;
         std::mutex row_mutex;
@@ -86,10 +87,13 @@ namespace
         std::vector< char > state;                          // facebuild_t per face
         std::vector< unsigned char > live;
         std::vector< rad::gpu::work_item_gpu > items;       // flat, face major
+        std::vector< int > item_miptex;                     // miptex per item (for CPU studio fallback)
         std::vector< rad::gpu::gather_result_gpu > results;
+        std::vector< float > ao_alphas;                     // -aoall: per-item AO alpha from GPU/CPU
         std::vector< std::vector< byte > > pvs_rows;
         std::vector< rad::gpu::near_pair > nearpairs;       // texlight pairs the kernel routed back
         std::vector< size_t > near_groups;                  // first pair of each item, plus the end
+        std::vector< uint32_t > studio_items;               // items whose rays hit a studio model AABB
         size_t bytes;
     };
     gpu_chunk *g_active_chunk = NULL;                       // the one ChunkCollect/ChunkFinish work on
@@ -118,7 +122,14 @@ namespace
         {
             for (directlight_t *light = RadGpuDirectLights (leaf); light; light = light->next)
             {
-                count++;
+                if (light->type == emit_skylight && light->numsunnormals > 1)
+                {
+                    count += (size_t)light->numsunnormals;
+                }
+                else
+                {
+                    count++;
+                }
             }
         }
         return count;
@@ -218,12 +229,24 @@ namespace
         }
 
         const int skylevel = g_softsky? g_skylevel: SKYLEVEL_SOFTSKYOFF;
+        scene.num_sky_normals = (uint32_t)g_numskynormals[skylevel];
         for (int j = 0; j < g_numskynormals[skylevel]; j++)
         {
             scene.sky_normals.push_back ((float)g_skynormals[skylevel][j][0]);
             scene.sky_normals.push_back ((float)g_skynormals[skylevel][j][1]);
             scene.sky_normals.push_back ((float)g_skynormals[skylevel][j][2]);
             scene.sky_normals.push_back ((float)g_skynormalsizes[skylevel][j]);
+        }
+        // Append packed level-4 parent triples right after the normals for
+        // coarse-to-fine sky dome traversal (zero extra descriptor bindings).
+        if (skylevel >= 5 && g_skyparents[skylevel])
+        {
+            for (int j = 0; j < g_numskynormals[skylevel]; j++)
+            {
+                float packed = 0.0f;
+                memcpy (&packed, &g_skyparents[skylevel][j], sizeof (float));
+                scene.sky_normals.push_back (packed);
+            }
         }
         scene.sky_lighting_fix = g_sky_lighting_fix? 1: 0;
         scene.sky_step_match = (g_softsky || g_fastmode)? 1: 0;
@@ -242,6 +265,17 @@ namespace
                 scene.face_gap[(size_t)f * 6 + x * 3 + 0] = (float)textoworld[x][0];
                 scene.face_gap[(size_t)f * 6 + x * 3 + 1] = (float)textoworld[x][1];
                 scene.face_gap[(size_t)f * 6 + x * 3 + 2] = (float)textoworld[x][2];
+            }
+        }
+        // Append flat studio model BVH + triangles to face_gap so gather.comp
+        // can raytrace opaque studio shadows directly on the GPU without any
+        // extra Vulkan descriptor bindings.
+        scene.studio_box_ofs = 0;
+        {
+            const uint32_t ofs = (uint32_t)scene.face_gap.size ();
+            if (ExportStudioBVH (scene.face_gap))
+            {
+                scene.studio_box_ofs = ofs;
             }
         }
         return true;
@@ -380,6 +414,13 @@ void GpuGatherBeginFace (int facenum)
     t_current_face = facenum;
 }
 
+void GpuGatherResetFace (int facenum)
+{
+    g_data->face_items[facenum].clear ();
+    g_data->face_miptex[facenum].clear ();
+    g_data->face_cursor[facenum] = 0;
+}
+
 void GpuGatherIntercept (const vec3_t pos, const byte* const pvs, const vec3_t normal,
                          vec3_t *sample, byte *styles, int step, int miptex,
                          int texlightgap_surfacenum)
@@ -431,7 +472,33 @@ void GpuGatherIntercept (const vec3_t pos, const byte* const pvs, const vec3_t n
             t_last_generation = g_row_generation;
         }
         d.face_items[facenum].push_back (item);
+        d.face_miptex[facenum].push_back (miptex);
     }
+}
+
+bool GpuGatherApplyAO (vec_t *alpha_out)
+{
+    if (!g_apply_chunk || g_apply_chunk->ao_alphas.empty ())
+    {
+        return false;
+    }
+    const int facenum = t_current_face;
+    if (facenum < 0)
+    {
+        return false;
+    }
+    const int cursor = g_data->face_cursor[facenum] - 1;
+    if (cursor < 0)
+    {
+        return false;
+    }
+    const int flat = g_data->face_first[facenum] + cursor;
+    if (flat < 0 || (size_t)flat >= g_apply_chunk->ao_alphas.size ())
+    {
+        return false;
+    }
+    *alpha_out = (vec_t)g_apply_chunk->ao_alphas[flat];
+    return true;
 }
 
 // The apply half. CalcLightmap re-walks its lmcache points in the same order
@@ -552,6 +619,24 @@ namespace
         gpu_chunk &c = *g_active_chunk;
         void *state = &c.state[(size_t)i * RadGpuFaceStateSize ()];
         c.live[i] = RadGpuFaceBegin (c.base + i, state)? 1: 0;
+    }
+
+    void ChunkCollectAdaptive (int i)
+    {
+        gpu_chunk &c = *g_active_chunk;
+        void *state = &c.state[(size_t)i * RadGpuFaceStateSize ()];
+        c.live[i] = RadGpuFaceBeginAdaptive (c.base + i, state)? 1: 0;
+    }
+
+    void ChunkRefineAdaptive (int i)
+    {
+        gpu_chunk &c = *g_active_chunk;
+        if (!c.live[i])
+        {
+            return;
+        }
+        void *state = &c.state[(size_t)i * RadGpuFaceStateSize ()];
+        RadGpuFaceRefineAdaptive (c.base + i, state);
     }
 
     void ChunkFinish (int i)
@@ -689,6 +774,163 @@ namespace
         std::vector< rad::gpu::near_pair > ().swap (c.nearpairs);
         std::vector< size_t > ().swap (c.near_groups);
     }
+
+    // Studio model fallback: items whose rays intersected a studio model AABB
+    // in gather.comp (pad0 & 4) are resolved with reference CPU GatherSampleLight
+    // on the thread pool while the GPU works on the next chunk.
+    gpu_chunk *g_studio_chunk = NULL;
+
+    void ResolveStudioOne (int idx)
+    {
+        gpu_chunk &c = *g_studio_chunk;
+        const uint32_t k = c.studio_items[idx];
+        const rad::gpu::work_item_gpu &item = c.items[k];
+        vec3_t pos, normal;
+        VectorCopy (item.pos, pos);
+        VectorCopy (item.normal, normal);
+        vec3_t sample[ALLSTYLES];
+        byte styles[ALLSTYLES];
+        memset (sample, 0, sizeof (sample));
+        memset (styles, 255, sizeof (styles));
+        RadGpuResolveStudioItem (pos, c.pvs_rows[item.pvs_row].data (), normal,
+                                 item.step, c.item_miptex[k], item.face,
+                                 sample, styles);
+        rad::gpu::gather_result_gpu &out = c.results[k];
+        memset (&out, 0, sizeof (out));
+        for (int s = 0; s < ALLSTYLES && styles[s] != 255; s++)
+        {
+            const int compact = g_data->style_to_compact[styles[s]];
+            if (compact >= 0 && compact < rad::gpu::max_compact_styles)
+            {
+                out.adds[compact * 3 + 0] = (float)sample[s][0];
+                out.adds[compact * 3 + 1] = (float)sample[s][1];
+                out.adds[compact * 3 + 2] = (float)sample[s][2];
+                out.touched |= 1u << compact;
+            }
+        }
+    }
+
+    size_t ResolveStudioItems (gpu_chunk &c)
+    {
+        c.studio_items.clear ();
+        for (size_t k = 0; k < c.results.size (); k++)
+        {
+            if (c.results[k].pad0 & 4u)
+            {
+                c.studio_items.push_back ((uint32_t)k);
+            }
+        }
+        if (c.studio_items.empty ())
+        {
+            return 0;
+        }
+        const size_t n = c.studio_items.size ();
+        g_studio_chunk = &c;
+        g_gpu_phase = 0;
+        RunThreadsOnIndividual ((int)n, false, ResolveStudioOne);
+        g_gpu_phase = 1;
+        g_studio_chunk = NULL;
+        std::vector< uint32_t > ().swap (c.studio_items);
+        return n;
+    }
+
+    // GPU Ambient Occlusion (-aoall): evaluates AO for all step-0 samples in a
+    // chunk not near a studio model AABB via ao.comp, falling back to CPU for
+    // samples near studio models or that overflow the d32 stack.
+    const size_t AO_BATCH_SAMPLES = 65536;
+    gpu_chunk *g_ao_chunk = NULL;
+    std::vector< uint32_t > g_ao_cpu_items;
+
+    void ComputeAOCpuOne (int idx)
+    {
+        gpu_chunk &c = *g_ao_chunk;
+        const uint32_t k = g_ao_cpu_items[idx];
+        const rad::gpu::work_item_gpu &item = c.items[k];
+        vec3_t pos, normal;
+        VectorCopy (item.pos, pos);
+        VectorCopy (item.normal, normal);
+        c.ao_alphas[k] = (float)RadGpuComputeAO_CPU (pos, normal);
+    }
+
+    void ComputeChunkAO (gpu_chunk &c, bool ao_gpu_active)
+    {
+        if (!g_ao_enable || !g_ao_all || c.items.empty ())
+        {
+            return;
+        }
+        c.ao_alphas.assign (c.items.size (), 0.0f);
+        std::vector< uint32_t > gpu_indices;
+        g_ao_cpu_items.clear ();
+        gpu_indices.reserve (c.items.size ());
+        for (size_t k = 0; k < c.items.size (); k++)
+        {
+            const rad::gpu::work_item_gpu &item = c.items[k];
+            if (item.step != 0)
+            {
+                continue;
+            }
+            vec3_t pos;
+            VectorCopy (item.pos, pos);
+            if (ao_gpu_active && !StudioSphereNearAny (pos, g_ao_scale))
+            {
+                gpu_indices.push_back ((uint32_t)k);
+            }
+            else
+            {
+                g_ao_cpu_items.push_back ((uint32_t)k);
+            }
+        }
+        if (ao_gpu_active && !gpu_indices.empty ())
+        {
+            std::vector< rad::gpu::ao_sample > batch;
+            std::vector< float > alphas;
+            batch.reserve (AO_BATCH_SAMPLES);
+            for (size_t base = 0; base < gpu_indices.size (); base += AO_BATCH_SAMPLES)
+            {
+                const size_t n = qmin (gpu_indices.size () - base, AO_BATCH_SAMPLES);
+                batch.resize (n);
+                for (size_t i = 0; i < n; i++)
+                {
+                    const rad::gpu::work_item_gpu &it = c.items[gpu_indices[base + i]];
+                    batch[i].pos[0] = it.pos[0];
+                    batch[i].pos[1] = it.pos[1];
+                    batch[i].pos[2] = it.pos[2];
+                    batch[i].normal[0] = it.normal[0];
+                    batch[i].normal[1] = it.normal[1];
+                    batch[i].normal[2] = it.normal[2];
+                }
+                if (rad::gpu::ao_run (batch.data (), n, (float)g_ao_scale, (float)g_ao_gain,
+                                      (float)g_ao_opacity, (float)g_ao_minweight, alphas))
+                {
+                    for (size_t i = 0; i < n; i++)
+                    {
+                        if (alphas[i] < 0.0f)
+                        {
+                            g_ao_cpu_items.push_back (gpu_indices[base + i]);
+                        }
+                        else
+                        {
+                            c.ao_alphas[gpu_indices[base + i]] = alphas[i];
+                        }
+                    }
+                }
+                else
+                {
+                    for (size_t i = 0; i < n; i++)
+                    {
+                        g_ao_cpu_items.push_back (gpu_indices[base + i]);
+                    }
+                }
+            }
+        }
+        if (!g_ao_cpu_items.empty ())
+        {
+            g_ao_chunk = &c;
+            RunThreadsOnIndividual ((int)g_ao_cpu_items.size (), false, ComputeAOCpuOne);
+            g_ao_chunk = NULL;
+            g_ao_cpu_items.clear ();
+        }
+    }
 }
 
 bool GpuBuildFacelights ()
@@ -700,14 +942,6 @@ bool GpuBuildFacelights ()
     {
         Warning ("-gpu: the map has opaque entities; using the CPU path");
         return false;
-    }
-    {
-        extern int num_models;                              // studio.cpp
-        if (num_models != 0)
-        {
-            Warning ("-gpu: the map has studio model shadows; using the CPU path");
-            return false;
-        }
     }
     if (g_numfaces <= 0)
     {
@@ -728,6 +962,7 @@ bool GpuBuildFacelights ()
     g_data = new gpu_gather_data ();
     g_data->rowbytes = (size_t)((g_dmodels[0].visleafs + 7) / 8);
     g_data->face_items.resize (g_numfaces);
+    g_data->face_miptex.resize (g_numfaces);
     g_data->face_first.assign (g_numfaces, 0);
     g_data->face_cursor.assign (g_numfaces, 0);
 
@@ -754,6 +989,22 @@ bool GpuBuildFacelights ()
          rad::gpu::device_name ().c_str (), (int)scene.lights.size (), (int)scene.lightleafs.size ());
     g_gpu_phase = 1;
 
+    bool ao_gpu_active = false;
+    if (g_ao_enable && g_ao_all)
+    {
+        std::vector< float > ao_normals;
+        const int aonum = g_numskynormals[g_ao_level];
+        ao_normals.reserve ((size_t)aonum * 4);
+        for (int k = 0; k < aonum; k++)
+        {
+            ao_normals.push_back ((float)g_skynormals[g_ao_level][k][0]);
+            ao_normals.push_back ((float)g_skynormals[g_ao_level][k][1]);
+            ao_normals.push_back ((float)g_skynormals[g_ao_level][k][2]);
+            ao_normals.push_back ((float)g_skynormalsizes[g_ao_level][k]);
+        }
+        ao_gpu_active = rad::gpu::ao_begin (scene.tnodes, ao_normals, (uint32_t)AO_BATCH_SAMPLES);
+    }
+
     const size_t statesize = RadGpuFaceStateSize ();
     int chunkfaces = CHUNK_FACES_START;
     size_t dispatches = 0;
@@ -762,7 +1013,8 @@ bool GpuBuildFacelights ()
     size_t chunk_hint = GATHER_CHUNK_START;
     size_t chunk_ceiling = GATHER_CHUNK_ITEMS;
     size_t totalsamples = 0;
-    double t_collect = 0, t_finish = 0, t_near = 0;
+    size_t totalstudio = 0;
+    double t_collect = 0, t_finish = 0, t_near = 0, t_studio = 0, t_ao = 0;
     bool ok = true;
 
     int base = 0;
@@ -798,6 +1050,8 @@ bool GpuBuildFacelights ()
             g_data->face_first[f] = (int)c->items.size ();
             c->items.insert (c->items.end (),
                              g_data->face_items[f].begin (), g_data->face_items[f].end ());
+            c->item_miptex.insert (c->item_miptex.end (),
+                                   g_data->face_miptex[f].begin (), g_data->face_miptex[f].end ());
             if (c->live[i])
             {
                 c->bytes += RadGpuFaceStateBytes (&c->state[(size_t)i * statesize]);
@@ -869,6 +1123,116 @@ bool GpuBuildFacelights ()
 
     // The device works on one chunk while the CPU collects the next and then
     // finishes the previous, so neither side waits on the other for long.
+    const bool use_adaptive = (g_extraadapt > 0.0f && g_extra && !g_ao_enable && !g_drawnudge);
+    if (use_adaptive)
+    {
+        while (base < g_numfaces)
+        {
+            std::unique_ptr< gpu_chunk > cur (new gpu_chunk ());
+            cur->base = base;
+            cur->count = qmin (chunkfaces, g_numfaces - base);
+            cur->state.assign ((size_t)cur->count * statesize, 0);
+            cur->live.assign (cur->count, 0);
+            cur->bytes = 0;
+
+            // Pass 1: collect base luxel centers (~1/9 of -extra points)
+            g_data->pvs_rows.clear ();
+            g_data->row_lookup.clear ();
+            g_row_generation++;
+            g_active_chunk = cur.get ();
+            g_gpu_phase = 1;
+            double t0 = I_FloatTime ();
+            RunThreadsOnIndividual (cur->count, false, ChunkCollectAdaptive);
+            t_collect += I_FloatTime () - t0;
+
+            for (int i = 0; i < cur->count; i++)
+            {
+                const int f = cur->base + i;
+                g_data->face_first[f] = (int)cur->items.size ();
+                cur->items.insert (cur->items.end (),
+                                   g_data->face_items[f].begin (), g_data->face_items[f].end ());
+                if (cur->live[i])
+                {
+                    cur->bytes += RadGpuFaceStateBytes (&cur->state[(size_t)i * statesize]);
+                }
+            }
+            cur->results.resize (cur->items.size ());
+            cur->pvs_rows.swap (g_data->pvs_rows);
+            totalsamples += cur->items.size ();
+
+            if (cur->bytes > 0)
+            {
+                const double perface = (double)cur->bytes / cur->count;
+                double next = (double)CHUNK_BYTE_BUDGET / perface;
+                if (next < CHUNK_FACES_START) next = CHUNK_FACES_START;
+                if (next > CHUNK_FACES_MAX) next = CHUNK_FACES_MAX;
+                chunkfaces = (int)next;
+            }
+            base += cur->count;
+
+            if (!dispatch (*cur))
+            {
+                abandon (*cur);
+                ok = false;
+                break;
+            }
+            double t2 = I_FloatTime ();
+            ResolveNearPairs (*cur);
+            t_near += I_FloatTime () - t2;
+
+            // Pass 2: apply base results, compute refine mask, collect ONLY edge/penumbra points
+            g_data->pvs_rows.clear ();
+            g_data->row_lookup.clear ();
+            g_row_generation++;
+            g_active_chunk = cur.get ();
+            g_apply_chunk = cur.get ();
+            g_gpu_phase = 1;
+            double t3 = I_FloatTime ();
+            RunThreadsOnIndividual (cur->count, false, ChunkRefineAdaptive);
+            t_collect += I_FloatTime () - t3;
+            g_apply_chunk = NULL;
+
+            cur->items.clear ();
+            for (int i = 0; i < cur->count; i++)
+            {
+                const int f = cur->base + i;
+                g_data->face_first[f] = (int)cur->items.size ();
+                cur->items.insert (cur->items.end (),
+                                   g_data->face_items[f].begin (), g_data->face_items[f].end ());
+            }
+            cur->results.resize (cur->items.size ());
+            cur->pvs_rows.swap (g_data->pvs_rows);
+            totalsamples += cur->items.size ();
+
+            if (!dispatch (*cur))
+            {
+                abandon (*cur);
+                ok = false;
+                break;
+            }
+            double t4 = I_FloatTime ();
+            ResolveNearPairs (*cur);
+            t_near += I_FloatTime () - t4;
+
+            // Pass 3: apply refined results and finish faces
+            g_active_chunk = cur.get ();
+            g_apply_chunk = cur.get ();
+            g_gpu_phase = 0;
+            double t1 = I_FloatTime ();
+            RunThreadsOnIndividual (cur->count, false, ChunkFinish);
+            t_finish += I_FloatTime () - t1;
+            g_gpu_phase = 1;
+            g_apply_chunk = NULL;
+
+            for (int i = 0; i < cur->count; i++)
+            {
+                std::vector< rad::gpu::work_item_gpu > ().swap (g_data->face_items[cur->base + i]);
+            }
+        }
+        g_active_chunk = NULL;
+    }
+    else
+    {
     std::unique_ptr< gpu_chunk > cur;
     std::thread worker;
     bool device_ok = false;
@@ -913,6 +1277,17 @@ bool GpuBuildFacelights ()
         ResolveNearPairs (*cur);
         t_near += I_FloatTime () - t2;
 
+        // Samples whose rays crossed a studio model AABB are resolved with
+        // reference CPU GatherSampleLight on the thread pool.
+        double ts = I_FloatTime ();
+        totalstudio += ResolveStudioItems (*cur);
+        t_studio += I_FloatTime () - ts;
+
+        // -aoall: compute ambient occlusion on GPU (and CPU near studio models).
+        double tao = I_FloatTime ();
+        ComputeChunkAO (*cur, ao_gpu_active);
+        t_ao += I_FloatTime () - tao;
+
         // Second half: the blur, the patch accumulation and the lightmap
         // write, each face reading the results the device just produced.
         g_active_chunk = cur.get ();
@@ -929,10 +1304,17 @@ bool GpuBuildFacelights ()
         for (int i = 0; i < cur->count; i++)
         {
             std::vector< rad::gpu::work_item_gpu > ().swap (g_data->face_items[cur->base + i]);
+            std::vector< int > ().swap (g_data->face_miptex[cur->base + i]);
         }
         cur = std::move (next);
     }
     g_active_chunk = NULL;
+    }
+
+    if (ao_gpu_active)
+    {
+        rad::gpu::ao_end ();
+    }
 
     if (!ok)
     {
@@ -946,7 +1328,8 @@ bool GpuBuildFacelights ()
 
     Log ("  %d samples, %d dispatches, %.2fs on the device (slowest %.3fs)\n",
          (int)totalsamples, (int)dispatches, spent, slowest);
-    Log ("  collect %.2fs, near pairs %.2fs, finish %.2fs\n", t_collect, t_near, t_finish);
+    Log ("  collect %.2fs, near pairs %.2fs, studio %.2fs (%d items), ao %.2fs, finish %.2fs\n",
+         t_collect, t_near, t_studio, (int)totalstudio, t_ao, t_finish);
     GpuGatherFinish ();
     return true;
 }

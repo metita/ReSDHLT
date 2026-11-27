@@ -26,8 +26,13 @@
 #include "spirv/gather_f32_d32_spirv.h"
 #include "spirv/gather_f32_d48_spirv.h"
 #include "spirv/gather_f32_d64_spirv.h"
+#include "spirv/gather_f32_d96_spirv.h"
+#include "spirv/gather_f32_d128_spirv.h"
+#include "spirv/gather_f32_d192_spirv.h"
+#include "spirv/gather_f32_s1_d32_spirv.h"
 #include "spirv/formfactor_spirv.h" // generated: g_formfactor_spirv[]
 #include "spirv/bounce_spirv.h"     // generated: g_bounce_spirv[]
+#include "spirv/ao_spirv.h"         // generated: g_ao_spirv[]
 
 // vulkan host plumbing for the gpu lighting backend the loader is opened
 // dynamically from the vulkan loader libraries that ship with the gpu
@@ -130,9 +135,15 @@ namespace rad
                 VkDescriptorSetLayout bounce_set_layout = VK_NULL_HANDLE;
                 VkPipelineLayout bounce_pipeline_layout = VK_NULL_HANDLE;
                 VkPipeline bounce_pipeline = VK_NULL_HANDLE;
+                VkDescriptorSetLayout ao_set_layout = VK_NULL_HANDLE;
+                VkPipelineLayout ao_pipeline_layout = VK_NULL_HANDLE;
+                VkPipeline ao_pipeline = VK_NULL_HANDLE;
 
                 bool has_float64 = false;
                 int gather_f32_depth = 0;   // stack depth the cached kernel was built for
+                bool gather_f32_single_style = false;
+                VkPipeline gather_f32_fallback_pipeline = VK_NULL_HANDLE;
+                int gather_f32_fallback_depth = 0;
 
                 std::string name;
                 std::string error;
@@ -749,6 +760,9 @@ namespace rad
                     {32, g_gather_f32_d32_spirv, g_gather_f32_d32_spirv_size, "gather_f32_d32"},
                     {48, g_gather_f32_d48_spirv, g_gather_f32_d48_spirv_size, "gather_f32_d48"},
                     {64, g_gather_f32_d64_spirv, g_gather_f32_d64_spirv_size, "gather_f32_d64"},
+                    {96, g_gather_f32_d96_spirv, g_gather_f32_d96_spirv_size, "gather_f32_d96"},
+                    {128, g_gather_f32_d128_spirv, g_gather_f32_d128_spirv_size, "gather_f32_d128"},
+                    {192, g_gather_f32_d192_spirv, g_gather_f32_d192_spirv_size, "gather_f32_d192"},
                 };
                 for (size_t i = 0; i < sizeof(variants) / sizeof(variants[0]); i++)
                 {
@@ -758,28 +772,59 @@ namespace rad
                 return nullptr;
             }
 
-            bool ensure_gather_pipeline_locked(bool float_normalize, int tree_depth)
+            bool ensure_gather_pipeline_locked(bool float_normalize, int tree_depth, bool single_style)
             {
                 if (float_normalize)
                 {
-                    const gather_variant *v = pick_gather_variant(tree_depth);
+                    // On deep BSP trees (> 32), run the compact d32 kernel first
+                    // (4x smaller per-thread stack -> much higher GPU occupancy)
+                    // and only re-dispatch the rare items that overflow d32 on
+                    // the deep fallback pipeline.
+                    const int fast_depth = tree_depth > 32 ? 32 : tree_depth;
+                    const bool use_s1 = single_style && (fast_depth <= 32);
+                    const gather_variant s1_var = {32, g_gather_f32_s1_d32_spirv, g_gather_f32_s1_d32_spirv_size, "gather_f32_s1_d32"};
+                    const gather_variant *v = use_s1 ? &s1_var : pick_gather_variant(fast_depth);
                     if (!v)
                     {
                         g.error = "gather_begin: bsp tree depth " + std::to_string(tree_depth)
-                            + " exceeds the deepest kernel variant (64)";
+                            + " exceeds the deepest kernel variant (192)";
                         return false;
                     }
-                    if (g.gather_f32_pipeline && g.gather_f32_depth == v->depth)
-                        return true;
-                    // A different depth than the cached one: the pipeline is
-                    // kept for the life of the process, so build the new one.
-                    g.gather_f32_pipeline = VK_NULL_HANDLE;
-                    g.gather_f32_depth = v->depth;
-                    return ensure_descriptor_pool_locked()
-                        && create_compute_pipeline(v->spirv, v->size,
-                                                   11, 32, v->name, g.gather_f32_set_layout,
-                                                   g.gather_f32_pipeline_layout,
-                                                   g.gather_f32_pipeline);
+                    if (!g.gather_f32_pipeline || g.gather_f32_depth != v->depth || g.gather_f32_single_style != use_s1)
+                    {
+                        g.gather_f32_pipeline = VK_NULL_HANDLE;
+                        g.gather_f32_depth = v->depth;
+                        g.gather_f32_single_style = use_s1;
+                        if (!ensure_descriptor_pool_locked()
+                            || !create_compute_pipeline(v->spirv, v->size,
+                                                        11, 32, v->name, g.gather_f32_set_layout,
+                                                        g.gather_f32_pipeline_layout,
+                                                        g.gather_f32_pipeline))
+                            return false;
+                    }
+                    if (tree_depth > 32)
+                    {
+                        const gather_variant *fv = pick_gather_variant(tree_depth);
+                        if (!fv)
+                        {
+                            g.error = "gather_begin: bsp tree depth " + std::to_string(tree_depth)
+                                + " exceeds the deepest kernel variant (192)";
+                            return false;
+                        }
+                        if (!g.gather_f32_fallback_pipeline || g.gather_f32_fallback_depth != fv->depth)
+                        {
+                            g.gather_f32_fallback_pipeline = VK_NULL_HANDLE;
+                            g.gather_f32_fallback_depth = fv->depth;
+                            VkDescriptorSetLayout dummy_set = g.gather_f32_set_layout;
+                            VkPipelineLayout dummy_pl = g.gather_f32_pipeline_layout;
+                            if (!create_compute_pipeline(fv->spirv, fv->size,
+                                                         11, 32, fv->name, dummy_set,
+                                                         dummy_pl,
+                                                         g.gather_f32_fallback_pipeline))
+                                return false;
+                        }
+                    }
+                    return true;
                 }
                 if (g.gather_pipeline)
                     return true;
@@ -971,13 +1016,176 @@ namespace rad
             return true;
         }
 
+        namespace
+        {
+            struct trace_session
+            {
+                bool active = false;
+                VkDescriptorPool pool = VK_NULL_HANDLE;
+                VkDescriptorSet set = VK_NULL_HANDLE;
+                gpu_buffer tnode_buf, segment_buf, result_buf, readback_buf;
+                uint32_t max_segments = 0;
+            };
+            trace_session tsess;
+
+            void trace_end_locked()
+            {
+                tsess.tnode_buf.destroy();
+                tsess.segment_buf.destroy();
+                tsess.result_buf.destroy();
+                tsess.readback_buf.destroy();
+                if (tsess.pool)
+                {
+                    g.fn.DestroyDescriptorPool(g.device, tsess.pool, nullptr);
+                    tsess.pool = VK_NULL_HANDLE;
+                }
+                tsess.set = VK_NULL_HANDLE;
+                tsess.max_segments = 0;
+                tsess.active = false;
+            }
+        }
+
+        bool trace_begin(const std::vector<tnode_gpu> &tnodes, uint32_t max_segments)
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            trace_end_locked();
+            if (!ensure_device_locked() || !ensure_trace_pipeline_locked())
+                return false;
+            if (tnodes.empty() || max_segments == 0)
+            {
+                g.error = "trace_begin: empty input";
+                return false;
+            }
+            const VkDeviceSize seg_size = (VkDeviceSize)max_segments * sizeof(trace_segment);
+            const VkDeviceSize res_size = (VkDeviceSize)max_segments * sizeof(trace_result);
+            bool ok = upload_device_buffer_locked(tsess.tnode_buf, tnodes.data(),
+                                                  tnodes.size() * sizeof(tnode_gpu),
+                                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                  "trace_begin tnodes")
+                && create_host_buffer(tsess.segment_buf, seg_size)
+                && create_buffer(tsess.result_buf, res_size,
+                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false)
+                && create_buffer(tsess.readback_buf, res_size,
+                                 VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                 | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
+            if (!ok)
+            {
+                trace_end_locked();
+                return false;
+            }
+            VkDescriptorPoolSize pool_size = {};
+            pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            pool_size.descriptorCount = 3;
+            VkDescriptorPoolCreateInfo dpci = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+            dpci.maxSets = 1;
+            dpci.poolSizeCount = 1;
+            dpci.pPoolSizes = &pool_size;
+            if (g.fn.CreateDescriptorPool(g.device, &dpci, nullptr, &tsess.pool) != VK_SUCCESS)
+            {
+                g.error = "trace_begin: descriptor pool creation failed";
+                trace_end_locked();
+                return false;
+            }
+            VkDescriptorSetAllocateInfo dsai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            dsai.descriptorPool = tsess.pool;
+            dsai.descriptorSetCount = 1;
+            dsai.pSetLayouts = &g.trace_set_layout;
+            if (g.fn.AllocateDescriptorSets(g.device, &dsai, &tsess.set) != VK_SUCCESS)
+            {
+                g.error = "trace_begin: descriptor set allocation failed";
+                trace_end_locked();
+                return false;
+            }
+            VkDescriptorBufferInfo infos[3] = {
+                {tsess.tnode_buf.buffer, 0, VK_WHOLE_SIZE},
+                {tsess.segment_buf.buffer, 0, VK_WHOLE_SIZE},
+                {tsess.result_buf.buffer, 0, VK_WHOLE_SIZE},
+            };
+            VkWriteDescriptorSet writes[3] = {};
+            for (uint32_t i = 0; i < 3; i++)
+            {
+                writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                writes[i].dstSet = tsess.set;
+                writes[i].dstBinding = i;
+                writes[i].descriptorCount = 1;
+                writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                writes[i].pBufferInfo = &infos[i];
+            }
+            g.fn.UpdateDescriptorSets(g.device, 3, writes, 0, nullptr);
+            tsess.max_segments = max_segments;
+            tsess.active = true;
+            return true;
+        }
+
+        bool trace_run(const trace_segment *segments, size_t count,
+                       std::vector<trace_result> &results)
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            results.clear();
+            if (!tsess.active || count == 0 || count > tsess.max_segments)
+            {
+                g.error = "trace_run: invalid session or count";
+                return false;
+            }
+            const VkDeviceSize res_size = (VkDeviceSize)count * sizeof(trace_result);
+            std::memcpy(tsess.segment_buf.mapped, segments, count * sizeof(trace_segment));
+
+            g.fn.ResetCommandPool(g.device, g.command_pool, 0);
+            VkCommandBufferBeginInfo cbbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            g.fn.BeginCommandBuffer(g.command_buffer, &cbbi);
+            g.fn.CmdBindPipeline(g.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, g.trace_pipeline);
+            g.fn.CmdBindDescriptorSets(g.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                       g.trace_pipeline_layout, 0, 1, &tsess.set, 0, nullptr);
+            const uint32_t n = (uint32_t)count;
+            g.fn.CmdPushConstants(g.command_buffer, g.trace_pipeline_layout,
+                                  VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &n);
+            g.fn.CmdDispatch(g.command_buffer, (n + 63) / 64, 1, 1);
+
+            VkMemoryBarrier to_copy = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            to_copy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            to_copy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            g.fn.CmdPipelineBarrier(g.command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &to_copy, 0, nullptr, 0, nullptr);
+            VkBufferCopy region = {0, 0, res_size};
+            g.fn.CmdCopyBuffer(g.command_buffer, tsess.result_buf.buffer, tsess.readback_buf.buffer, 1, &region);
+            VkMemoryBarrier to_host = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            to_host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            g.fn.CmdPipelineBarrier(g.command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                    VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &to_host, 0, nullptr, 0, nullptr);
+            g.fn.EndCommandBuffer(g.command_buffer);
+
+            g.fn.ResetFences(g.device, 1, &g.fence);
+            VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            submit.commandBufferCount = 1;
+            submit.pCommandBuffers = &g.command_buffer;
+            if (g.fn.QueueSubmit(g.queue, 1, &submit, g.fence) != VK_SUCCESS
+                || g.fn.WaitForFences(g.device, 1, &g.fence, VK_TRUE, ~0ull) != VK_SUCCESS)
+            {
+                g.error = "trace_run: submit or wait failed";
+                return false;
+            }
+            results.resize(count);
+            std::memcpy(results.data(), tsess.readback_buf.mapped, (size_t)res_size);
+            return true;
+        }
+
+        void trace_end()
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            trace_end_locked();
+        }
+
         // ===== resident gather session =====
 
         namespace
         {
             // must cover the deepest root to leaf path of the tnode tree;
             // keep in sync with trace_stack_size in shaders/trace_libglsl
-            constexpr int kernel_trace_stack = 64;
+            constexpr int kernel_trace_stack = 192;
 
             struct gather_session
             {
@@ -989,6 +1197,7 @@ namespace rad
                                           // sky, vis list, face gap, vis range
                 gpu_buffer item_buf, near_buf, result_buf, readback_buf;
                 VkPipeline pipeline = VK_NULL_HANDLE;              // fp64 or f32 variant
+                VkPipeline fallback_pipeline = VK_NULL_HANDLE;     // deep stack retry if d32 overflows
                 VkPipelineLayout pipeline_layout = VK_NULL_HANDLE; // (unowned)
                 uint32_t max_items = 0;
                 uint32_t max_near = 0;
@@ -1107,7 +1316,16 @@ namespace rad
                     + " exceeds the kernel trace stack (" + std::to_string(kernel_trace_stack) + ")";
                 return false;
             }
-            if (!ensure_device_locked() || !ensure_gather_pipeline_locked(float_normalize, depth))
+            bool single_style = true;
+            for (size_t i = 0; i < scene.lights.size(); i++)
+            {
+                if (scene.lights[i].compact_style != 0)
+                {
+                    single_style = false;
+                    break;
+                }
+            }
+            if (!ensure_device_locked() || !ensure_gather_pipeline_locked(float_normalize, depth, single_style))
                 return false;
 
             // per pvs row, the ascending list of lit leaf indices the row can
@@ -1149,11 +1367,11 @@ namespace rad
 
             gsess.max_items = max_chunk_items;
             gsess.max_near = max_chunk_items * 64u + 4096u;
-            gsess.num_lightleafs = (uint32_t)scene.lightleafs.size();
+            gsess.num_lightleafs = scene.studio_box_ofs;
             gsess.sky_lighting_fix = scene.sky_lighting_fix;
             gsess.sky_step_match = scene.sky_step_match;
             gsess.indirect_sun = scene.indirect_sun;
-            gsess.num_sky_normals = (uint32_t)(scene.sky_normals.size() / 4);
+            gsess.num_sky_normals = scene.num_sky_normals ? scene.num_sky_normals : (uint32_t)(scene.sky_normals.size() / 4);
             gsess.light_skip = scene.light_skip;
 
             const VkDeviceSize near_size = 16 + (VkDeviceSize)gsess.max_near * 8;
@@ -1209,6 +1427,7 @@ namespace rad
                 return false;
             }
             gsess.pipeline = float_normalize ? g.gather_f32_pipeline : g.gather_pipeline;
+            gsess.fallback_pipeline = (float_normalize && depth > 32) ? g.gather_f32_fallback_pipeline : VK_NULL_HANDLE;
             gsess.pipeline_layout = float_normalize ? g.gather_f32_pipeline_layout
                                                     : g.gather_pipeline_layout;
             VkDescriptorSetAllocateInfo dsai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
@@ -1348,6 +1567,82 @@ namespace rad
 
             results.resize(count);
             std::memcpy(results.data(), gsess.readback_buf.mapped, (size_t)results_size);
+
+            if (gsess.fallback_pipeline != VK_NULL_HANDLE)
+            {
+                std::vector<uint32_t> retry_idx;
+                for (size_t i = 0; i < count; i++)
+                {
+                    if ((results[i].pad0 & 2u) != 0u)
+                    {
+                        retry_idx.push_back((uint32_t)i);
+                    }
+                }
+                if (!retry_idx.empty())
+                {
+                    std::vector<work_item_gpu> retry_items(retry_idx.size());
+                    for (size_t k = 0; k < retry_idx.size(); k++)
+                    {
+                        retry_items[k] = items[retry_idx[k]];
+                    }
+                    std::memcpy(gsess.item_buf.mapped, retry_items.data(),
+                                retry_items.size() * sizeof(work_item_gpu));
+                    std::memset(gsess.near_buf.mapped, 0, 16);
+                    push.num_items = (uint32_t)retry_items.size();
+                    const VkDeviceSize retry_res_size = (VkDeviceSize)retry_items.size() * sizeof(gather_result_gpu);
+
+                    g.fn.ResetCommandPool(g.device, g.command_pool, 0);
+                    g.fn.BeginCommandBuffer(g.command_buffer, &cbbi);
+                    g.fn.CmdBindPipeline(g.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, gsess.fallback_pipeline);
+                    g.fn.CmdBindDescriptorSets(g.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                               gsess.pipeline_layout, 0, 1, &gsess.set, 0, nullptr);
+                    g.fn.CmdPushConstants(g.command_buffer, gsess.pipeline_layout,
+                                          VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+                    g.fn.CmdDispatch(g.command_buffer, ((uint32_t)retry_items.size() + 63) / 64, 1, 1);
+                    g.fn.CmdPipelineBarrier(g.command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &to_copy, 0, nullptr, 0, nullptr);
+                    VkBufferCopy rregion = {0, 0, retry_res_size};
+                    g.fn.CmdCopyBuffer(g.command_buffer, gsess.result_buf.buffer,
+                                       gsess.readback_buf.buffer, 1, &rregion);
+                    g.fn.CmdPipelineBarrier(g.command_buffer,
+                                            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                            VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &to_host, 0, nullptr, 0, nullptr);
+                    g.fn.EndCommandBuffer(g.command_buffer);
+
+                    g.fn.ResetFences(g.device, 1, &g.fence);
+                    if (g.fn.QueueSubmit(g.queue, 1, &submit, g.fence) != VK_SUCCESS
+                        || g.fn.WaitForFences(g.device, 1, &g.fence, VK_TRUE, ~0ull) != VK_SUCCESS)
+                    {
+                        g.error = "gather_batch: fallback dispatch failed";
+                        return false;
+                    }
+                    const gather_result_gpu *rptr = (const gather_result_gpu *)gsess.readback_buf.mapped;
+                    for (size_t k = 0; k < retry_idx.size(); k++)
+                    {
+                        results[retry_idx[k]] = rptr[k];
+                    }
+                    const uint32_t rnear = *(const uint32_t *)gsess.near_buf.mapped;
+                    if (rnear > 0 && rnear <= gsess.max_near)
+                    {
+                        std::vector<uint8_t> is_retry(count, 0);
+                        for (uint32_t ri : retry_idx) is_retry[ri] = 1;
+                        size_t w = 0;
+                        for (size_t p = 0; p < near_pairs.size(); p++)
+                        {
+                            if (!is_retry[near_pairs[p].item])
+                                near_pairs[w++] = near_pairs[p];
+                        }
+                        near_pairs.resize(w);
+                        const near_pair *rnptr = (const near_pair *)((const unsigned char *)gsess.near_buf.mapped + 16);
+                        for (uint32_t p = 0; p < rnear; p++)
+                        {
+                            near_pair np = rnptr[p];
+                            np.item = retry_idx[np.item];
+                            near_pairs.push_back(np);
+                        }
+                    }
+                }
+            }
             return true;
         }
 
@@ -1764,6 +2059,208 @@ namespace rad
             std::memcpy(results.data(), readback_buf.mapped, (size_t)result_size);
             destroy_buffers();
             return true;
+        }
+
+        namespace
+        {
+            struct ao_session
+            {
+                bool active = false;
+                VkDescriptorPool pool = VK_NULL_HANDLE;
+                VkDescriptorSet set = VK_NULL_HANDLE;
+                gpu_buffer tnode_buf, normal_buf, sample_buf, out_buf, readback_buf;
+                uint32_t max_samples = 0;
+                uint32_t num_normals = 0;
+            };
+            ao_session aosess;
+
+            bool ensure_ao_pipeline_locked()
+            {
+                if (g.ao_pipeline)
+                    return true;
+                return ensure_descriptor_pool_locked()
+                    && create_compute_pipeline(g_ao_spirv, g_ao_spirv_size, 4, 24,
+                                               "ao", g.ao_set_layout,
+                                               g.ao_pipeline_layout, g.ao_pipeline);
+            }
+
+            void ao_end_locked()
+            {
+                aosess.tnode_buf.destroy();
+                aosess.normal_buf.destroy();
+                aosess.sample_buf.destroy();
+                aosess.out_buf.destroy();
+                aosess.readback_buf.destroy();
+                if (aosess.pool)
+                {
+                    g.fn.DestroyDescriptorPool(g.device, aosess.pool, nullptr);
+                    aosess.pool = VK_NULL_HANDLE;
+                }
+                aosess.set = VK_NULL_HANDLE;
+                aosess.max_samples = 0;
+                aosess.num_normals = 0;
+                aosess.active = false;
+            }
+        }
+
+        bool ao_begin(const std::vector<tnode_gpu> &tnodes,
+                      const std::vector<float> &ao_normals,
+                      uint32_t max_samples)
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            ao_end_locked();
+            if (!ensure_device_locked() || !ensure_ao_pipeline_locked())
+                return false;
+            if (tnodes.empty() || ao_normals.empty() || max_samples == 0)
+            {
+                g.error = "ao_begin: empty input";
+                return false;
+            }
+            const VkDeviceSize sample_size = (VkDeviceSize)max_samples * sizeof(ao_sample);
+            const VkDeviceSize out_size = (VkDeviceSize)max_samples * sizeof(float);
+            bool ok = upload_device_buffer_locked(aosess.tnode_buf, tnodes.data(),
+                                                  tnodes.size() * sizeof(tnode_gpu),
+                                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                  "ao_begin tnodes")
+                && upload_device_buffer_locked(aosess.normal_buf, ao_normals.data(),
+                                               ao_normals.size() * sizeof(float),
+                                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                               "ao_begin normals")
+                && create_host_buffer(aosess.sample_buf, sample_size)
+                && create_buffer(aosess.out_buf, out_size,
+                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false)
+                && create_buffer(aosess.readback_buf, out_size,
+                                 VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                 | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
+            if (!ok)
+            {
+                ao_end_locked();
+                return false;
+            }
+            VkDescriptorPoolSize pool_size = {};
+            pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            pool_size.descriptorCount = 4;
+            VkDescriptorPoolCreateInfo dpci = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+            dpci.maxSets = 1;
+            dpci.poolSizeCount = 1;
+            dpci.pPoolSizes = &pool_size;
+            if (g.fn.CreateDescriptorPool(g.device, &dpci, nullptr, &aosess.pool) != VK_SUCCESS)
+            {
+                g.error = "ao_begin: descriptor pool creation failed";
+                ao_end_locked();
+                return false;
+            }
+            VkDescriptorSetAllocateInfo dsai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            dsai.descriptorPool = aosess.pool;
+            dsai.descriptorSetCount = 1;
+            dsai.pSetLayouts = &g.ao_set_layout;
+            if (g.fn.AllocateDescriptorSets(g.device, &dsai, &aosess.set) != VK_SUCCESS)
+            {
+                g.error = "ao_begin: descriptor set allocation failed";
+                ao_end_locked();
+                return false;
+            }
+            VkDescriptorBufferInfo infos[4] = {
+                {aosess.tnode_buf.buffer, 0, VK_WHOLE_SIZE},
+                {aosess.normal_buf.buffer, 0, VK_WHOLE_SIZE},
+                {aosess.sample_buf.buffer, 0, VK_WHOLE_SIZE},
+                {aosess.out_buf.buffer, 0, VK_WHOLE_SIZE},
+            };
+            VkWriteDescriptorSet writes[4] = {};
+            for (uint32_t i = 0; i < 4; i++)
+            {
+                writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                writes[i].dstSet = aosess.set;
+                writes[i].dstBinding = i;
+                writes[i].descriptorCount = 1;
+                writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                writes[i].pBufferInfo = &infos[i];
+            }
+            g.fn.UpdateDescriptorSets(g.device, 4, writes, 0, nullptr);
+            aosess.max_samples = max_samples;
+            aosess.num_normals = (uint32_t)(ao_normals.size() / 4);
+            aosess.active = true;
+            return true;
+        }
+
+        bool ao_run(const ao_sample *samples, size_t count,
+                    float ao_scale, float ao_gain, float ao_opacity, float ao_minweight,
+                    std::vector<float> &alphas)
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            alphas.clear();
+            if (!aosess.active || count == 0 || count > aosess.max_samples)
+            {
+                g.error = "ao_run: invalid session or count";
+                return false;
+            }
+            struct ao_push
+            {
+                uint32_t num_samples;
+                uint32_t num_normals;
+                float ao_scale;
+                float ao_gain;
+                float ao_opacity;
+                float ao_minweight;
+            } push = {
+                (uint32_t)count,
+                aosess.num_normals,
+                ao_scale,
+                ao_gain,
+                ao_opacity,
+                ao_minweight,
+            };
+            static_assert(sizeof(ao_push) == 24, "must match ao.comp Params");
+
+            const VkDeviceSize out_size = (VkDeviceSize)count * sizeof(float);
+            std::memcpy(aosess.sample_buf.mapped, samples, count * sizeof(ao_sample));
+
+            g.fn.ResetCommandPool(g.device, g.command_pool, 0);
+            VkCommandBufferBeginInfo cbbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            g.fn.BeginCommandBuffer(g.command_buffer, &cbbi);
+            g.fn.CmdBindPipeline(g.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, g.ao_pipeline);
+            g.fn.CmdBindDescriptorSets(g.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                       g.ao_pipeline_layout, 0, 1, &aosess.set, 0, nullptr);
+            g.fn.CmdPushConstants(g.command_buffer, g.ao_pipeline_layout,
+                                  VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+            g.fn.CmdDispatch(g.command_buffer, ((uint32_t)count + 63) / 64, 1, 1);
+
+            VkMemoryBarrier to_copy = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            to_copy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            to_copy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            g.fn.CmdPipelineBarrier(g.command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &to_copy, 0, nullptr, 0, nullptr);
+            VkBufferCopy region = {0, 0, out_size};
+            g.fn.CmdCopyBuffer(g.command_buffer, aosess.out_buf.buffer, aosess.readback_buf.buffer, 1, &region);
+            VkMemoryBarrier to_host = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            to_host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            g.fn.CmdPipelineBarrier(g.command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                    VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &to_host, 0, nullptr, 0, nullptr);
+            g.fn.EndCommandBuffer(g.command_buffer);
+
+            g.fn.ResetFences(g.device, 1, &g.fence);
+            VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            submit.commandBufferCount = 1;
+            submit.pCommandBuffers = &g.command_buffer;
+            if (g.fn.QueueSubmit(g.queue, 1, &submit, g.fence) != VK_SUCCESS
+                || g.fn.WaitForFences(g.device, 1, &g.fence, VK_TRUE, ~0ull) != VK_SUCCESS)
+            {
+                g.error = "ao_run: submit or wait failed";
+                return false;
+            }
+            alphas.resize(count);
+            std::memcpy(alphas.data(), aosess.readback_buf.mapped, (size_t)out_size);
+            return true;
+        }
+
+        void ao_end()
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            ao_end_locked();
         }
     }
 }

@@ -116,7 +116,7 @@ layout(std430, set = 0, binding = 10) readonly buffer VisLeafRangeBuffer { uint 
 layout(push_constant) uniform Params
 {
     uint numItems;
-    uint numLightLeafs;  // unused and kept for layout stability
+    uint studioBoxOfs;   // offset into faceGap[] where (count, globalAABB, modelAABBs...) live (0 = none)
     uint skyLightingFix; // optionssky_lighting_fix
     int skyStepMatch;    // 1 when softsky or fastmode, else 0
     float indirectSun;   // optionsindirect_sun
@@ -124,6 +124,201 @@ layout(push_constant) uniform Params
     uint lightSkipBits;  // float bits: a light adding less than this gets no shadow ray (0 = trace all)
     uint numSkyNormals;  // of the active sky level
 };
+
+bool segHitsAABB(float sx, float sy, float sz, float ex, float ey, float ez, uint base)
+{
+    float minX = faceGap[base + 0u];
+    float minY = faceGap[base + 1u];
+    float minZ = faceGap[base + 2u];
+    float maxX = faceGap[base + 3u];
+    float maxY = faceGap[base + 4u];
+    float maxZ = faceGap[base + 5u];
+
+    float tmin = 0.0;
+    float tmax = 1.0;
+
+    float dx = ex - sx;
+    if (abs(dx) < 1e-8)
+    {
+        if (sx < minX || sx > maxX) return false;
+    }
+    else
+    {
+        float inv = 1.0 / dx;
+        float t0 = (minX - sx) * inv;
+        float t1 = (maxX - sx) * inv;
+        tmin = max(tmin, min(t0, t1));
+        tmax = min(tmax, max(t0, t1));
+        if (tmin > tmax) return false;
+    }
+
+    float dy = ey - sy;
+    if (abs(dy) < 1e-8)
+    {
+        if (sy < minY || sy > maxY) return false;
+    }
+    else
+    {
+        float inv = 1.0 / dy;
+        float t0 = (minY - sy) * inv;
+        float t1 = (maxY - sy) * inv;
+        tmin = max(tmin, min(t0, t1));
+        tmax = min(tmax, max(t0, t1));
+        if (tmin > tmax) return false;
+    }
+
+    float dz = ez - sz;
+    if (abs(dz) < 1e-8)
+    {
+        if (sz < minZ || sz > maxZ) return false;
+    }
+    else
+    {
+        float inv = 1.0 / dz;
+        float t0 = (minZ - sz) * inv;
+        float t1 = (maxZ - sz) * inv;
+        tmin = max(tmin, min(t0, t1));
+        tmax = min(tmax, max(t0, t1));
+        if (tmin > tmax) return false;
+    }
+    return true;
+}
+
+const float STUDIO_BARY_EPSILON = 0.01;
+const float STUDIO_COPLANAR_EPSILON = 0.25;
+const float STUDIO_NEAR_SHADOW_EPSILON = 1.5;
+
+// Returns: 0 = clear, 1 = hit opaque studio triangle, -1 = hit alpha-tested model AABB (CPU fallback)
+int traceStudio(float sx, float sy, float sz, float ex, float ey, float ez)
+{
+    if (studioBoxOfs == 0u)
+        return 0;
+    // Global union AABB early-out (at studioBoxOfs + 3)
+    if (!segHitsAABB(sx, sy, sz, ex, ey, ez, studioBoxOfs + 3u))
+        return 0;
+
+    float dx = ex - sx;
+    float dy = ey - sy;
+    float dz = ez - sz;
+    float traceDist = sqrt(dx * dx + dy * dy + dz * dz);
+    if (traceDist <= STUDIO_NEAR_SHADOW_EPSILON)
+        return 0;
+    float invDist = 1.0 / traceDist;
+    float rdx = dx * invDist;
+    float rdy = dy * invDist;
+    float rdz = dz * invDist;
+
+    uint nmodels = floatBitsToUint(faceGap[studioBoxOfs + 0u]);
+    uint nodesOfs = floatBitsToUint(faceGap[studioBoxOfs + 1u]);
+    uint trisOfs = floatBitsToUint(faceGap[studioBoxOfs + 2u]);
+
+    uint stack[24];
+    for (uint m = 0u; m < nmodels; m++)
+    {
+        uint mbase = studioBoxOfs + 9u + m * 12u;
+        if (!segHitsAABB(sx, sy, sz, ex, ey, ez, mbase))
+            continue;
+
+        float lsr2 = faceGap[mbase + 9u];
+        if (lsr2 > 0.0)
+        {
+            float lsx = faceGap[mbase + 6u];
+            float lsy = faceGap[mbase + 7u];
+            float lsz = faceGap[mbase + 8u];
+            float dsx = sx - lsx, dsy = sy - lsy, dsz = sz - lsz;
+            float dex = ex - lsx, dey = ey - lsy, dez = ez - lsz;
+            if (dsx * dsx + dsy * dsy + dsz * dsz < lsr2 || dex * dex + dey * dey + dez * dez < lsr2)
+                continue;
+        }
+
+        uint rootNode = floatBitsToUint(faceGap[mbase + 10u]);
+        if (rootNode == 0xFFFFFFFEu)
+            continue;
+        if (rootNode == 0xFFFFFFFFu)
+            return -1;
+
+        int sp = 0;
+        stack[sp++] = rootNode;
+        while (sp > 0)
+        {
+            uint nidx = stack[--sp];
+            uint nbase = nodesOfs + nidx * 8u;
+            if (!segHitsAABB(sx, sy, sz, ex, ey, ez, nbase))
+                continue;
+
+            uint raw6 = floatBitsToUint(faceGap[nbase + 6u]);
+            uint raw7 = floatBitsToUint(faceGap[nbase + 7u]);
+            if ((raw6 & 0x80000000u) != 0u)
+            {
+                uint firstTri = raw6 & 0x7FFFFFFFu;
+                for (uint t = firstTri; t < firstTri + raw7; t++)
+                {
+                    uint tbase = trisOfs + t * 10u;
+                    float v0x = faceGap[tbase + 0u], v0y = faceGap[tbase + 1u], v0z = faceGap[tbase + 2u];
+                    float e1x = faceGap[tbase + 3u], e1y = faceGap[tbase + 4u], e1z = faceGap[tbase + 5u];
+                    float e2x = faceGap[tbase + 6u], e2y = faceGap[tbase + 7u], e2z = faceGap[tbase + 8u];
+
+                    // pvec = cross(dir, e2)
+                    float px = rdy * e2z - rdz * e2y;
+                    float py = rdz * e2x - rdx * e2z;
+                    float pz = rdx * e2y - rdy * e2x;
+                    float det = e1x * px + e1y * py + e1z * pz;
+                    if (abs(det) < STUDIO_COPLANAR_EPSILON)
+                        continue;
+
+                    float invDet = 1.0 / det;
+                    float tx = sx - v0x;
+                    float ty = sy - v0y;
+                    float tz = sz - v0z;
+                    float u = (tx * px + ty * py + tz * pz) * invDet;
+                    if (u < -STUDIO_BARY_EPSILON || u > (1.0 + STUDIO_BARY_EPSILON))
+                        continue;
+
+                    // qvec = cross(tvec, e1)
+                    float qx = ty * e1z - tz * e1y;
+                    float qy = tz * e1x - tx * e1z;
+                    float qz = tx * e1y - ty * e1x;
+                    float v = (rdx * qx + rdy * qy + rdz * qz) * invDet;
+                    if (v < -STUDIO_BARY_EPSILON || (u + v) > (1.0 + STUDIO_BARY_EPSILON))
+                        continue;
+
+                    float depth = (e2x * qx + e2y * qy + e2z * qz) * invDet;
+                    if (depth > STUDIO_NEAR_SHADOW_EPSILON && depth < traceDist)
+                    {
+                        uint alphaMeta = floatBitsToUint(faceGap[tbase + 9u]);
+                        if (alphaMeta == 0u)
+                            return 1;
+                        if (u < -0.0001 || u > 1.0001 || v < -0.0001 || (u + v) > 1.0001)
+                            continue;
+                        float w = 1.0 - (u + v);
+                        float s = w * faceGap[alphaMeta + 0u] + u * faceGap[alphaMeta + 2u] + v * faceGap[alphaMeta + 4u];
+                        float tt = w * faceGap[alphaMeta + 1u] + u * faceGap[alphaMeta + 3u] + v * faceGap[alphaMeta + 5u];
+                        s = s - floor(s);
+                        tt = tt - floor(tt);
+                        int texW = int(floatBitsToUint(faceGap[alphaMeta + 6u]));
+                        int texH = int(floatBitsToUint(faceGap[alphaMeta + 7u]));
+                        uint bitsOfs = floatBitsToUint(faceGap[alphaMeta + 8u]);
+                        int is = clamp(int(s * float(texW)), 0, texW - 1);
+                        int it = clamp(int(tt * float(texH)), 0, texH - 1);
+                        uint pIdx = uint(it * texW + is);
+                        uint word = floatBitsToUint(faceGap[bitsOfs + (pIdx >> 5u)]);
+                        if ((word & (1u << (pIdx & 31u))) != 0u)
+                            return 1;
+                    }
+                }
+            }
+            else
+            {
+                if (sp + 2 <= 24)
+                {
+                    stack[sp++] = raw6;
+                    stack[sp++] = raw7;
+                }
+            }
+        }
+    }
+    return 0;
+}
 
 #ifdef FLOAT_NORMALIZE
 // float normalization using float square root and division
@@ -171,7 +366,14 @@ void main()
     WorkItem item = items[idx];
     bool diversify = (item.conePower != 1.0 || item.coneScale != 1.0);
     bool skyUsed = false;
+    int anyOverflow = 0;
 
+#ifdef SINGLE_STYLE
+    float adds0X = 0.0;
+    float adds0Y = 0.0;
+    float adds0Z = 0.0;
+    uint touched = 0u;
+#else
     float addsX[MAX_COMPACT_STYLES];
     float addsY[MAX_COMPACT_STYLES];
     float addsZ[MAX_COMPACT_STYLES];
@@ -182,6 +384,7 @@ void main()
         addsY[s] = 0.0;
         addsZ[s] = 0.0;
     }
+#endif
 
     int discard1;
     float sink1, sink2, sink3;
@@ -208,10 +411,14 @@ void main()
                         continue;
                     skyUsed = true;
                 }
-                // sun
+                // sun (with 13-probe adaptive cone early-out for spread suns)
                 if (item.step == L.topatch
                     && (L.ix != 0.0 || L.iy != 0.0 || L.iz != 0.0))
                 {
+                    bool useProbe = (L.sunCount > 16);
+                    int probeTested = 0;
+                    int probeHits = 0;
+                    bool probeAllSky = false;
                     for (int j = 0; j < L.sunCount; j++)
                     {
                         float snx = sunNormals[(L.sunOfs + j) * 4 + 0];
@@ -221,21 +428,74 @@ void main()
                         float dot1 = -(item.nx * snx + item.ny * sny + item.nz * snz);
                         if (dot1 <= NORMAL_EPSILON)
                             continue;
-                        float dxr = item.px + snx * -BOGUS_RANGE;
-                        float dyr = item.py + sny * -BOGUS_RANGE;
-                        float dzr = item.pz + snz * -BOGUS_RANGE;
-                        int tf = 0;
-                        if (traceLine(item.px, item.py, item.pz, dxr, dyr, dzr,
-                                      sink1, sink2, sink3, tf) != CONTENTS_SKY)
-                            continue;
+                        if (!probeAllSky)
+                        {
+                            float dxr = item.px + snx * -BOGUS_RANGE;
+                            float dyr = item.py + sny * -BOGUS_RANGE;
+                            float dzr = item.pz + snz * -BOGUS_RANGE;
+                            int tf = 0;
+                            int tr = traceLine(item.px, item.py, item.pz, dxr, dyr, dzr,
+                                               sink1, sink2, sink3, tf);
+                            anyOverflow |= (tf & TRACE_FLAG_STACK_OVERFLOW);
+                            bool hitSky = (tr == CONTENTS_SKY);
+                            if (hitSky && studioBoxOfs != 0u)
+                            {
+                                int st = traceStudio(item.px, item.py, item.pz, sink1, sink2, sink3);
+                                if (st < 0)
+                                {
+                                    results[idx].touched = 0u;
+                                    results[idx].pad0 = 4u;
+                                    return;
+                                }
+                                if (st > 0)
+                                    hitSky = false;
+                            }
+                            if (useProbe && j < 13)
+                            {
+                                probeTested++;
+                                if (hitSky)
+                                    probeHits++;
+                                if (j == 12 && probeTested == 13)
+                                {
+                                    if (probeHits == 0)
+                                        break;
+                                    if (probeHits == 13)
+                                        probeAllSky = true;
+                                }
+                            }
+                            if (!hitSky)
+                                continue;
+                        }
+                        else if (studioBoxOfs != 0u)
+                        {
+                            float dxr = item.px + snx * -BOGUS_RANGE;
+                            float dyr = item.py + sny * -BOGUS_RANGE;
+                            float dzr = item.pz + snz * -BOGUS_RANGE;
+                            int st = traceStudio(item.px, item.py, item.pz, dxr, dyr, dzr);
+                            if (st < 0)
+                            {
+                                results[idx].touched = 0u;
+                                results[idx].pad0 = 4u;
+                                return;
+                            }
+                            if (st > 0)
+                                continue;
+                        }
                         if (diversify)
                             dot1 = item.coneScale * pow(dot1, item.conePower);
                         float scale = dot1 * weight;
+#ifdef SINGLE_STYLE
+                        adds0X += L.ix * scale;
+                        adds0Y += L.iy * scale;
+                        adds0Z += L.iz * scale;
+                        touched = 1u;
+#else
                         int s = L.compactStyle;
                         addsX[s] += L.ix * scale;
                         addsY[s] += L.iy * scale;
                         addsZ[s] += L.iz * scale;
                         touched |= 1u << uint(s);
+#endif
                     }
                 }
                 // sky diffuse
@@ -245,8 +505,29 @@ void main()
                          && abs(L.di2x) <= EQUAL_EPSILON && abs(L.di2y) <= EQUAL_EPSILON
                          && abs(L.di2z) <= EQUAL_EPSILON))
                 {
+                    bool useCoarse = (numSkyNormals > 258u);
+                    uint coarseSky[9];
+                    uint coarseBlk[9];
+                    if (useCoarse)
+                    {
+                        for (int ci = 0; ci < 9; ci++)
+                        {
+                            coarseSky[ci] = 0u;
+                            coarseBlk[ci] = 0u;
+                        }
+                    }
+                    int coarseTested = 0;
+                    int coarseHits = 0;
+                    bool allCoarseSky = false;
                     for (uint j = 0u; j < numSkyNormals; j++)
                     {
+                        if (useCoarse && j == 258u)
+                        {
+                            if (coarseTested > 0 && coarseHits == 0)
+                                break;
+                            if (coarseTested > 0 && coarseHits == coarseTested)
+                                allCoarseSky = true;
+                        }
                         float snx = skyNormals[j * 4u + 0u];
                         float sny = skyNormals[j * 4u + 1u];
                         float snz = skyNormals[j * 4u + 2u];
@@ -254,13 +535,83 @@ void main()
                         float dot1 = -(item.nx * snx + item.ny * sny + item.nz * snz);
                         if (dot1 <= NORMAL_EPSILON)
                             continue;
-                        float dxr = item.px + snx * -BOGUS_RANGE;
-                        float dyr = item.py + sny * -BOGUS_RANGE;
-                        float dzr = item.pz + snz * -BOGUS_RANGE;
-                        int tf = 0;
-                        if (traceLine(item.px, item.py, item.pz, dxr, dyr, dzr,
-                                      sink1, sink2, sink3, tf) != CONTENTS_SKY)
-                            continue;
+                        bool needTrace = true;
+                        if (allCoarseSky)
+                        {
+                            needTrace = false;
+                        }
+                        else if (useCoarse && j >= 258u)
+                        {
+                            uint p = floatBitsToUint(skyNormals[numSkyNormals * 4u + j]);
+                            uint v0 = p & 511u;
+                            uint v1 = (p >> 9u) & 511u;
+                            uint v2 = (p >> 18u) & 511u;
+                            if (((coarseSky[v0 >> 5u] & (1u << (v0 & 31u))) != 0u)
+                                && ((coarseSky[v1 >> 5u] & (1u << (v1 & 31u))) != 0u)
+                                && ((coarseSky[v2 >> 5u] & (1u << (v2 & 31u))) != 0u))
+                            {
+                                needTrace = false;
+                            }
+                            else if (((coarseBlk[v0 >> 5u] & (1u << (v0 & 31u))) != 0u)
+                                && ((coarseBlk[v1 >> 5u] & (1u << (v1 & 31u))) != 0u)
+                                && ((coarseBlk[v2 >> 5u] & (1u << (v2 & 31u))) != 0u))
+                            {
+                                continue;
+                            }
+                        }
+                        if (needTrace)
+                        {
+                            float dxr = item.px + snx * -BOGUS_RANGE;
+                            float dyr = item.py + sny * -BOGUS_RANGE;
+                            float dzr = item.pz + snz * -BOGUS_RANGE;
+                            int tf = 0;
+                            int tr = traceLine(item.px, item.py, item.pz, dxr, dyr, dzr,
+                                               sink1, sink2, sink3, tf);
+                            anyOverflow |= (tf & TRACE_FLAG_STACK_OVERFLOW);
+                            bool hitSky = (tr == CONTENTS_SKY);
+                            if (hitSky && studioBoxOfs != 0u)
+                            {
+                                int st = traceStudio(item.px, item.py, item.pz, sink1, sink2, sink3);
+                                if (st < 0)
+                                {
+                                    results[idx].touched = 0u;
+                                    results[idx].pad0 = 4u;
+                                    return;
+                                }
+                                if (st > 0)
+                                    hitSky = false;
+                            }
+                            if (useCoarse && j < 258u)
+                            {
+                                coarseTested++;
+                                if (hitSky)
+                                {
+                                    coarseHits++;
+                                    coarseSky[j >> 5u] |= (1u << (j & 31u));
+                                }
+                                else
+                                {
+                                    coarseBlk[j >> 5u] |= (1u << (j & 31u));
+                                }
+                            }
+                            if (!hitSky)
+                                continue;
+                        }
+                        else if (studioBoxOfs != 0u)
+                        {
+                            float dxr = item.px + snx * -BOGUS_RANGE;
+                            float dyr = item.py + sny * -BOGUS_RANGE;
+                            float dzr = item.pz + snz * -BOGUS_RANGE;
+                            int st = traceStudio(item.px, item.py, item.pz, dxr, dyr, dzr);
+                            if (st < 0)
+                            {
+                                results[idx].touched = 0u;
+                                results[idx].pad0 = 4u;
+                                return;
+                            }
+                            if (st > 0)
+                                continue;
+                        }
                         float x = (1.0 - (L.nx * snx + L.ny * sny + L.nz * snz)) / 2.0;
                         float factor = clamp(x, 0.0, 1.0);
                         float six = L.dix * (1.0 - factor) + factor * L.di2x;
@@ -272,11 +623,18 @@ void main()
                         siz *= s2;
                         if (diversify)
                             dot1 = item.coneScale * pow(dot1, item.conePower);
+#ifdef SINGLE_STYLE
+                        adds0X += six * dot1;
+                        adds0Y += siy * dot1;
+                        adds0Z += siz * dot1;
+                        touched = 1u;
+#else
                         int s = L.compactStyle;
                         addsX[s] += six * dot1;
                         addsY[s] += siy * dot1;
                         addsZ[s] += siz * dot1;
                         touched |= 1u << uint(s);
+#endif
                     }
                 }
                 continue;
@@ -410,26 +768,53 @@ void main()
                 continue;
 
             int tf = 0;
-            if (traceLine(item.px, item.py, item.pz, L.ox, L.oy, L.oz,
-                          sink1, sink2, sink3, tf) != CONTENTS_EMPTY)
+            int tr = traceLine(item.px, item.py, item.pz, L.ox, L.oy, L.oz,
+                               sink1, sink2, sink3, tf);
+            anyOverflow |= (tf & TRACE_FLAG_STACK_OVERFLOW);
+            if (tr != CONTENTS_EMPTY)
                 continue;
+            if (studioBoxOfs != 0u)
+            {
+                int st = traceStudio(item.px, item.py, item.pz, L.ox, L.oy, L.oz);
+                if (st < 0)
+                {
+                    results[idx].touched = 0u;
+                    results[idx].pad0 = 4u;
+                    return;
+                }
+                if (st > 0)
+                    continue;
+            }
 
+#ifdef SINGLE_STYLE
+            adds0X += addX;
+            adds0Y += addY;
+            adds0Z += addZ;
+            touched = 1u;
+#else
             int s = L.compactStyle;
             addsX[s] += addX;
             addsY[s] += addY;
             addsZ[s] += addZ;
             touched |= 1u << uint(s);
+#endif
         }
     }
 
+#ifdef SINGLE_STYLE
+    results[idx].adds[0] = adds0X;
+    results[idx].adds[1] = adds0Y;
+    results[idx].adds[2] = adds0Z;
+#else
     for (int s = 0; s < MAX_COMPACT_STYLES; s++)
     {
         results[idx].adds[s * 3 + 0] = addsX[s];
         results[idx].adds[s * 3 + 1] = addsY[s];
         results[idx].adds[s * 3 + 2] = addsZ[s];
     }
+#endif
     results[idx].touched = touched;
-    results[idx].pad0 = 0u;
+    results[idx].pad0 = uint(anyOverflow);
     results[idx].pad1 = 0u;
     results[idx].pad2 = 0u;
 }
