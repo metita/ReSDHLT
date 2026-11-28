@@ -2643,11 +2643,19 @@ void BuildDiffuseNormals ()
 //  Sky reachability
 //      A luxel deep inside a building still fires one ray per sky normal - 4098
 //      of them at -skylevel 6 - and every one of them comes back occluded. The
-//      PVS already knows better: a ray reaches sky only by crossing the leaf the
-//      sky face belongs to, so if no such leaf is in the sample's PVS, no
-//      straight line from the sample reaches sky. PVS is conservative (a
-//      superset of what is really visible), so a negative answer here cannot
-//      darken anything that would otherwise be lit.
+//      PVS already knows better: a ray reaches sky only by leaving a leaf next
+//      to a sky brush, so if no such leaf is in the sample's PVS, no straight
+//      line from the sample reaches sky. PVS is conservative (a superset of
+//      what is really visible), so a negative answer here cannot darken
+//      anything that would otherwise be lit.
+//
+//      A leaf is next to sky when it holds a sky face, or when its bounds touch
+//      a CONTENTS_SKY leaf. The faces alone miss env_sky brushes: they are
+//      CONTENTS_SKY, but BSP writes no face for them, so the leaves beside them
+//      hold none. Leaves that share a portal have touching bounds (the bounds
+//      are the leaf volumes, cut to whole units, hence the epsilon); a leaf that
+//      only touches at an edge or a corner comes along too, which costs rays,
+//      never light.
 //
 //      Sky-touching leaves are few, so they are kept as a list of bit indices
 //      and tested one by one instead of scanning the whole PVS.
@@ -2656,6 +2664,20 @@ static int*     g_skyleaves = NULL;     // pvs bit index of each sky-touching le
 static int      g_numskyleaves = 0;
 static bool     g_skyleaves_usable = false;
 
+#define SKY_LEAF_BOUNDS_EPSILON 2       // units: the dleaf_t bounds are cut to whole units
+
+static bool     LeafBoundsTouch(const dleaf_t* const a, const dleaf_t* const b)
+{
+	for (int k = 0; k < 3; k++)
+	{
+		if (a->mins[k] > b->maxs[k] + SKY_LEAF_BOUNDS_EPSILON || b->mins[k] > a->maxs[k] + SKY_LEAF_BOUNDS_EPSILON)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 void            BuildSkyLeafList()
 {
 	g_skyleaves_usable = false;
@@ -2663,6 +2685,16 @@ void            BuildSkyLeafList()
 	free (g_skyleaves);
 	g_skyleaves = (int *)malloc (qmax (1, g_dmodels[0].visleafs) * sizeof (int));
 	hlassume (g_skyleaves != NULL, assume_NoMemory);
+
+	// The sky brushes' leaves, for the bounds test
+	std::vector<const dleaf_t*> skyleafs;
+	for (int leafnum = 1; leafnum < g_numleafs; leafnum++)
+	{
+		if (g_dleafs[leafnum].contents == CONTENTS_SKY)
+		{
+			skyleafs.push_back (&g_dleafs[leafnum]);
+		}
+	}
 
 	// Leaf 0 is the solid outside; visleaf n is g_dleafs[n + 1], and its bit in
 	// a decompressed PVS is n.
@@ -2681,14 +2713,19 @@ void            BuildSkyLeafList()
 			}
 		}
 
+		for (size_t i = 0; i < skyleafs.size () && !touches_sky; i++)
+		{
+			touches_sky = LeafBoundsTouch (leaf, skyleafs[i]);
+		}
+
 		if (touches_sky)
 		{
 			g_skyleaves[g_numskyleaves++] = leafnum - 1;
 		}
 	}
 
-	// Finding no sky face at all means either a map with no sky, where skipping
-	// every sky ray would be correct, or a map this detection did not
+	// Finding no leaf next to sky means either a map with no sky, where
+	// skipping every sky ray would be correct, or a map this detection did not
 	// understand. A black map is not worth that bet: the optimisation switches
 	// itself off instead.
 	g_skyleaves_usable = (g_numskyleaves > 0);
